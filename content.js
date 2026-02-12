@@ -276,6 +276,16 @@ function fillInputByType(input, value) {
 
   // Text inputs (text, email, tel, number, url, search, password)
   if (tagName === 'input' && ['text', 'email', 'tel', 'number', 'url', 'search', 'password'].includes(type)) {
+    // Detect split IBAN / RIB fields: if value overflows maxLength AND the input
+    // name ends with a number pattern, distribute across numbered siblings.
+    const stripped = value.replace(/\s/g, '');
+    if (input.maxLength > 0 && stripped.length > input.maxLength) {
+      const splitCount = trySplitAcrossNumberedInputs(input, stripped);
+      if (splitCount > 0) {
+        return true;
+      }
+    }
+
     input.value = value;
     triggerInputEvents(input);
     return true;
@@ -396,6 +406,85 @@ function fillInputByType(input, value) {
   // Unsupported type
   console.warn(`NoHands: Unsupported input type: ${tagName} (${type})`);
   return false;
+}
+
+/**
+ * Split a long value (e.g. IBAN) across numbered sibling inputs.
+ *
+ * Given an input whose name contains a trailing number (e.g.
+ * "body:x:tabc:x:tabCarac:x:txtIBAN1:x:txtIBAN1"), this function:
+ *  1. Detects the number suffix in the name
+ *  2. Finds sibling inputs with incrementing numbers (…IBAN2, …IBAN3, etc.)
+ *  3. Distributes the value in chunks matching each input's maxLength
+ *
+ * It handles ASP.NET-style names where the number appears multiple times in
+ * the name (e.g. txtIBAN1:x:txtIBAN1 → txtIBAN2:x:txtIBAN2).
+ *
+ * @param {HTMLInputElement} firstInput - The first input in the series
+ * @param {string} stripped - The value with spaces removed
+ * @returns {number} Number of inputs filled (0 if pattern not detected)
+ */
+function trySplitAcrossNumberedInputs(firstInput, stripped) {
+  const name = firstInput.getAttribute('name') || '';
+
+  // Find the trailing number at the very end of the name
+  const endMatch = name.match(/(\d+)$/);
+  if (!endMatch) return 0;
+
+  const startNum = parseInt(endMatch[1], 10);
+  const numStr = endMatch[1]; // preserve original string (e.g. "1", "01")
+
+  // Build a function that generates sibling names by replacing ALL occurrences
+  // of the same number in the name. This handles ASP.NET patterns like:
+  //   txtIBAN1:x:txtIBAN1 → txtIBAN2:x:txtIBAN2
+  // We create a regex that replaces the number when preceded by the same prefix
+  // letters (e.g. "IBAN") to avoid replacing unrelated numbers.
+
+  // Strategy: replace the number globally wherever it appears as the same
+  // "word+number" token. We find what immediately precedes the final number.
+  const prefixLetters = name.slice(0, endMatch.index).match(/([A-Za-z_]+)$/);
+  let makeName;
+
+  if (prefixLetters) {
+    // Replace all occurrences of e.g. "IBAN1" with "IBAN2"
+    const token = prefixLetters[1] + numStr;
+    makeName = (n) => {
+      const newToken = prefixLetters[1] + n;
+      return name.split(token).join(newToken);
+    };
+  } else {
+    // Fallback: just replace trailing number
+    const beforeNum = name.slice(0, endMatch.index);
+    makeName = (n) => beforeNum + n;
+  }
+
+  // Collect all numbered inputs in sequence
+  const inputs = [];
+  for (let n = startNum; ; n++) {
+    const candidateName = makeName(n);
+    const el = document.querySelector(`[name="${candidateName}"]`);
+    if (!el) break;
+    inputs.push(el);
+  }
+
+  if (inputs.length < 2) return 0;
+
+  // Distribute the stripped value across all inputs using each one's maxLength
+  let offset = 0;
+  let filledCount = 0;
+
+  for (const inp of inputs) {
+    if (offset >= stripped.length) break;
+    const len = inp.maxLength > 0 ? inp.maxLength : (stripped.length - offset);
+    const chunk = stripped.slice(offset, offset + len);
+    inp.value = chunk;
+    triggerInputEvents(inp);
+    offset += len;
+    filledCount++;
+  }
+
+  console.log(`NoHands: Split value across ${filledCount} numbered inputs starting from "${name}"`);
+  return filledCount;
 }
 
 /**
