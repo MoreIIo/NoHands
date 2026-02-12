@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NoHands - Excel Data Formatter</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Better Clipboard</h1>
+      <p class="subtitle">Copiez et collez vos données Excel formatées.</p>
+    </header>
+
+    <main>
+      <!-- Persistent action bar (top) -->
+      <div class="action-bar">
+        <button id="fillButton" class="fill-btn" title="Remplir le formulaire" disabled>
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M5 12h14"></path>
+            <path d="m12 5 7 7-7 7"></path>
+          </svg>
+          Remplir le formulaire
+        </button>
+        <button id="configButton" class="config-btn" title="Configurer le mapping des champs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+            <circle cx="12" cy="12" r="3"></circle>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Top-level sheet tabs -->
+      <nav class="sheet-tabs" role="tablist">
+        <button type="button" id="sheetTab-PROP" class="sheet-tab active" role="tab" aria-selected="true">PROP</button>
+        <button type="button" id="sheetTab-LOTS" class="sheet-tab" role="tab" aria-selected="false">LOTS</button>
+        <button type="button" id="sheetTab-BAIL" class="sheet-tab" role="tab" aria-selected="false">BAIL</button>
+        <button type="button" id="sheetTab-CUSTOM" class="sheet-tab" role="tab" aria-selected="false">Perso.</button>
+      </nav>
+
+      <!-- ==================== PROP Panel ==================== -->
+      <div id="sheetPanel-PROP" class="sheet-panel active" role="tabpanel">
+        <!-- Paste section -->
+        <div id="PROP-pasteSection" class="paste-section">
+          <label for="PROP-textarea">Collez les données PROP ici :</label>
+          <textarea
+            id="PROP-textarea"
+            placeholder="Collez 1 ligne avec 26 colonnes séparées par des tabulations..."
+            rows="6"
+          ></textarea>
+          <div class="field-info">
+            <small>Format : 26 colonnes (N° PROP, CIVILITE, NOM, PRENOM, etc.)</small>
+          </div>
+          <button id="PROP-parseButton" class="parse-btn" disabled>Analyser les données</button>
+        </div>
+        <!-- Fields section -->
+        <div id="PROP-fieldsSection" class="fields-section" style="display: none;">
+          <div class="section-header">
+            <h2>PROP</h2>
+            <div class="header-actions">
+              <button id="PROP-resetButton" class="reset-btn" title="Réinitialiser PROP">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+                  <path d="M3 3v5h5"></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <button id="PROP-fillSheetButton" class="fill-sheet-btn" type="button" disabled>
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M5 12h14"></path>
+              <path d="m12 5 7 7-7 7"></path>
+            </svg>
+            Remplir PROP seul
+          </button>
+          <div id="PROP-fieldsList" class="fields-list"></div>
+        </div>
+      </div>
+
+      <!-- ==================== LOTS Panel ==================== -->
+      <div id="sheetPanel-LOTS" class="sheet-panel" role="tabpanel" hidden>
+        <!-- Always-visible paste area -->
+        <div class="paste-section paste-section-compact">
+          <label for="LOTS-textarea">Collez un lot ici :</label>
+          <textarea
+            id="LOTS-textarea"
+            placeholder="Collez 1 ligne (13 colonnes) depuis Excel..."
+            rows="3"
+          ></textarea>
+          <button id="LOTS-addButton" class="add-row-btn" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Ajouter
+          </button>
+        </div>
+        <!-- List of added rows + detail view -->
+        <div id="LOTS-rowSelector" class="row-selector-container"></div>
+        <button id="LOTS-clearAllButton" class="clear-all-btn" type="button" style="display:none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+            <path d="M10 11v6"></path>
+            <path d="M14 11v6"></path>
+          </svg>
+          Tout effacer
+        </button>
+        <div id="LOTS-fieldsList" class="fields-list"></div>
+      </div>
+
+      <!-- ==================== BAIL Panel ==================== -->
+      <div id="sheetPanel-BAIL" class="sheet-panel" role="tabpanel" hidden>
+        <!-- Always-visible paste area -->
+        <div class="paste-section paste-section-compact">
+          <label for="BAIL-textarea">Collez un bail ici :</label>
+          <textarea
+            id="BAIL-textarea"
+            placeholder="Collez 1 ligne (48 colonnes) depuis Excel..."
+            rows="3"
+          ></textarea>
+          <button id="BAIL-addButton" class="add-row-btn" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Ajouter
+          </button>
+        </div>
+        <button id="BAIL-fillSheetButton" class="fill-sheet-btn" type="button" style="display:none;">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M5 12h14"></path>
+            <path d="m12 5 7 7-7 7"></path>
+          </svg>
+          Remplir BAIL seul
+        </button>
+        <!-- List of added rows + detail view -->
+        <div id="BAIL-rowSelector" class="row-selector-container"></div>
+        <button id="BAIL-clearAllButton" class="clear-all-btn" type="button" style="display:none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+            <path d="M10 11v6"></path>
+            <path d="M14 11v6"></path>
+          </svg>
+          Tout effacer
+        </button>
+        <div id="BAIL-fieldsList" class="fields-list"></div>
+      </div>
+
+      <!-- ==================== Custom Fields Panel ==================== -->
+      <div id="sheetPanel-CUSTOM" class="sheet-panel" role="tabpanel" hidden>
+        <div id="customFieldsSection" class="custom-fields-section">
+          <div class="custom-fields-header">
+            <h3>Champs personnalisés</h3>
+            <button id="addCustomFieldButton" class="add-custom-field-btn" type="button" title="Ajouter un champ (nom d'input → valeur)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              Ajouter
+            </button>
+          </div>
+          <p class="custom-fields-info">Valeurs fixes envoyées en plus du mapping. Nom de l'input → valeur. Clic droit sur un champ du formulaire : « Copier le nom de l'input » pour récupérer le nom.</p>
+          <div id="customFieldsList" class="custom-fields-list">
+            <!-- Rows added by popup.js -->
+          </div>
+        </div>
+      </div>
+
+      <div id="statusMessage" class="status-message"></div>
+    </main>
+
+    <!-- Configuration modal -->
+    <div id="configPanel" class="config-panel" style="display: none;">
+      <div class="config-overlay"></div>
+      <div class="config-content">
+        <div class="config-header">
+          <h2>Configuration du mapping</h2>
+          <button id="closeConfigButton" class="close-config-btn" title="Fermer">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 6L6 18M6 6l12 12"></path>
+            </svg>
+          </button>
+        </div>
+        <nav id="configSheetTabs" class="config-sheet-tabs" role="tablist">
+          <!-- Populated dynamically by openConfigPanel() -->
+        </nav>
+        <div class="config-body">
+          <p class="config-info">
+            Associez chaque colonne Excel au nom de l'input HTML correspondant dans votre formulaire.
+          </p>
+          <div id="mappingFields" class="mapping-fields">
+            <!-- Generated dynamically -->
+          </div>
+        </div>
+        <div class="config-footer">
+          <button id="cancelConfigButton" class="cancel-btn">Annuler</button>
+          <button id="saveConfigButton" class="save-btn">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"></path>
+              <polyline points="17 21 17 13 7 13 7 21"></polyline>
+              <polyline points="7 3 7 8 15 8"></polyline>
+            </svg>
+            Sauvegarder
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
