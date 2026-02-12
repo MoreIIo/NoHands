@@ -399,25 +399,23 @@ function fillInputByType(input, value) {
 }
 
 /**
- * Trigger input and change events for frameworks to detect changes
+ * Trigger input and change events for frameworks to detect changes.
+ * NOTE: We intentionally do NOT dispatch 'blur' here — on ASP.NET WebForms
+ * pages, blur on certain fields (dates, indices) triggers __doPostBack which
+ * opens unwanted server-side popups / modals.
  * @param {HTMLElement} element - The element to trigger events on
  */
 function triggerInputEvents(element) {
-  // Trigger input event
   element.dispatchEvent(new Event('input', { bubbles: true }));
-  // Trigger change event
   element.dispatchEvent(new Event('change', { bubbles: true }));
-  // Trigger blur event (some frameworks listen to this)
-  element.dispatchEvent(new Event('blur', { bubbles: true }));
 }
 
 /**
- * Trigger change event only
+ * Trigger change event only (selects, checkboxes, radios, dates)
  * @param {HTMLElement} element - The element to trigger events on
  */
 function triggerChangeEvent(element) {
   element.dispatchEvent(new Event('change', { bubbles: true }));
-  element.dispatchEvent(new Event('blur', { bubbles: true }));
 }
 
 /**

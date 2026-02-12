@@ -448,9 +448,16 @@ async function handleRemoveRow(sheetType, index) {
     sheetState[sheetType].selectedIndex = null;
     await chrome.storage.local.remove([sheet.storageKey, `selected${sheetType}Index`]);
   } else {
-    // Adjust selectedIndex
-    if (sheetState[sheetType].selectedIndex >= rows.length) {
-      sheetState[sheetType].selectedIndex = rows.length - 1;
+    // Adjust selectedIndex to track the same row after removal
+    const sel = sheetState[sheetType].selectedIndex;
+    if (sel !== null && index < sel) {
+      // Removed a row before the selected one — shift down
+      sheetState[sheetType].selectedIndex = sel - 1;
+    } else if (sel !== null && index === sel) {
+      // Removed the selected row itself
+      if (sel >= rows.length) {
+        sheetState[sheetType].selectedIndex = rows.length - 1;
+      }
     }
     if (sheetState[sheetType].selectedIndex === null) {
       sheetState[sheetType].selectedIndex = 0;
@@ -520,6 +527,11 @@ function updateTabIndicators() {
       tab.classList.toggle('has-data', sheetState[type].data !== null);
     }
   });
+  const customTab = document.getElementById('sheetTab-CUSTOM');
+  if (customTab) {
+    const hasCustom = customFieldsArray.some(f => f.name && f.name.trim() !== '');
+    customTab.classList.toggle('has-data', hasCustom);
+  }
 }
 
 /**
@@ -681,16 +693,29 @@ function updateFillButtonState() {
 
   const hasPropData = sheetState.PROP.data !== null;
   const hasPropMapping = Object.keys(sheetMappings.PROP).length > 0;
-  const shouldEnable = hasPropData && hasPropMapping;
+  const hasLotsData = sheetState.LOTS.data && sheetState.LOTS.selectedIndex !== null;
+  const hasLotsMapping = Object.keys(sheetMappings.LOTS).length > 0;
+  const hasBailData = sheetState.BAIL.data && sheetState.BAIL.selectedIndex !== null;
+  const hasBailMapping = Object.keys(sheetMappings.BAIL).length > 0;
 
-  fillButton.disabled = !shouldEnable;
+  // Sync custom fields from DOM to get current state
+  if (customFieldsList && customFieldsList.children.length > 0) {
+    syncCustomFieldsFromDOM();
+  }
+  const hasCustomFields = customFieldsArray.some(f => f.name && f.name.trim() !== '');
 
-  if (shouldEnable) {
+  // Enable if any section has usable data
+  const hasAnyMappedData = (hasPropData && hasPropMapping) ||
+                           (hasLotsData && hasLotsMapping) ||
+                           (hasBailData && hasBailMapping) ||
+                           hasCustomFields;
+
+  fillButton.disabled = !hasAnyMappedData;
+
+  if (hasAnyMappedData) {
     fillButton.title = 'Remplir le formulaire avec les données';
-  } else if (!hasPropData) {
-    fillButton.title = 'Analysez d\'abord des données PROP';
   } else {
-    fillButton.title = 'Configurez d\'abord le mapping PROP';
+    fillButton.title = 'Ajoutez des données et configurez le mapping, ou ajoutez des champs personnalisés';
   }
 
   // Per-sheet fill buttons
@@ -701,8 +726,6 @@ function updateFillButtonState() {
 
   const bailFillBtn = document.getElementById('BAIL-fillSheetButton');
   if (bailFillBtn) {
-    const hasBailData = sheetState.BAIL.data && sheetState.BAIL.selectedIndex !== null;
-    const hasBailMapping = Object.keys(sheetMappings.BAIL).length > 0;
     const show = hasBailData && hasBailMapping;
     bailFillBtn.style.display = show ? 'flex' : 'none';
   }
@@ -713,13 +736,16 @@ function updateFillButtonState() {
 // ============================================================
 
 async function handleFillForm() {
-  if (!sheetState.PROP.data) {
-    showStatus('Veuillez d\'abord analyser des données PROP', 'error');
-    return;
-  }
+  // Check that at least one section has usable data
+  syncCustomFieldsFromDOM();
+  saveCustomFields();
+  const hasCustom = customFieldsArray.some(f => f.name && f.name.trim() !== '');
+  const hasProp = sheetState.PROP.data && Object.keys(sheetMappings.PROP).length > 0;
+  const hasLots = sheetState.LOTS.data && sheetState.LOTS.selectedIndex !== null && Object.keys(sheetMappings.LOTS).length > 0;
+  const hasBail = sheetState.BAIL.data && sheetState.BAIL.selectedIndex !== null && Object.keys(sheetMappings.BAIL).length > 0;
 
-  if (Object.keys(sheetMappings.PROP).length === 0) {
-    showStatus('Veuillez d\'abord configurer le mapping PROP', 'error');
+  if (!hasProp && !hasLots && !hasBail && !hasCustom) {
+    showStatus('Aucune donnée exploitable. Ajoutez des données + mapping ou des champs personnalisés.', 'error');
     return;
   }
 
@@ -758,33 +784,40 @@ async function handleFillForm() {
       return;
     }
 
-    // Build merged data and mapping
+    // Build merged data and mapping — only include columns that have a mapping
+    // in each sheet, so shared column names (e.g. "SURFACE DU LOT" in both
+    // LOTS and BAIL) don't silently overwrite each other with unmapped values.
     const mergedData = {};
     const mergedMapping = {};
 
-    // PROP (always present)
-    const propData = { ...sheetState.PROP.data };
-    if (propData['IBAN PROP']) propData['IBAN PROP'] = formatIban(propData['IBAN PROP']);
-    Object.assign(mergedData, propData);
-    Object.assign(mergedMapping, sheetMappings.PROP);
+    // PROP (optional)
+    if (sheetState.PROP.data && Object.keys(sheetMappings.PROP).length > 0) {
+      const propData = { ...sheetState.PROP.data };
+      if (propData['IBAN PROP']) propData['IBAN PROP'] = formatIban(propData['IBAN PROP']);
+      for (const [col, inputNames] of Object.entries(sheetMappings.PROP)) {
+        mergedData[col] = propData[col];
+        mergedMapping[col] = inputNames;
+      }
+    }
 
     // LOTS (optional)
-    if (sheetState.LOTS.data && sheetState.LOTS.selectedIndex !== null) {
+    if (sheetState.LOTS.data && sheetState.LOTS.selectedIndex !== null && Object.keys(sheetMappings.LOTS).length > 0) {
       const lotRow = sheetState.LOTS.data[sheetState.LOTS.selectedIndex];
       if (lotRow) {
-        Object.assign(mergedData, lotRow);
-        Object.assign(mergedMapping, sheetMappings.LOTS);
+        for (const [col, inputNames] of Object.entries(sheetMappings.LOTS)) {
+          mergedData[col] = lotRow[col];
+          mergedMapping[col] = inputNames;
+        }
       }
     }
 
     // BAIL (optional)
-    if (sheetState.BAIL.data && sheetState.BAIL.selectedIndex !== null) {
+    if (sheetState.BAIL.data && sheetState.BAIL.selectedIndex !== null && Object.keys(sheetMappings.BAIL).length > 0) {
       const bailRow = { ...sheetState.BAIL.data[sheetState.BAIL.selectedIndex] };
       if (bailRow) {
         if (bailRow['IBAN MANDAT SEPA LOCATAIRE']) {
           bailRow['IBAN MANDAT SEPA LOCATAIRE'] = formatIban(bailRow['IBAN MANDAT SEPA LOCATAIRE']);
         }
-        // Format trimesters as "T<number>"
         if (bailRow['TRIMESTRE REFERENCE DERNIERE REVISION LOYER']) {
           bailRow['TRIMESTRE REFERENCE DERNIERE REVISION LOYER'] =
             formatTrimester(bailRow['TRIMESTRE REFERENCE DERNIERE REVISION LOYER']);
@@ -793,14 +826,14 @@ async function handleFillForm() {
           bailRow['TRIMESTRE PROCHAINE REVISION LOYER'] =
             formatTrimester(bailRow['TRIMESTRE PROCHAINE REVISION LOYER']);
         }
-        Object.assign(mergedData, bailRow);
-        Object.assign(mergedMapping, sheetMappings.BAIL);
+        for (const [col, inputNames] of Object.entries(sheetMappings.BAIL)) {
+          mergedData[col] = bailRow[col];
+          mergedMapping[col] = inputNames;
+        }
       }
     }
 
-    // Custom fields
-    syncCustomFieldsFromDOM();
-    saveCustomFields();
+    // Custom fields (already synced at start of handleFillForm)
     const customFields = getCustomFieldsObject();
 
     const message = {
@@ -810,25 +843,14 @@ async function handleFillForm() {
       customFields: Object.keys(customFields).length > 0 ? customFields : undefined
     };
 
-    // Inject and fill all same-origin tabs (including popups and iframes)
+    // Fill all same-origin tabs (content script already injected via manifest)
     let totalFilled = 0;
     let totalErrors = [];
     let tabsReached = 0;
 
     const fillPromises = targetTabs.map(async (tab) => {
       try {
-        // Inject content script with allFrames for iframe support
-        await chrome.scripting.executeScript({
-          target: { tabId: tab.id, allFrames: true },
-          files: ['content.js']
-        });
-        await new Promise(resolve => setTimeout(resolve, 100));
-      } catch (injErr) {
-        console.warn(`NoHands: Injection skipped for tab ${tab.id}:`, injErr.message);
-        return;
-      }
-
-      try {
+        // Try sending message directly (content script injected via manifest)
         const response = await chrome.tabs.sendMessage(tab.id, message);
         if (response) {
           tabsReached++;
@@ -836,7 +858,21 @@ async function handleFillForm() {
           if (response.errors) totalErrors.push(...response.errors);
         }
       } catch (msgErr) {
-        console.warn(`NoHands: Message skipped for tab ${tab.id}:`, msgErr.message);
+        // Fallback: inject content script and retry (e.g. page loaded before extension install)
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id, allFrames: true },
+            files: ['content.js']
+          });
+          const response = await chrome.tabs.sendMessage(tab.id, message);
+          if (response) {
+            tabsReached++;
+            totalFilled += response.filledCount || 0;
+            if (response.errors) totalErrors.push(...response.errors);
+          }
+        } catch (retryErr) {
+          console.warn(`NoHands: Tab ${tab.id} unreachable:`, retryErr.message);
+        }
       }
     });
 
@@ -884,16 +920,7 @@ async function sendFillToAllTabs(message) {
 
   const fillPromises = targetTabs.map(async (tab) => {
     try {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id, allFrames: true },
-        files: ['content.js']
-      });
-      await new Promise(resolve => setTimeout(resolve, 100));
-    } catch (injErr) {
-      console.warn(`NoHands: Injection skipped for tab ${tab.id}:`, injErr.message);
-      return;
-    }
-    try {
+      // Try sending message directly (content script injected via manifest)
       const response = await chrome.tabs.sendMessage(tab.id, message);
       if (response) {
         tabsReached++;
@@ -901,7 +928,21 @@ async function sendFillToAllTabs(message) {
         if (response.errors) totalErrors.push(...response.errors);
       }
     } catch (msgErr) {
-      console.warn(`NoHands: Message skipped for tab ${tab.id}:`, msgErr.message);
+      // Fallback: inject content script and retry
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: true },
+          files: ['content.js']
+        });
+        const response = await chrome.tabs.sendMessage(tab.id, message);
+        if (response) {
+          tabsReached++;
+          totalFilled += response.filledCount || 0;
+          if (response.errors) totalErrors.push(...response.errors);
+        }
+      } catch (retryErr) {
+        console.warn(`NoHands: Tab ${tab.id} unreachable:`, retryErr.message);
+      }
     }
   });
 
@@ -1183,8 +1224,8 @@ function renderCustomFields() {
     const nameInput = row.querySelector('.custom-field-name');
     const valueInput = row.querySelector('.custom-field-value');
     const removeBtn = row.querySelector('.remove-custom-field-btn');
-    nameInput.addEventListener('blur', () => { syncCustomFieldsFromDOM(); saveCustomFields(); });
-    valueInput.addEventListener('blur', () => { syncCustomFieldsFromDOM(); saveCustomFields(); });
+    nameInput.addEventListener('blur', () => { syncCustomFieldsFromDOM(); saveCustomFields(); updateFillButtonState(); updateTabIndicators(); });
+    valueInput.addEventListener('blur', () => { syncCustomFieldsFromDOM(); saveCustomFields(); updateFillButtonState(); });
     removeBtn.addEventListener('click', () => {
       const r = removeBtn.closest('.custom-field-row');
       const idx = r ? Array.from(customFieldsList.children).indexOf(r) : index;
@@ -1204,6 +1245,7 @@ function addCustomField() {
   customFieldsArray.push({ name: '', value: '' });
   renderCustomFields();
   saveCustomFields();
+  updateFillButtonState();
 }
 
 function removeCustomField(index) {
@@ -1212,6 +1254,62 @@ function removeCustomField(index) {
   if (customFieldsArray.length === 0) customFieldsArray = [{ name: '', value: '' }];
   renderCustomFields();
   saveCustomFields();
+  updateFillButtonState();
+  updateTabIndicators();
+}
+
+// ============================================================
+// CUSTOM FIELDS: IMPORT / EXPORT
+// ============================================================
+
+function exportCustomFields() {
+  syncCustomFieldsFromDOM();
+  const data = customFieldsArray.filter(f => f.name && f.name.trim() !== '');
+  if (data.length === 0) {
+    showStatus('Aucun champ personnalisé à exporter', 'error');
+    return;
+  }
+  const json = JSON.stringify(data, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'nohands-custom-fields.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  showStatus(`${data.length} champ(s) exporté(s) !`, 'success');
+}
+
+function importCustomFields(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!Array.isArray(data)) {
+        showStatus('Format invalide : un tableau JSON est attendu', 'error');
+        return;
+      }
+      const valid = data.filter(item =>
+        item && typeof item === 'object' && typeof item.name === 'string'
+      ).map(item => ({
+        name: item.name.trim(),
+        value: String(item.value || '').trim()
+      }));
+      if (valid.length === 0) {
+        showStatus('Aucun champ valide trouvé dans le fichier', 'error');
+        return;
+      }
+      customFieldsArray = valid;
+      renderCustomFields();
+      saveCustomFields();
+      updateFillButtonState();
+      updateTabIndicators();
+      showStatus(`${valid.length} champ(s) importé(s) !`, 'success');
+    } catch (err) {
+      showStatus('Erreur de lecture JSON : ' + err.message, 'error');
+    }
+  };
+  reader.readAsText(file);
 }
 
 // ============================================================
@@ -1415,6 +1513,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (fillButton) fillButton.addEventListener('click', handleFillForm);
   if (addCustomFieldButton) addCustomFieldButton.addEventListener('click', addCustomField);
 
+  // Custom fields import/export
+  const exportBtn = document.getElementById('exportCustomFieldsButton');
+  const importBtn = document.getElementById('importCustomFieldsButton');
+  const importFile = document.getElementById('importCustomFieldsFile');
+  if (exportBtn) exportBtn.addEventListener('click', exportCustomFields);
+  if (importBtn && importFile) {
+    importBtn.addEventListener('click', () => importFile.click());
+    importFile.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        importCustomFields(e.target.files[0]);
+        e.target.value = '';
+      }
+    });
+  }
+
   // Config panel buttons
   if (closeConfigButton) closeConfigButton.addEventListener('click', closeConfigPanel);
   if (cancelConfigButton) cancelConfigButton.addEventListener('click', closeConfigPanel);
@@ -1426,6 +1539,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (e.target === configPanel || e.target.classList.contains('config-overlay')) {
         closeConfigPanel();
       }
+    });
+  }
+
+  // Scroll-to-top button
+  const scrollTopBtn = document.getElementById('scrollTopButton');
+  const scrollContainer = document.querySelector('.container');
+  if (scrollTopBtn && scrollContainer) {
+    scrollContainer.addEventListener('scroll', () => {
+      scrollTopBtn.style.display = scrollContainer.scrollTop > 200 ? 'flex' : 'none';
+    });
+    scrollTopBtn.addEventListener('click', () => {
+      scrollContainer.scrollTo({ top: 0, behavior: 'smooth' });
     });
   }
 

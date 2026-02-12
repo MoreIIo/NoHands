@@ -154,23 +154,47 @@
         <div id="customFieldsSection" class="custom-fields-section">
           <div class="custom-fields-header">
             <h3>Champs personnalisés</h3>
-            <button id="addCustomFieldButton" class="add-custom-field-btn" type="button" title="Ajouter un champ (nom d'input → valeur)">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="12" y1="5" x2="12" y2="19"></line>
-                <line x1="5" y1="12" x2="19" y2="12"></line>
-              </svg>
-              Ajouter
-            </button>
+            <div class="custom-fields-header-actions">
+              <button id="importCustomFieldsButton" class="import-export-btn" type="button" title="Importer des champs (JSON)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+              </button>
+              <button id="exportCustomFieldsButton" class="import-export-btn" type="button" title="Exporter les champs (JSON)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+              </button>
+              <input type="file" id="importCustomFieldsFile" accept=".json" style="display:none;">
+            </div>
           </div>
           <p class="custom-fields-info">Valeurs fixes envoyées en plus du mapping. Nom de l'input → valeur. Clic droit sur un champ du formulaire : « Copier le nom de l'input » pour récupérer le nom.</p>
           <div id="customFieldsList" class="custom-fields-list">
             <!-- Rows added by popup.js -->
           </div>
+          <button id="addCustomFieldButton" class="add-custom-field-btn add-custom-field-btn-bottom" type="button" title="Ajouter un champ (nom d'input → valeur)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Ajouter un champ
+          </button>
         </div>
       </div>
 
       <div id="statusMessage" class="status-message"></div>
     </main>
+
+    <!-- Scroll-to-top button -->
+    <button id="scrollTopButton" class="scroll-top-btn" type="button" title="Retour en haut" style="display:none;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="18 15 12 9 6 15"></polyline>
+      </svg>
+    </button>
 
     <!-- Configuration modal -->
     <div id="configPanel" class="config-panel" style="display: none;">
