@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<title>NoHands OSA</title>
+<link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+
+  <!-- Sprite d'icônes -->
+  <svg style="display:none">
+    <defs>
+      <symbol id="icon-file" viewBox="0 0 24 24"><path d="M6 2h9l5 5v15a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M15 2v5h5"/></symbol>
+      <symbol id="icon-pen" viewBox="0 0 24 24"><path d="M4 20l1-4L16.5 4.5a2.1 2.1 0 0 1 3 3L8 19z"/><path d="M13.5 7.5l3 3"/></symbol>
+      <symbol id="icon-loop" viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3"/><path d="M18 2v5h-5M6 22v-5h5"/></symbol>
+      <symbol id="icon-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 1v3M12 20v3M1 12h3M20 12h3"/></symbol>
+      <symbol id="icon-play" viewBox="0 0 24 24"><path d="M6 3.5v17l14-8.5z"/></symbol>
+      <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1.5"/></symbol>
+      <symbol id="icon-save" viewBox="0 0 24 24"><path d="M5 3h11l3 3v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M8 3v6h7V3"/><path d="M7 21v-7h10v7"/></symbol>
+      <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></symbol>
+      <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M12 21V9M7 14l5-5 5 5"/><path d="M5 3h14"/></symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19"/></symbol>
+      <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></symbol>
+      <symbol id="icon-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19 12a7 7 0 0 0-.14-1.4l2.1-1.63-2-3.46-2.48 1a7 7 0 0 0-2.42-1.4L13.7 2.5h-3.4l-.36 2.6a7 7 0 0 0-2.42 1.4l-2.48-1-2 3.46 2.1 1.64A7 7 0 0 0 5 12c0 .48.05.94.14 1.4l-2.1 1.63 2 3.46 2.48-1a7 7 0 0 0 2.42 1.4l.36 2.61h3.4l.36-2.6a7 7 0 0 0 2.42-1.4l2.48 1 2-3.47-2.1-1.63c.09-.46.14-.93.14-1.4z"/></symbol>
+      <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14"/><path d="M10 11v6M14 11v6"/></symbol>
+      <symbol id="icon-chevron-left" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+      <symbol id="icon-chevron-right" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+      <symbol id="icon-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+      <symbol id="icon-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></symbol>
+      <symbol id="icon-check" viewBox="0 0 24 24"><path d="M4 12.5l5.5 5.5L20 6.5"/></symbol>
+      <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 6.5a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></symbol>
+      <symbol id="icon-grip" viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></symbol>
+    </defs>
+  </svg>
+
+  <header>
+    <img class="logo-badge" src="icons/icon128.png" alt="OSA" width="38" height="38">
+    <div class="header-text">
+      <h1>NoHands OSA</h1>
+      <p class="subtitle">Excel ↔ formulaires web : saisie automatique et extraction en boucle.</p>
+    </div>
+  </header>
+
+  <!-- Barre de profils -->
+  <div class="profile-bar">
+    <select id="profileSelect" title="Profil de configuration">
+      <option value="">— aucun profil —</option>
+    </select>
+    <button class="btn icon-only" id="saveProfileBtn" title="Sauvegarder dans le profil sélectionné" type="button"><svg class="icon"><use href="#icon-save"/></svg></button>
+    <button class="btn icon-only" id="newProfileBtn" title="Nouveau profil" type="button"><svg class="icon"><use href="#icon-plus"/></svg></button>
+    <button class="btn icon-only danger" id="deleteProfileBtn" title="Supprimer le profil" type="button"><svg class="icon"><use href="#icon-trash"/></svg></button>
+  </div>
+  <div class="profile-new-row" id="newProfileRow" hidden>
+    <input type="text" id="newProfileName" placeholder="nom du nouveau profil" />
+    <button class="btn primary" id="confirmNewProfileBtn" type="button">Créer</button>
+    <button class="btn" id="cancelNewProfileBtn" type="button">Annuler</button>
+  </div>
+
+  <!-- Onglets principaux -->
+  <nav class="tabbar" id="tabbar">
+    <button class="tab-btn active" data-tab="donnees" type="button">
+      <svg class="icon"><use href="#icon-file"/></svg><span>Données</span><span class="done-dot"></span>
+    </button>
+    <button class="tab-btn" data-tab="saisie" type="button">
+      <svg class="icon"><use href="#icon-pen"/></svg><span>Saisie</span><span class="done-dot"></span>
+    </button>
+    <button class="tab-btn" data-tab="extraction" type="button">
+      <svg class="icon"><use href="#icon-loop"/></svg><span>Extraction</span><span class="done-dot"></span>
+    </button>
+    <button class="tab-btn" data-tab="export" type="button">
+      <svg class="icon"><use href="#icon-download"/></svg><span>Export</span><span class="done-dot"></span>
+    </button>
+  </nav>
+
+  <!-- ================= ONGLET DONNÉES ================= -->
+  <section class="panel" data-tab="donnees">
+    <h2>1. Charger les données</h2>
+
+    <div class="radio-row">
+      <label><input type="radio" name="sourceMode" value="file" checked /> Fichier Excel/CSV</label>
+      <label><input type="radio" name="sourceMode" value="paste" /> Coller un tableau</label>
+      <label><input type="radio" name="sourceMode" value="json" /> JSON</label>
+    </div>
+
+    <div id="sourceFile">
+      <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" />
+      <div class="field-row" id="sheetRow" style="display:none">
+        <label for="sheetSelect">Feuille :</label>
+        <select id="sheetSelect"></select>
+      </div>
+    </div>
+
+    <div id="sourcePaste" style="display:none">
+      <textarea id="pasteArea" rows="6" placeholder="Colle ici des cellules copiées depuis Excel (Ctrl+V)&#10;— une ou plusieurs lignes, colonnes séparées par des tabulations."></textarea>
+      <button class="btn primary" id="usePasteBtn" type="button">Utiliser ce tableau</button>
+    </div>
+
+    <div id="sourceJson" style="display:none">
+      <textarea id="jsonTextArea" rows="6" placeholder='[{"nom":"DUPONT","prenom":"Jean"}, …] ou [["nom","prenom"],["DUPONT","Jean"]]'></textarea>
+      <div class="field-row">
+        <button class="btn primary" id="useJsonBtn" type="button">Utiliser ce JSON</button>
+        <input type="file" id="jsonFileInput" accept=".json" />
+      </div>
+    </div>
+
+    <p class="hint" id="fileInfo">Aucune donnée chargée.</p>
+
+    <h2>2. Colonnes</h2>
+    <div class="field-row">
+      <label for="headerModeSelect">1<sup>re</sup> ligne = en-têtes :</label>
+      <select id="headerModeSelect">
+        <option value="auto">Détection auto</option>
+        <option value="yes">Oui</option>
+        <option value="no">Non</option>
+      </select>
+    </div>
+
+    <div class="field-row" id="modelRow" style="display:none">
+      <label for="modelSelect">Modèle de colonnes :</label>
+      <select id="modelSelect"></select>
+      <button class="btn" id="manageModelsBtn" type="button"><svg class="icon icon-sm"><use href="#icon-gear"/></svg> Gérer</button>
+    </div>
+
+    <div id="columnsChips" class="chips"></div>
+    <p class="hint" id="columnsInfo"></p>
+
+    <h2>3. Aperçu</h2>
+    <div id="previewWrap" class="preview-wrap"><p class="hint">Charge des données pour voir l'aperçu.</p></div>
+  </section>
+
+  <!-- ================= ONGLET SAISIE ================= -->
+  <section class="panel" data-tab="saisie" hidden>
+    <h2>Ligne à saisir</h2>
+    <div class="row-picker">
+      <input type="text" id="rowFilterInput" placeholder="Filtrer les lignes…" />
+      <div class="row-picker-nav">
+        <button class="btn icon-only" id="prevRowBtn" title="Ligne précédente" type="button"><svg class="icon"><use href="#icon-chevron-left"/></svg></button>
+        <span id="selectedRowLabel" class="selected-row-label">—</span>
+        <button class="btn icon-only" id="nextRowBtn" title="Ligne suivante" type="button"><svg class="icon"><use href="#icon-chevron-right"/></svg></button>
+      </div>
+    </div>
+    <div id="rowList" class="row-list"></div>
+
+    <h2>Champs de la ligne <span class="h2-note">(cliquer pour copier)</span></h2>
+    <div id="fieldsList" class="fields-list"><p class="hint">Sélectionne une ligne ci-dessus.</p></div>
+
+    <h2>Mapping colonnes → inputs</h2>
+    <div class="field-row">
+      <button class="btn" id="openMappingBtn" type="button"><svg class="icon icon-sm"><use href="#icon-gear"/></svg> Configurer le mapping</button>
+      <span class="hint" id="mappingInfo">0 colonne mappée</span>
+    </div>
+    <p class="hint">Astuce : clic droit sur un champ du site → « Copier le nom de l'input », ou utilise le bouton <svg class="icon icon-sm inline-icon"><use href="#icon-target"/></svg> dans le mapping.</p>
+
+    <h2>Règles de valeurs <span class="h2-note">(convertir une valeur avant la saisie)</span></h2>
+    <div class="field-row">
+      <button class="btn" id="openValueRulesBtn" type="button"><svg class="icon icon-sm"><use href="#icon-gear"/></svg> Configurer les règles</button>
+      <span class="hint" id="valueRulesInfo">0 règle</span>
+    </div>
+    <p class="hint">Ex. : si l'Excel contient « female », saisir « Mme » ; « male » → « M. ». Fonctionne aussi pour Oui/Non, codes, etc. La conversion s'applique avant le remplissage (selects, cases, radios, texte…).</p>
+
+    <h2>Champs personnalisés <span class="h2-note">(valeurs fixes)</span></h2>
+    <div id="customFieldsList"></div>
+    <div class="field-row">
+      <button class="btn" id="addCustomFieldBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter</button>
+      <button class="btn" id="exportCustomFieldsBtn" type="button"><svg class="icon icon-sm"><use href="#icon-download"/></svg> Exporter</button>
+      <button class="btn" id="importCustomFieldsBtn" type="button"><svg class="icon icon-sm"><use href="#icon-upload"/></svg> Importer</button>
+      <input type="file" id="importCustomFieldsFile" accept=".json" style="display:none" />
+    </div>
+
+    <div class="big-action">
+      <button class="btn primary xl" id="fillBtn" type="button" disabled>
+        <svg class="icon"><use href="#icon-pen"/></svg> Remplir le formulaire
+      </button>
+      <p class="hint">Remplit tous les onglets ouverts du même site (popups inclus).</p>
+    </div>
+
+    <h2>Scénario de saisie <span class="h2-note">(automatisation multi-panels)</span></h2>
+    <p class="hint">Enchaîne des étapes pour saisir une ligne complète : remplir les champs mappés, cliquer sur des boutons/onglets du site, attendre qu'un élément s'affiche, ou poser des conditions (donnée Excel ou état de la page).</p>
+    <div id="scenarioSteps" class="scenario-steps"></div>
+    <div class="field-row">
+      <button class="btn" id="addStepBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter une étape</button>
+      <button class="btn" id="clearStepsBtn" type="button"><svg class="icon icon-sm"><use href="#icon-trash"/></svg> Tout effacer</button>
+    </div>
+
+    <h2>Exécution du scénario</h2>
+    <div class="field-row run-buttons">
+      <button class="btn primary" id="runScenarioBtn" type="button"><svg class="icon"><use href="#icon-play"/></svg>Demarrer le sénario sur de la ligne active</button>
+      <button class="btn danger" id="stopScenarioBtn" type="button" disabled><svg class="icon"><use href="#icon-stop"/></svg> Arrêter</button>
+    </div>
+    <div class="field-row">
+      <label for="scnStartRow">Boucle : de la ligne</label>
+      <input type="number" id="scnStartRow" value="2" min="1" />
+      <label for="scnEndRow">à</label>
+      <input type="number" id="scnEndRow" placeholder="auto" min="1" />
+      <label for="scnRowDelayMs">pause (ms)</label>
+      <input type="number" id="scnRowDelayMs" value="500" min="0" step="100" />
+    </div>
+    <div class="field-row run-buttons">
+      <button class="btn" id="runScenarioLoopBtn" type="button"><svg class="icon"><use href="#icon-loop"/></svg> Demarrer le scénario</button>
+    </div>
+    <div class="progress"><div class="progress-fill" id="scnProgressFill"></div></div>
+    <p class="progress-text" id="scnProgressText">0 / 0</p>
+    <div id="scnLog" class="log"></div>
+  </section>
+
+  <!-- ================= ONGLET EXTRACTION ================= -->
+  <section class="panel" data-tab="extraction" hidden>
+    <h2>Conditions <span class="h2-note">(ignorer la ligne si…)</span></h2>
+    <div id="conditionsList"></div>
+    <button class="btn" id="addConditionBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter une condition</button>
+
+    <h2>Champs de recherche</h2>
+    <p class="hint">Pour chaque ligne, ces valeurs sont tapées dans la page avant validation.</p>
+    <div id="searchFieldsList"></div>
+    <button class="btn" id="addSearchFieldBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter un champ</button>
+
+    <h2>Validation</h2>
+    <div class="radio-row">
+      <label><input type="radio" name="submitMode" value="enter" checked /> Appuyer sur Entrée</label>
+      <label><input type="radio" name="submitMode" value="click" /> Cliquer sur un bouton</label>
+    </div>
+    <div class="field-row" id="submitSelectorRow" style="display:none">
+      <input type="text" id="submitSelector" placeholder="sélecteur CSS du bouton" />
+      <button class="btn pick icon-only" data-target="submitSelector" title="Choisir sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+    </div>
+    <div class="field-row">
+      <label for="waitMs">Attente après validation (ms) :</label>
+      <input type="number" id="waitMs" value="1200" min="0" step="100" />
+    </div>
+    <div class="field-row">
+      <label for="rowDelayMs">Pause entre lignes (ms) :</label>
+      <input type="number" id="rowDelayMs" value="300" min="0" step="100" />
+    </div>
+
+    <h2>Résultats à récupérer</h2>
+    <div id="outputsList"></div>
+    <button class="btn" id="addOutputBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter un résultat</button>
+
+    <h2>Exécution</h2>
+    <div class="field-row">
+      <label for="startRow">De la ligne :</label>
+      <input type="number" id="startRow" value="2" min="1" />
+      <label for="endRow">à :</label>
+      <input type="number" id="endRow" placeholder="auto" min="1" />
+    </div>
+    <div class="field-row run-buttons">
+      <button class="btn primary" id="startBtn" type="button"><svg class="icon"><use href="#icon-play"/></svg> Démarrer</button>
+      <button class="btn danger" id="stopBtn" type="button" disabled><svg class="icon"><use href="#icon-stop"/></svg> Arrêter</button>
+    </div>
+    <div class="progress"><div class="progress-fill" id="progressFill"></div></div>
+    <p class="progress-text" id="progressText">0 / 0</p>
+    <div id="log" class="log"></div>
+
+    <h2>Récapitulatif</h2>
+    <div id="resultSummary"><p class="hint">Aucune exécution récente.</p></div>
+  </section>
+
+  <!-- ================= ONGLET EXPORT ================= -->
+  <section class="panel" data-tab="export" hidden>
+    <h2>Télécharger les données mises à jour</h2>
+    <p class="hi

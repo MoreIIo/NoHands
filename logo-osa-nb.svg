@@ -1,0 +1,46 @@
+<svg width="960" height="640" viewBox="0 0 960 640" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#000000" flood-opacity="0.20"/>
+    </filter>
+  </defs>
+
+  <rect width="960" height="640" fill="#FFFFFF"/>
+
+  <!-- ============ VARIANTE 1 : logo principal (noir sur blanc) ============ -->
+  <g transform="translate(70,64)">
+    <rect x="0" y="0" width="164" height="164" rx="46" fill="#0A0A0A" filter="url(#soft)"/>
+    <rect x="10" y="10" width="144" height="70" rx="36" fill="url(#glass)"/>
+    <ellipse cx="82" cy="82" rx="66" ry="30" fill="none" stroke="#FFFFFF" stroke-width="3" opacity="0.55" transform="rotate(-28 82 82)"/>
+    <circle cx="140" cy="52" r="7" fill="#FFFFFF"/>
+    <path d="M92 34 L56 92 L82 92 L70 132 L112 70 L86 70 Z" fill="#FFFFFF"/>
+
+    <text x="196" y="88" font-family="Segoe UI, Arial, sans-serif" font-size="94" font-weight="800" fill="#0A0A0A" letter-spacing="1">OSA</text>
+    <text x="199" y="132" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="600" fill="#6B6B6B" letter-spacing="6">SAISIE AUTOMATIQUE</text>
+  </g>
+
+  <!-- ============ VARIANTE 2 : icône seule ============ -->
+  <g transform="translate(70,318)">
+    <rect x="0" y="0" width="230" height="230" rx="64" fill="#0A0A0A" filter="url(#soft)"/>
+    <rect x="14" y="14" width="202" height="96" rx="50" fill="url(#glass)"/>
+    <ellipse cx="115" cy="115" rx="92" ry="42" fill="none" stroke="#FFFFFF" stroke-width="4" opacity="0.5" transform="rotate(-28 115 115)"/>
+    <circle cx="196" cy="70" r="9" fill="#FFFFFF"/>
+    <path d="M130 42 L82 122 L118 122 L102 188 L162 100 L124 100 Z" fill="#FFFFFF"/>
+  </g>
+
+  <!-- ============ VARIANTE 3 : inversé (blanc sur noir) ============ -->
+  <g transform="translate(360,318)">
+    <rect x="0" y="0" width="530" height="230" rx="44" fill="#0A0A0A"/>
+    <g transform="translate(48,45)">
+      <rect x="0" y="0" width="140" height="140" rx="40" fill="none" stroke="#FFFFFF" stroke-width="5"/>
+      <ellipse cx="70" cy="70" rx="56" ry="26" fill="none" stroke="#FFFFFF" stroke-width="3" opacity="0.6" transform="rotate(-28 70 70)"/>
+      <path d="M78 26 L48 74 L70 74 L60 108 L96 60 L74 60 Z" fill="#FFFFFF"/>
+    </g>
+    <text x="222" y="122" font-family="Segoe UI, Arial, sans-serif" font-size="82" font-weight="800" fill="#FFFFFF" letter-spacing="1">OSA</text>
+    <text x="225" y="160" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="600" fill="#B0B0B0" letter-spacing="4">GESTION LOCATIVE · NOHANDS</text>
+  </g>
+</svg>

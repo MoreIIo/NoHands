@@ -1,0 +1,11 @@
+# Secrets — ne jamais publier
+.env
+
+# Sauvegarde locale — ne pas publier
+backup_avant_fusion/
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+
+# Dé
