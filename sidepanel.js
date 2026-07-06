@@ -732,38 +732,94 @@ function rowSummary(row) {
   return parts.join(" — ") || "(ligne vide)";
 }
 
+const ROW_PAGE_SIZE = 300;
+let rowListPage = 0;
+
+/* Indices des lignes de données correspondant au filtre courant. */
+function getFilteredRowIndices() {
+  const filter = $("rowFilterInput").value.trim().toLowerCase();
+  const indices = dataRowIndices();
+  if (!filter) return indices;
+  return indices.filter((idx) =>
+    (state.rows[idx] || []).join(" ").toLowerCase().includes(filter)
+  );
+}
+
+/* Page (0-index) sur laquelle se trouve une ligne donnée. */
+function pageForRowIndex(idx) {
+  const pos = getFilteredRowIndices().indexOf(idx);
+  return pos === -1 ? rowListPage : Math.floor(pos / ROW_PAGE_SIZE);
+}
+
 function renderRowList() {
   const list = $("rowList");
   list.innerHTML = "";
   if (!state.rows.length) {
     $("selectedRowLabel").textContent = "—";
+    renderRowPager(1, 0);
     return;
   }
-  const filter = $("rowFilterInput").value.trim().toLowerCase();
-  const indices = dataRowIndices();
-  let shown = 0;
-  for (const idx of indices) {
-    if (shown >= 300) break;
+  const filtered = getFilteredRowIndices();
+  const pageCount = Math.max(1, Math.ceil(filtered.length / ROW_PAGE_SIZE));
+  rowListPage = Math.min(Math.max(rowListPage, 0), pageCount - 1);
+  const startPos = rowListPage * ROW_PAGE_SIZE;
+  const pageIndices = filtered.slice(startPos, startPos + ROW_PAGE_SIZE);
+
+  for (const idx of pageIndices) {
     const row = state.rows[idx] || [];
-    if (filter && !row.join(" ").toLowerCase().includes(filter)) continue;
-    shown++;
     const div = document.createElement("div");
     div.className = "row-item" + (idx === state.selectedRowIdx ? " selected" : "");
     div.innerHTML = `<span class="row-num">L${idx + 1}</span><span class="row-summary">${escapeHtml(rowSummary(row))}</span>`;
     div.addEventListener("click", () => selectRow(idx));
     list.appendChild(div);
   }
-  if (!shown) {
+  if (!filtered.length) {
     const p = document.createElement("div");
     p.className = "row-item";
     p.innerHTML = '<span class="row-summary" style="color:var(--text-dim)">Aucune ligne ne correspond au filtre.</span>';
     list.appendChild(p);
   }
+  renderRowPager(pageCount, filtered.length);
   $("selectedRowLabel").textContent = state.selectedRowIdx !== null ? `L${state.selectedRowIdx + 1}` : "—";
+}
+
+function renderRowPager(pageCount, total) {
+  const pager = $("rowPager");
+  if (!pager) return;
+  pager.innerHTML = "";
+  if (pageCount <= 1) return;
+
+  const startNum = rowListPage * ROW_PAGE_SIZE + 1;
+  const endNum = Math.min((rowListPage + 1) * ROW_PAGE_SIZE, total);
+
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.className = "btn icon-only row-pager-btn";
+  prev.textContent = "‹";
+  prev.title = "Page précédente";
+  prev.disabled = rowListPage === 0;
+  prev.addEventListener("click", () => { rowListPage--; renderRowList(); });
+
+  const info = document.createElement("span");
+  info.className = "row-pager-info";
+  info.textContent = `${startNum}–${endNum} sur ${total} · page ${rowListPage + 1}/${pageCount}`;
+
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "btn icon-only row-pager-btn";
+  next.textContent = "›";
+  next.title = "Page suivante";
+  next.disabled = rowListPage >= pageCount - 1;
+  next.addEventListener("click", () => { rowListPage++; renderRowList(); });
+
+  pager.appendChild(prev);
+  pager.appendChild(info);
+  pager.appendChild(next);
 }
 
 function selectRow(idx) {
   state.selectedRowIdx = idx;
+  rowListPage = pageForRowIndex(idx);
   renderRowList();
   renderSelectedRowFields();
   updateFillButtonState();
@@ -771,7 +827,7 @@ function selectRow(idx) {
   persistSession();
 }
 
-$("rowFilterInput").addEventListener("input", renderRowList);
+$("rowFilterInput").addEventListener("input", () => { rowListPage = 0; renderRowList(); });
 
 $("prevRowBtn").addEventListener("click", () => {
   const indices = dataRowIndices();
@@ -1241,6 +1297,250 @@ $("fillBtn").addEventListener("click", async () => {
     showStatus("Erreur : " + error.message, "error");
   }
 });
+
+/* ---------- Saisie multi-onglets (une ligne différente par onglet) ---------- */
+
+const mtState = {
+  active: false,
+  origin: null,
+  tabIds: [],              // onglets gérés par le mode
+  assignments: new Map(),  // tabId -> index de ligne en cours
+  queue: [],               // indices des lignes restantes
+  done: 0,
+  total: 0,
+  lastAdvance: new Map()   // tabId -> timestamp (anti double déclenchement)
+};
+
+// Envoie un message à UN onglet, avec injection de secours du content script.
+async function sendMessageToTab(tabId, message) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, message);
+  } catch (_) {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ["content.js"]
+    });
+    return await chrome.tabs.sendMessage(tabId, message);
+  }
+}
+
+function mtRowLabel(rowIdx) { return "Ligne " + (rowIdx + 1); }
+
+function renderMtTabs() {
+  const list = $("mtTabsList");
+  list.innerHTML = "";
+  if (!mtState.active) { $("mtProgress").textContent = ""; return; }
+  $("mtProgress").textContent =
+    `${mtState.done} / ${mtState.total} traitée(s) — ${mtState.queue.length} en attente`;
+  mtState.tabIds.forEach((tabId, i) => {
+    const div = document.createElement("div");
+    div.className = "mt-tab-item";
+    const rowIdx = mtState.assignments.get(tabId);
+    const label = document.createElement("span");
+    label.className = "mt-tab-label";
+    label.textContent = `Onglet ${i + 1} : ` + (rowIdx !== undefined ? mtRowLabel(rowIdx) : "terminé ✓");
+    const goBtn = document.createElement("button");
+    goBtn.type = "button";
+    goBtn.className = "btn sm";
+    goBtn.textContent = "Voir";
+    goBtn.addEventListener("click", async () => {
+      try {
+        const t = await chrome.tabs.get(tabId);
+        await chrome.tabs.update(tabId, { active: true });
+        if (t.windowId != null) await chrome.windows.update(t.windowId, { focused: true });
+      } catch (_) { showStatus("Onglet fermé.", "error"); }
+    });
+    const nextBtn = document.createElement("button");
+    nextBtn.type = "button";
+    nextBtn.className = "btn sm";
+    nextBtn.textContent = "Ligne suivante";
+    nextBtn.title = "Marquer la ligne comme validée et remplir la suivante dans cet onglet";
+    nextBtn.addEventListener("click", () => { mtAdvanceTab(tabId, true).catch(console.warn); });
+    div.append(label, goBtn, nextBtn);
+    list.appendChild(div);
+  });
+}
+
+// Remplit l'onglet avec sa ligne assignée et affiche le badge.
+async function mtFillTab(tabId) {
+  const rowIdx = mtState.assignments.get(tabId);
+  if (rowIdx === undefined) return null;
+  const { data, mapping, customFields } = buildFillPayload(rowIdx);
+  const message = {
+    action: "fillForm",
+    data,
+    mapping,
+    customFields: Object.keys(customFields).length ? customFields : undefined
+  };
+  try {
+    const response = await sendMessageToTab(tabId, message);
+    await sendMessageToTab(tabId, { action: "showRowBadge", label: mtRowLabel(rowIdx), state: "active" });
+    return response;
+  } catch (err) {
+    console.warn("NoHands OSA multi-onglets: onglet " + tabId + " injoignable:", err.message);
+    return null;
+  }
+}
+
+// Assigne la prochaine ligne de la file à l'onglet (ou le marque terminé).
+async function mtAssignNext(tabId) {
+  if (!mtState.active) return;
+  if (!mtState.queue.length) {
+    mtState.assignments.delete(tabId);
+    try { await sendMessageToTab(tabId, { action: "showRowBadge", label: "✓ Terminé", state: "done" }); } catch (_) {}
+    renderMtTabs();
+    if (!mtState.assignments.size) {
+      showStatus(`Saisie multi-onglets terminée : ${mtState.done} ligne(s) traitée(s).`, "success");
+      mtStop(false, false);
+    }
+    return;
+  }
+  const rowIdx = mtState.queue.shift();
+  mtState.assignments.set(tabId, rowIdx);
+  await mtFillTab(tabId);
+  renderMtTabs();
+}
+
+// L'onglet vient d'être validé (rechargement de page, ou clic manuel) :
+// la ligne en cours est comptée traitée et l'onglet reçoit la suivante.
+async function mtAdvanceTab(tabId, manual = false) {
+  if (!mtState.active) return;
+  const now = Date.now();
+  if (!manual && now - (mtState.lastAdvance.get(tabId) || 0) < 1500) return;
+  mtState.lastAdvance.set(tabId, now);
+  if (mtState.assignments.has(tabId)) mtState.done++;
+  await mtAssignNext(tabId);
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!mtState.active || !mtState.tabIds.includes(tabId)) return;
+  if (changeInfo.status !== "complete") return;
+  if (!$("mtAutoNext").checked) {
+    // Pas d'avance auto : on ré-affiche juste le badge de la ligne en cours.
+    const rowIdx = mtState.assignments.get(tabId);
+    if (rowIdx !== undefined) {
+      sendMessageToTab(tabId, { action: "showRowBadge", label: mtRowLabel(rowIdx), state: "active" }).catch(() => {});
+    }
+    return;
+  }
+  const delay = Math.max(0, parseInt($("mtDelayMs").value, 10) || 0);
+  setTimeout(() => { mtAdvanceTab(tabId).catch(console.warn); }, delay);
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (!mtState.active || !mtState.tabIds.includes(tabId)) return;
+  // Onglet fermé : sa ligne non validée retourne en tête de file.
+  const rowIdx = mtState.assignments.get(tabId);
+  if (rowIdx !== undefined) mtState.queue.unshift(rowIdx);
+  mtState.assignments.delete(tabId);
+  mtState.tabIds = mtState.tabIds.filter((id) => id !== tabId);
+  if (!mtState.tabIds.length) {
+    showStatus("Tous les onglets multi-saisie sont fermés — mode arrêté.", "error");
+    mtStop(false);
+  } else {
+    renderMtTabs();
+  }
+});
+
+async function mtStart() {
+  saveCustomFields();
+  if (!state.rows.length) { showStatus("Charge d'abord des données.", "error"); return; }
+  const hasMapping = Object.keys(state.mapping).length > 0;
+  const hasCustom = state.customFields.some((f) => f.name);
+  if (!hasMapping && !hasCustom) {
+    showStatus("Configure d'abord le mapping (ou des champs personnalisés).", "error");
+    return;
+  }
+
+  // File de lignes : lignes filtrées, à partir de la ligne active.
+  const indices = getFilteredRowIndices();
+  if (!indices.length) { showStatus("Aucune ligne à saisir (filtre trop restrictif ?).", "error"); return; }
+  const startPos = state.selectedRowIdx !== null ? Math.max(0, indices.indexOf(state.selectedRowIdx)) : 0;
+  const queue = indices.slice(startPos);
+
+  // Onglet/site cible (dernier 🎯, sinon onglet actif).
+  let targetTab;
+  try {
+    targetTab = await chrome.tabs.get(await resolveTargetTabId());
+  } catch (_) {
+    showStatus("Ouvre d'abord le site cible (ou clique 🎯 sur le formulaire).", "error");
+    return;
+  }
+  const targetUrl = targetTab.url || "";
+  if (!/^https?:/.test(targetUrl)) {
+    showStatus("Page protégée : ouvre d'abord le site cible.", "error");
+    return;
+  }
+  const origin = new URL(targetUrl).origin;
+  const wanted = Math.min(Math.max(parseInt($("mtTabCount").value, 10) || 2, 2), 10);
+
+  // Onglets existants du même site (l'onglet cible en tête).
+  const existing = (await chrome.tabs.query({ url: origin + "/*" }))
+    .filter((t) => /^https?:/.test(t.url || ""));
+  if (!existing.some((t) => t.id === targetTab.id)) existing.unshift(targetTab);
+  const initialTabIds = existing.slice(0, wanted).map((t) => t.id);
+
+  mtState.active = true;
+  mtState.origin = origin;
+  mtState.tabIds = initialTabIds.slice();
+  mtState.assignments = new Map();
+  mtState.queue = queue;
+  mtState.done = 0;
+  mtState.total = queue.length;
+  mtState.lastAdvance = new Map();
+  $("mtStartBtn").disabled = true;
+  $("mtStopBtn").disabled = false;
+
+  // S'il manque des onglets, on duplique l'onglet du formulaire.
+  // Ils seront remplis à la fin de leur chargement (onUpdated).
+  const toCreate = Math.min(wanted, queue.length) - mtState.tabIds.length;
+  for (let i = 0; i < toCreate; i++) {
+    try {
+      const dup = await chrome.tabs.duplicate(targetTab.id);
+      mtState.tabIds.push(dup.id);
+    } catch (err) {
+      showStatus("Duplication d'onglet impossible : " + err.message, "error");
+      break;
+    }
+  }
+
+  // Les onglets déjà chargés reçoivent leur ligne immédiatement.
+  for (const tabId of mtState.tabIds) {
+    let tab;
+    try { tab = await chrome.tabs.get(tabId); } catch (_) { continue; }
+    if (tab.status === "complete" && !mtState.assignments.has(tabId)) {
+      mtState.lastAdvance.set(tabId, Date.now());
+      await mtAssignNext(tabId);
+    }
+  }
+  renderMtTabs();
+  showStatus(`Saisie multi-onglets : ${queue.length} ligne(s) réparties sur ${mtState.tabIds.length} onglet(s).`, "success");
+}
+
+function mtStop(notify = true, hideBadges = true) {
+  const tabIds = mtState.tabIds.slice();
+  mtState.active = false;
+  mtState.tabIds = [];
+  mtState.assignments = new Map();
+  mtState.queue = [];
+  $("mtStartBtn").disabled = false;
+  $("mtStopBtn").disabled = true;
+  renderMtTabs();
+  if (hideBadges) {
+    tabIds.forEach((tabId) => {
+      sendMessageToTab(tabId, { action: "hideRowBadge" }).catch(() => {});
+    });
+  }
+  if (notify) showStatus("Saisie multi-onglets arrêtée.", "info");
+}
+
+$("mtStartBtn").addEventListener("click", () => {
+  mtStart().catch((e) => {
+    mtStop(false);
+    showStatus("Erreur : " + e.message, "error");
+  });
+});
+$("mtStopBtn").addEventListener("click", () => mtStop());
 
 /* ---------- Sélection d'un élément sur la page (🎯) ---------- */
 

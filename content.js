@@ -54,9 +54,47 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: 'No target element' });
     }
     return true;
+  } else if (request.action === 'showRowBadge') {
+    showRowBadge(request.label || '', request.state || 'active');
+    sendResponse({ success: true });
+  } else if (request.action === 'hideRowBadge') {
+    const badge = document.getElementById('nohands-osa-row-badge');
+    if (badge) badge.remove();
+    sendResponse({ success: true });
   }
   return true;
 });
+
+/**
+ * Badge persistant (mode multi-onglets) : indique quelle ligne du fichier
+ * est saisie dans CET onglet. state: 'active' (bleu) ou 'done' (vert).
+ * Uniquement dans le cadre principal, pas dans les iframes.
+ */
+function showRowBadge(label, state) {
+  if (window.top !== window) return;
+  let badge = document.getElementById('nohands-osa-row-badge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'nohands-osa-row-badge';
+    document.documentElement.appendChild(badge);
+  }
+  badge.textContent = label;
+  badge.style.cssText = `
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    background: ${state === 'done' ? 'rgba(20, 83, 45, 0.95)' : 'rgba(30, 58, 138, 0.95)'};
+    color: ${state === 'done' ? '#4ade80' : '#93c5fd'};
+    padding: 8px 16px;
+    border-radius: 10px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 15px;
+    font-weight: 700;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.08);
+    z-index: 2147483647;
+    pointer-events: none;
+  `;
+}
 
 /**
  * Remplit avec data+mapping, plus les champs personnalisés éventuels

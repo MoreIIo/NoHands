@@ -234,6 +234,14 @@ input[type="file"]::file-selector-button {
 .row-item.selected { background: var(--accent-soft); }
 .row-item .row-num { color: var(--text-dim); font-size: 11px; min-width: 28px; flex: none; }
 .row-item .row-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-pager {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  margin-top: 6px;
+}
+.row-pager:empty { display: none; }
+.row-pager-btn { min-width: 28px; padding: 2px 8px; font-size: 15px; line-height: 1; }
+.row-pager-btn:disabled { opacity: .4; cursor: default; }
+.row-pager-info { font-size: 11px; color: var(--text-dim); }
 
 /* ---------- Liste des champs (copie) ---------- */
 .fields-list {
@@ -495,6 +503,21 @@ input[type="file"]::file-selector-button {
 .scn-step:not([data-type="click"]) .scn-only-click { display: none; }
 .scn-step:not([data-type="wait"]) .scn-only-wait { display: none; }
 .scn-step:not([data-type="cond"]) .scn-only-cond { display: none; }
+
+/* ---------- Saisie multi-onglets ---------- */
+.btn.sm { padding: 4px 10px; font-size: 11.5px; }
+.mt-tabs-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.mt-tab-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--panel, #1d1d27);
+  border: 1px solid #2d2d3a;
+  border-radius: 8px;
+  font-size: 12px;
+}
+.mt-tab-label { flex: 1; }
 
 /* ---------- Toast ---------- */
 .status-message {

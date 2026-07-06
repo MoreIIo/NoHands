@@ -157,6 +157,7 @@
       </div>
     </div>
     <div id="rowList" class="row-list"></div>
+    <div id="rowPager" class="row-pager"></div>
 
     <h2>Champs de la ligne <span class="h2-note">(cliquer pour copier)</span></h2>
     <div id="fieldsList" class="fields-list"><p class="hint">Sélectionne une ligne ci-dessus.</p></div>
@@ -190,6 +191,24 @@
       </button>
       <p class="hint">Remplit tous les onglets ouverts du même site (popups inclus).</p>
     </div>
+
+    <h2>Saisie multi-onglets <span class="h2-note">(une ligne différente par onglet)</span></h2>
+    <p class="hint">Ouvre plusieurs onglets du site et assigne à chacun une ligne différente, à partir de la ligne active. Un badge dans chaque onglet indique la ligne en cours. Quand tu valides un formulaire (la page se recharge), l'onglet reçoit automatiquement la ligne suivante de la file.</p>
+    <div class="field-row">
+      <label for="mtTabCount">Onglets</label>
+      <input type="number" id="mtTabCount" value="3" min="2" max="10" style="width:64px" />
+      <label for="mtDelayMs">Délai après rechargement (ms)</label>
+      <input type="number" id="mtDelayMs" value="800" min="0" step="100" style="width:84px" />
+    </div>
+    <div class="field-row">
+      <label><input type="checkbox" id="mtAutoNext" checked /> Ligne suivante automatique après validation</label>
+    </div>
+    <div class="field-row">
+      <button class="btn primary" id="mtStartBtn" type="button"><svg class="icon"><use href="#icon-play"/></svg> Démarrer</button>
+      <button class="btn danger" id="mtStopBtn" type="button" disabled><svg class="icon"><use href="#icon-stop"/></svg> Arrêter</button>
+      <span class="hint" id="mtProgress"></span>
+    </div>
+    <div id="mtTabsList" class="mt-tabs-list"></div>
 
     <h2>Scénario de saisie <span class="h2-note">(automatisation multi-panels)</span></h2>
     <p class="hint">Enchaîne des étapes pour saisir une ligne complète : remplir les champs mappés, cliquer sur des boutons/onglets du site, attendre qu'un élément s'affiche, ou poser des conditions (donnée Excel ou état de la page).</p>
