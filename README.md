@@ -92,6 +92,31 @@ résultats pour tester l'Extraction.
 - Vérifie que l'automatisation du logiciel interne est autorisée par ta
   politique d'entreprise avant un usage en production.
 
+## Mises à jour (depuis GitHub)
+
+L'extension peut vérifier si une version plus récente est publiée sur le dépôt
+GitHub `MoreIIo/NoHands` et afficher une bannière avec les notes de version.
+
+1. Clique sur l'icône ⚙️ (barre des profils) → **Mises à jour**.
+2. Colle un **token GitHub** en lecture seule, puis **Enregistrer le token**.
+   - Le dépôt étant privé, un token est nécessaire pour lire la version publiée.
+   - Recommandé : *fine-grained token* limité au dépôt `MoreIIo/NoHands`,
+     permission **Contents : Read-only**.
+   - Le token est stocké uniquement dans ce navigateur (`chrome.storage.local`),
+     jamais dans le code ni poussé sur GitHub, et n'est envoyé qu'à
+     `api.github.com`.
+3. **Vérifier maintenant** compare la version installée à celle de
+   `manifest.json` sur la branche `main`. Si une version supérieure existe, une
+   bannière « Nouvelle version disponible » s'affiche avec un lien vers GitHub.
+
+La vérification se relance automatiquement à l'ouverture du panneau (au plus une
+fois toutes les 3 h ; désactivable via la case à cocher). Les notes proviennent
+de la dernière *release* si elle existe, sinon des derniers messages de commit.
+
+> L'extension étant chargée « non empaquetée », la mise à jour reste **manuelle** :
+> récupère la nouvelle version sur GitHub puis recharge l'extension dans
+> `chrome://extensions`. La bannière sert d'alerte, pas d'installateur automatique.
+
 ## Structure du projet
 
 ```
@@ -101,9 +126,10 @@ résultats pour tester l'Extraction.
 ├── sidepanel.html     Interface (Données / Saisie / Extraction / Export)
 ├── sidepanel.css      Styles
 ├── sidepanel.js       Logique complète
+├── update-check.js    Vérification de mise à jour via GitHub
 ├── lib/xlsx.full.min.js  SheetJS (lecture/écriture Excel)
 ├── icons/             Icônes de l'extension
 └── test.html          Page de test locale des deux modes
 ```
 
-**Version** : 2.0.0 — fusion NoHands + OSA.
+**Version** : 2.0.0 — fusion NoHands + OSA, avec vérification de mise à jour GitHub.

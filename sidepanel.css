@@ -295,19 +295,44 @@ input[type="file"]::file-selector-button {
 .out-item .col-target-select { max-width: 170px; }
 .out-item .new-col-input { flex: 1; min-width: 90px; }
 .out-item-csshint { margin: 6px 0 0; }
-.out-item-notfound {
+.out-item-notfound,
+.out-item-regex {
   margin-top: 8px; padding-top: 8px;
   border-top: 1px dashed var(--border);
   display: flex; flex-direction: column; gap: 6px;
 }
-.out-item-notfound .checkbox-row {
+.out-item-notfound .checkbox-row,
+.out-item-regex > .checkbox-row {
   display: flex; align-items: center; gap: 8px;
   font-size: 12px; color: var(--text-dim); cursor: pointer;
+  margin: 0; padding: 0;
 }
-.out-item-notfound .checkbox-row input[type="checkbox"] {
-  width: auto; margin: 0; cursor: pointer;
+.out-item-notfound .checkbox-row input[type="checkbox"],
+.out-item-regex .checkbox-row input[type="checkbox"] {
+  width: auto; margin: 0; cursor: pointer; flex: none;
 }
 .out-item-notfound .notfound-msg { width: 100%; }
+
+/* ---------- Formatage regex du résultat ---------- */
+.regex-body { display: flex; flex-direction: column; gap: 6px; }
+.regex-body[hidden] { display: none; }
+.regex-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.regex-row[hidden] { display: none; }
+.regex-lbl { font-size: 11px; color: var(--text-dim); min-width: 74px; }
+.regex-flag { font-size: 11px; white-space: nowrap; display: flex; align-items: center; gap: 5px; }
+.regex-flag input[type="checkbox"] { width: auto; margin: 0; flex: none; }
+.regex-body .regex-pattern, .regex-body .regex-replace, .regex-body .regex-test {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+.regex-mode { max-width: 220px; }
+.regex-arrow { color: var(--text-dim); }
+.regex-result {
+  flex: 1; min-width: 90px; font-size: 12px;
+  padding: 4px 8px; border-radius: var(--radius-sm);
+  background: var(--bg-softer); border: 1px solid var(--border);
+  color: var(--ok); word-break: break-word; min-height: 16px;
+}
+.regex-result.regex-err { color: var(--err); }
 
 /* ---------- Progression / log ---------- */
 .progress {
@@ -321,6 +346,22 @@ input[type="file"]::file-selector-button {
   transition: width 0.2s;
 }
 .progress-text { text-align: right; color: var(--text-dim); font-size: 11px; margin: 4px 0; }
+
+/* Estimation (avant exécution) et chrono (pendant / après) */
+.estimate {
+  color: var(--accent); font-size: 11.5px; margin: 8px 0 2px;
+  display: flex; align-items: center; gap: 6px;
+}
+.estimate:not(:empty)::before { content: "⏱"; font-size: 12px; }
+.progress-timing { text-align: right; color: var(--text); font-size: 11px; margin: 2px 0 4px; min-height: 14px; }
+
+/* Récapitulatif : temps passé + compteurs de statut */
+.run-recap { margin: 4px 0 10px; }
+.run-recap .recap-time { margin: 2px 0; font-size: 12px; color: var(--text); }
+.run-recap .recap-counts { margin: 2px 0; font-size: 11.5px; }
+.run-recap .recap-counts .status-ok { color: var(--ok); }
+.run-recap .recap-counts .status-err { color: var(--err); }
+.run-recap .recap-counts .status-skip { color: var(--warn); }
 
 .log {
   background: #0e0e13;
@@ -473,6 +514,44 @@ input[type="file"]::file-selector-button {
 .status-message.success { color: var(--ok); border-color: rgba(74, 222, 128, 0.4); }
 .status-message.error { color: var(--err); border-color: rgba(248, 113, 113, 0.4); }
 .status-message.info { color: var(--text); }
+
+/* ---------- Mises à jour ---------- */
+.btn.sm { padding: 5px 9px; font-size: 11.5px; }
+
+.update-banner {
+  margin: 8px 12px 0;
+  padding: 9px 11px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+.update-banner-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.update-banner-row > .icon { color: var(--accent); flex: 0 0 auto; }
+.update-banner-text { flex: 1; min-width: 0; line-height: 1.25; }
+.update-banner-text strong { display: block; font-size: 12.5px; }
+.update-banner-text span { color: var(--text-dim); font-size: 11px; }
+.update-banner .btn.icon-only { padding: 5px; }
+.update-notes {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  max-height: 200px; overflow: auto;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 11.5px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+  font-family: inherit;
+}
+
+.upd-versions { margin: 6px 0 12px; }
+.upd-versions .field-row { justify-content: space-between; gap: 8px; }
+.upd-versions .field-row span { color: var(--text-dim); }
+.check-inline { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.upd-status { min-height: 16px; margin-top: 8px; }
+.upd-status.ok  { color: var(--ok); }
+.upd-status.err { color: var(--err); }
 
 /* ---------- Scrollbars ---------- */
 ::-webkit-scrollbar { width: 8px; height: 8px; }

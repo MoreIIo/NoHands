@@ -37,6 +37,7 @@ let hasStartedRun = false;
 let hasDownloaded = false;
 let runLog = [];
 let lastRunOutputs = [];
+let runDurationMs = 0;     // durée réelle de la dernière extraction (pour le récap)
 let workingReady = false;  // true une fois l'init terminée : autorise la sauvegarde auto des options
 
 // Modèles par défaut (hérités de NoHands) — modifiables/supprimables par l'utilisateur.
@@ -103,6 +104,17 @@ function escapeAttr(str) {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+// Formate une durée en millisecondes → "12 s", "3 min 20 s", "1 h 05 min".
+function formatDuration(ms) {
+  ms = Math.max(0, Math.round(ms));
+  const totalS = Math.round(ms / 1000);
+  if (totalS < 60) return totalS + " s";
+  const m = Math.floor(totalS / 60), rs = totalS % 60;
+  if (m < 60) return rs ? `${m} min ${String(rs).padStart(2, "0")} s` : `${m} min`;
+  const h = Math.floor(m / 60), rm = m % 60;
+  return rm ? `${h} h ${String(rm).padStart(2, "0")} min` : `${h} h`;
+}
+
 function hashString(str) {
   let h = 5381;
   for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
@@ -152,6 +164,31 @@ function formatValueForColumn(colName, value) {
   if (upper.includes("IBAN")) return formatIban(String(value));
   if (upper.includes("TRIMESTRE")) return formatTrimester(value);
   return value;
+}
+
+/* ---------- Formatage d'une valeur extraite via regex ----------
+   Appliqué (mode Extraction) à chaque résultat avant écriture dans le tableau.
+   - mode "extract" : renvoie le 1er groupe capturant ( ) s'il existe, sinon
+     toute la correspondance ; si rien ne correspond, renvoie la valeur brute.
+   - mode "replace" : remplace toutes les correspondances (drapeau global) par
+     le texte de remplacement ($1, $2… acceptés).
+   Regex invalide ou motif vide → valeur brute renvoyée (jamais d'exception). */
+function applyOutputRegex(value, o) {
+  if (!o || !o.regexEnabled) return value;
+  const pattern = (o.regexPattern || "").trim();
+  if (!pattern) return value;
+  const str = value == null ? "" : String(value);
+  const flags = o.regexFlagI ? "i" : "";
+  try {
+    if (o.regexMode === "replace") {
+      return str.replace(new RegExp(pattern, "g" + flags), o.regexReplace || "");
+    }
+    const m = str.match(new RegExp(pattern, flags));
+    if (!m) return str;
+    return m[1] != null ? m[1] : m[0];
+  } catch (e) {
+    return str;
+  }
 }
 
 /* ---------- Règles de valeurs (conversion d'une valeur avant la saisie) ----------
@@ -1495,10 +1532,41 @@ function addOutputRow(o = {}) {
       </label>
       <input type="text" class="notfound-msg" placeholder="ex : non trouvé" value="${escapeAttr(o.notFoundMsg || "")}" ${o.notFoundEnabled ? "" : "style=display:none"} />
     </div>
+    <div class="out-item-regex">
+      <label class="checkbox-row">
+        <input type="checkbox" class="regex-check" ${o.regexEnabled ? "checked" : ""} />
+        Formater le résultat (regex)
+      </label>
+      <div class="regex-body" ${o.regexEnabled ? "" : "hidden"}>
+        <div class="regex-row">
+          <select class="regex-mode">
+            <option value="extract">Extraire (garder ce qui correspond)</option>
+            <option value="replace">Remplacer</option>
+          </select>
+          <label class="checkbox-row regex-flag"><input type="checkbox" class="regex-i" ${o.regexFlagI ? "checked" : ""} /> ignorer la casse</label>
+        </div>
+        <div class="regex-row">
+          <label class="regex-lbl">Motif :</label>
+          <input type="text" class="regex-pattern" spellcheck="false" placeholder="ex : M\\.?\\s+([A-ZÀ-Ÿ'\\-]+)" value="${escapeAttr(o.regexPattern || "")}" style="flex:1;min-width:120px" />
+        </div>
+        <div class="regex-row regex-replace-row" ${o.regexMode === "replace" ? "" : "hidden"}>
+          <label class="regex-lbl">Remplacer par :</label>
+          <input type="text" class="regex-replace" spellcheck="false" placeholder="ex : $1 (vide = supprimer)" value="${escapeAttr(o.regexReplace || "")}" style="flex:1;min-width:120px" />
+        </div>
+        <p class="hint">Extraire : le 1<sup>er</sup> groupe entre parenthèses <code>( )</code> est gardé, sinon toute la correspondance. Remplacer : utilise <code>$1</code>, <code>$2</code>… pour réinjecter les groupes.</p>
+        <div class="regex-row regex-test-row">
+          <label class="regex-lbl">Exemple :</label>
+          <input type="text" class="regex-test" spellcheck="false" placeholder="colle une valeur pour tester" style="flex:1;min-width:120px" />
+          <span class="regex-arrow">→</span>
+          <output class="regex-result"></output>
+        </div>
+      </div>
+    </div>
   `;
 
   div.querySelector(".mode-select").value = mode;
   div.querySelector(".match-type-select").value = o.matchType || "contains";
+  div.querySelector(".regex-mode").value = o.regexMode || "extract";
 
   const targetSel = div.querySelector(".col-target-select");
   fillColumnSelect(targetSel, o.col || "", [{ value: "__other__", label: "➕ Autre (lettre ou nouvelle colonne)…" }]);
@@ -1549,6 +1617,53 @@ function addOutputRow(o = {}) {
     if (notFoundCheck.checked) notFoundMsg.focus();
   });
 
+  // Bloc "Formater le résultat (regex)"
+  const regexCheck = div.querySelector(".regex-check");
+  const regexBody = div.querySelector(".regex-body");
+  const regexModeSel = div.querySelector(".regex-mode");
+  const regexReplaceRow = div.querySelector(".regex-replace-row");
+  const regexTestInput = div.querySelector(".regex-test");
+  const regexResult = div.querySelector(".regex-result");
+  const readRegexConfig = () => ({
+    regexEnabled: regexCheck.checked,
+    regexMode: regexModeSel.value,
+    regexPattern: div.querySelector(".regex-pattern").value,
+    regexReplace: div.querySelector(".regex-replace").value,
+    regexFlagI: div.querySelector(".regex-i").checked
+  });
+  const refreshRegexTest = () => {
+    const cfg = readRegexConfig();
+    const sample = regexTestInput.value;
+    if (!cfg.regexEnabled || !cfg.regexPattern.trim() || !sample) {
+      regexResult.textContent = "";
+      regexResult.classList.remove("regex-err");
+      return;
+    }
+    try {
+      new RegExp(cfg.regexPattern); // validation
+      regexResult.textContent = applyOutputRegex(sample, cfg);
+      regexResult.classList.remove("regex-err");
+    } catch (e) {
+      regexResult.textContent = "regex invalide";
+      regexResult.classList.add("regex-err");
+    }
+  };
+  regexCheck.addEventListener("change", () => {
+    regexBody.hidden = !regexCheck.checked;
+    refreshRegexTest();
+    persistWorkingConfig();
+  });
+  regexModeSel.addEventListener("change", () => {
+    regexReplaceRow.hidden = regexModeSel.value !== "replace";
+    refreshRegexTest();
+    persistWorkingConfig();
+  });
+  div.querySelectorAll(".regex-pattern, .regex-replace, .regex-i").forEach((el) => {
+    el.addEventListener("input", refreshRegexTest);
+    el.addEventListener("change", persistWorkingConfig);
+  });
+  regexTestInput.addEventListener("input", refreshRegexTest);
+
   $("outputsList").appendChild(div);
 }
 
@@ -1565,7 +1680,12 @@ function getOutputs() {
     }
     const notFoundEnabled = el.querySelector(".notfound-check").checked;
     const notFoundMsg = el.querySelector(".notfound-msg").value;
-    const base = { mode, col, newCol, notFoundEnabled, notFoundMsg };
+    const regexEnabled = el.querySelector(".regex-check").checked;
+    const regexMode = el.querySelector(".regex-mode").value;
+    const regexPattern = el.querySelector(".regex-pattern").value;
+    const regexReplace = el.querySelector(".regex-replace").value;
+    const regexFlagI = el.querySelector(".regex-i").checked;
+    const base = { mode, col, newCol, notFoundEnabled, notFoundMsg, regexEnabled, regexMode, regexPattern, regexReplace, regexFlagI };
     if (mode === "tableMatch") {
       return {
         ...base,
@@ -1761,6 +1881,47 @@ function setProgress(current, total) {
   $("progressText").textContent = `${current} / ${total}`;
 }
 
+// Affiche le temps écoulé et une estimation du temps restant pendant l'exécution.
+function updateRunTiming(done, total, runStart) {
+  const el = $("progressTiming");
+  if (!el) return;
+  const elapsed = Date.now() - runStart;
+  let txt = `Écoulé ${formatDuration(elapsed)}`;
+  if (done > 0 && done < total) {
+    const eta = (elapsed / done) * (total - done);
+    txt += ` · reste ~${formatDuration(eta)}`;
+  }
+  el.textContent = txt;
+}
+
+// Estime le temps d'une extraction à partir de la configuration courante.
+// Renvoie { total, perRowMs, totalMs } ou null si aucune donnée.
+function estimateExtractionMs() {
+  if (!state.rows.length) return null;
+  const waitMs = parseInt($("waitMs").value, 10) || 0;
+  const rowDelayMs = parseInt($("rowDelayMs").value, 10) || 0;
+  const navEnabled = $("navEnabled").checked;
+  const navExtraWaitMs = parseInt($("navExtraWaitMs").value, 10) || 0;
+  const startRowInput = parseInt($("startRow").value, 10) || (dataStartIdx() + 1);
+  const endRowInput = $("endRow").value.trim();
+  const startIdx = Math.max(0, startRowInput - 1);
+  const endIdx = Math.min(state.rows.length - 1, endRowInput ? parseInt(endRowInput, 10) - 1 : state.rows.length - 1);
+  const total = Math.max(0, endIdx - startIdx + 1);
+  const SCRIPT_OVERHEAD = 500;         // exécution du script de recherche/lecture
+  const NAV_LOAD = navEnabled ? 2000 : 0; // chargement moyen estimé de la page
+  const perRowMs = waitMs + rowDelayMs + navExtraWaitMs + SCRIPT_OVERHEAD + NAV_LOAD;
+  return { total, perRowMs, totalMs: total * perRowMs };
+}
+
+// Met à jour la ligne d'estimation affichée sous les boutons d'exécution.
+function updateExtractEstimate() {
+  const el = $("extractEstimate");
+  if (!el || isRunning) return;
+  const est = estimateExtractionMs();
+  if (!est || !est.total) { el.textContent = ""; return; }
+  el.textContent = `Estimation : ~${formatDuration(est.totalMs)} pour ${est.total} ligne${est.total > 1 ? "s" : ""} (~${formatDuration(est.perRowMs)}/ligne).`;
+}
+
 /* ---------- Boucle principale ---------- */
 
 $("startBtn").addEventListener("click", runAutomation);
@@ -1848,7 +2009,11 @@ async function runAutomation() {
   lastRunOutputs = outputsResolved;
   const total = Math.max(0, endIdx - startIdx + 1);
   let done = 0;
+  const runStart = Date.now();
+  runDurationMs = 0;
   setProgress(0, total);
+  $("extractEstimate").textContent = "";
+  updateRunTiming(0, total, runStart);
   updateDoneMarkers();
 
   for (let idx = startIdx; idx <= endIdx; idx++) {
@@ -1859,7 +2024,7 @@ async function runAutomation() {
     if (rowMatchesSkipCondition(row, conditions)) {
       logLine(`Ligne ${rowNum} : ignorée (condition).`, "skip");
       runLog.push({ row: rowNum, search: "", values: [], status: "skip", note: "Condition" });
-      done++; setProgress(done, total);
+      done++; setProgress(done, total); updateRunTiming(done, total, runStart);
       continue;
     }
 
@@ -1868,7 +2033,7 @@ async function runAutomation() {
     if (searchResolved.length && !searchFieldValues.some((f) => f.value.trim())) {
       logLine(`Ligne ${rowNum} : ignorée (valeur(s) de recherche vide(s)).`, "skip");
       runLog.push({ row: rowNum, search: "", values: [], status: "skip", note: "Valeur vide" });
-      done++; setProgress(done, total);
+      done++; setProgress(done, total); updateRunTiming(done, total, runStart);
       continue;
     }
 
@@ -1878,7 +2043,7 @@ async function runAutomation() {
       if (values.length && values.every((v) => !v)) {
         logLine(`Ligne ${rowNum} : ignorée (valeur de navigation vide).`, "skip");
         runLog.push({ row: rowNum, search: searchLabel, values: [], status: "skip", note: "Valeur de navigation vide" });
-        done++; setProgress(done, total);
+        done++; setProgress(done, total); updateRunTiming(done, total, runStart);
         continue;
       }
       if (!searchLabel) searchLabel = values.filter(Boolean).join(" / ");
@@ -1886,7 +2051,7 @@ async function runAutomation() {
       if (!nav.ok) {
         logLine(`Ligne ${rowNum} : erreur navigation — ${nav.error}`, "err");
         runLog.push({ row: rowNum, search: searchLabel, values: [], status: "err", note: "Navigation : " + nav.error });
-        done++; setProgress(done, total);
+        done++; setProgress(done, total); updateRunTiming(done, total, runStart);
         continue;
       }
       if (nav.timedOut) logLine(`Ligne ${rowNum} : page toujours en chargement après ${navWaitTimeout} ms — on continue.`, "skip");
@@ -1926,7 +2091,13 @@ async function runAutomation() {
         logLine(`Ligne ${rowNum} : erreur — ${msg}`, "err");
         runLog.push({ row: rowNum, search: searchLabel, values: [], status: "err", note: msg });
       } else {
-        outputsResolved.forEach((o, i) => setCellByIndex(row, o.targetIdx, result.values[i]));
+        outputsResolved.forEach((o, i) => {
+          let val = result.values[i];
+          // Ne pas reformater le message "non trouvé" éventuel.
+          const isNotFoundMsg = o.notFoundEnabled && val === (o.notFoundMsg || "");
+          if (!isNotFoundMsg) val = applyOutputRegex(val, o);
+          setCellByIndex(row, o.targetIdx, val);
+        });
         state.rows[idx] = row;
         const missingSelectors = result.notFound || [];
         const allValuesEmpty = result.values.every((v) => !String(v || "").trim());
@@ -1946,15 +2117,18 @@ async function runAutomation() {
       runLog.push({ row: rowNum, search: searchLabel, values: [], status: "err", note: err.message });
     }
 
-    done++; setProgress(done, total);
+    done++; setProgress(done, total); updateRunTiming(done, total, runStart);
     if (rowDelayMs > 0 && idx < endIdx && !stopRequested) await sleep(rowDelayMs);
   }
 
+  runDurationMs = Date.now() - runStart;
   isRunning = false;
   $("startBtn").disabled = false;
   $("stopBtn").disabled = true;
-  logLine("Terminé.", "ok");
+  $("progressTiming").textContent = `Terminé en ${formatDuration(runDurationMs)}`;
+  logLine(`Terminé en ${formatDuration(runDurationMs)}.`, "ok");
   renderResultSummary();
+  updateExtractEstimate();
   renderPreview();
   persistSession();
   updateDoneMarkers();
@@ -1970,7 +2144,15 @@ function renderResultSummary() {
   }
   const headers = lastRunOutputs.map((o) => o.col);
   const statusLabels = { ok: "OK", err: "Erreur", skip: "Ignoré" };
-  let html = '<div class="summary-table-wrap"><table class="summary-table"><thead><tr><th>Ligne</th><th>Recherche</th>';
+  const counts = runLog.reduce((a, e) => { a[e.status] = (a[e.status] || 0) + 1; return a; }, {});
+  const n = runLog.length;
+  let html = '<div class="run-recap">';
+  if (runDurationMs > 0) {
+    html += `<p class="recap-time"><strong>Temps passé :</strong> ${formatDuration(runDurationMs)} pour ${n} ligne${n > 1 ? "s" : ""} · ~${formatDuration(runDurationMs / Math.max(1, n))}/ligne</p>`;
+  }
+  html += `<p class="recap-counts"><span class="status-ok">${counts.ok || 0} OK</span> · <span class="status-err">${counts.err || 0} erreur(s)</span> · <span class="status-skip">${counts.skip || 0} ignorée(s)</span></p>`;
+  html += '</div>';
+  html += '<div class="summary-table-wrap"><table class="summary-table"><thead><tr><th>Ligne</th><th>Recherche</th>';
   html += headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   html += "<th>Statut</th></tr></thead><tbody>";
   runLog.forEach((entry) => {
@@ -2012,6 +2194,50 @@ function scnLog(text, cls = "") {
 function scnSetProgress(current, total) {
   $("scnProgressFill").style.width = total ? Math.round((current / total) * 100) + "%" : "0%";
   $("scnProgressText").textContent = `${current} / ${total}`;
+}
+
+// Affiche le temps écoulé et le temps restant estimé pendant la boucle de saisie.
+function scnUpdateTiming(done, total, runStart) {
+  const el = $("scnProgressTiming");
+  if (!el) return;
+  const elapsed = Date.now() - runStart;
+  let txt = `Écoulé ${formatDuration(elapsed)}`;
+  if (done > 0 && done < total) {
+    const eta = (elapsed / done) * (total - done);
+    txt += ` · reste ~${formatDuration(eta)}`;
+  }
+  el.textContent = txt;
+}
+
+// Estimation indicative de la durée d'une étape de scénario.
+function estimateScenarioStepMs(s) {
+  switch (s.type) {
+    case "fill": return 700;
+    case "goto": return s.gotoWait !== false ? Math.min(2500, parseInt(s.gotoTimeout, 10) || 15000) : 400;
+    case "click": return 700;
+    case "wait":
+      if (s.waitMode === "delay") return parseInt(s.waitMs, 10) || 0;
+      return 1200; // attente d'un sélecteur : moyenne estimée
+    case "cond": return 250;
+  }
+  return 300;
+}
+
+// Met à jour la ligne d'estimation de la boucle de saisie.
+function updateScenarioEstimate() {
+  const el = $("scnEstimate");
+  if (!el || scnRunning) return;
+  const steps = getScenarioSteps();
+  if (!steps.length || !state.rows.length) { el.textContent = ""; return; }
+  const startRowInput = parseInt($("scnStartRow").value, 10) || (dataStartIdx() + 1);
+  const endRowInput = $("scnEndRow").value.trim();
+  const startIdx = Math.max(0, startRowInput - 1);
+  const endIdx = Math.min(state.rows.length - 1, endRowInput ? parseInt(endRowInput, 10) - 1 : state.rows.length - 1);
+  const total = Math.max(0, endIdx - startIdx + 1);
+  if (!total) { el.textContent = ""; return; }
+  const rowDelayMs = parseInt($("scnRowDelayMs").value, 10) || 0;
+  const perRowMs = steps.reduce((sum, s) => sum + estimateScenarioStepMs(s), 0) + rowDelayMs;
+  el.textContent = `Estimation boucle : ~${formatDuration(perRowMs * total)} pour ${total} ligne${total > 1 ? "s" : ""} (~${formatDuration(perRowMs)}/ligne).`;
 }
 
 // Pause interruptible par le bouton Arrêter.
@@ -2259,14 +2485,20 @@ function getScenarioSteps() {
 $("addStepBtn").addEventListener("click", () => {
   addScenarioStep();
   persistWorkingConfig();
+  updateScenarioEstimate();
 });
 
 $("clearStepsBtn").addEventListener("click", () => {
   if (!$("scenarioSteps").children.length) return;
   $("scenarioSteps").innerHTML = "";
   persistWorkingConfig();
+  updateScenarioEstimate();
   showStatus("Étapes du scénario supprimées.", "info");
 });
+
+// Recalcule l'estimation quand une étape du scénario est modifiée.
+$("scenarioSteps").addEventListener("input", updateScenarioEstimate);
+$("scenarioSteps").addEventListener("change", updateScenarioEstimate);
 
 /* ---------- Fonctions injectées (autonomes) ---------- */
 
@@ -2568,14 +2800,17 @@ $("runScenarioLoopBtn").addEventListener("click", async () => {
   scnBegin();
   const total = endIdx - startIdx + 1;
   let done = 0, okCount = 0, errCount = 0, skippedCount = 0;
+  const runStart = Date.now();
   scnSetProgress(0, total);
+  $("scnEstimate").textContent = "";
+  scnUpdateTiming(0, total, runStart);
 
   for (let idx = startIdx; idx <= endIdx; idx++) {
     if (scnStopRequested) { scnLog("Arrêté par l'utilisateur.", "skip"); break; }
     const row = state.rows[idx] || [];
     if (!row.some((v) => String(v ?? "").trim() !== "")) {
       scnLog(`L${idx + 1} : ligne vide, ignorée.`, "skip");
-      skippedCount++; done++; scnSetProgress(done, total);
+      skippedCount++; done++; scnSetProgress(done, total); scnUpdateTiming(done, total, runStart);
       continue;
     }
     selectRow(idx); // la ligne active suit la boucle (visible dans l'UI)
@@ -2583,12 +2818,15 @@ $("runScenarioLoopBtn").addEventListener("click", async () => {
     const res = await runScenarioForRow(idx, tabId, steps, `L${idx + 1} · `);
     if (res.stopped) { scnLog("Arrêté par l'utilisateur.", "skip"); break; }
     if (res.ok) okCount++; else errCount++;
-    done++; scnSetProgress(done, total);
+    done++; scnSetProgress(done, total); scnUpdateTiming(done, total, runStart);
     if (rowDelayMs > 0 && idx < endIdx && !scnStopRequested) await scnSleep(rowDelayMs);
   }
 
-  scnLog(`Boucle terminée : ${okCount} OK, ${errCount} erreur(s), ${skippedCount} ligne(s) vide(s).`, errCount ? "err" : "ok");
+  const scnDurationMs = Date.now() - runStart;
+  $("scnProgressTiming").textContent = `Terminé en ${formatDuration(scnDurationMs)}`;
+  scnLog(`Boucle terminée en ${formatDuration(scnDurationMs)} : ${okCount} OK, ${errCount} erreur(s), ${skippedCount} ligne(s) vide(s).`, errCount ? "err" : "ok");
   scnFinish();
+  updateScenarioEstimate();
 });
 
 /* ================== 6. EXPORT / PROFILS / ONGLETS / INIT ================== */
@@ -2851,11 +3089,24 @@ function showTab(tabName) {
     b.classList.toggle("active", b.getAttribute("data-tab") === tabName);
   });
   updateDoneMarkers();
+  if (tabName === "extraction") updateExtractEstimate();
+  if (tabName === "saisie") updateScenarioEstimate();
   if (workingReady) chrome.storage.local.set({ lastTab: tabName });
 }
 
 document.querySelectorAll(".tab-btn[data-tab]").forEach((btn) => {
   btn.addEventListener("click", () => showTab(btn.getAttribute("data-tab")));
+});
+
+// Recalcule l'estimation d'extraction dès qu'un paramètre de temps / de plage change.
+["waitMs", "rowDelayMs", "navExtraWaitMs", "navEnabled", "startRow", "endRow"].forEach((id) => {
+  const el = $(id);
+  if (el) el.addEventListener("input", updateExtractEstimate);
+});
+// Idem pour le scénario de saisie (plage de la boucle et pause).
+["scnStartRow", "scnEndRow", "scnRowDelayMs"].forEach((id) => {
+  const el = $(id);
+  if (el) el.addEventListener("input", updateScenarioEstimate);
 });
 
 function updateDoneMarkers() {
