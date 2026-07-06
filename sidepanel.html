@@ -210,6 +210,29 @@
     <div id="conditionsList"></div>
     <button class="btn" id="addConditionBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter une condition</button>
 
+    <h2>Navigation <span class="h2-note">(ouvrir un lien avant chaque ligne)</span></h2>
+    <label class="checkbox-row">
+      <input type="checkbox" id="navEnabled" />
+      Ouvrir une URL construite depuis les données avant la recherche
+    </label>
+    <div id="navOptions" style="display:none">
+      <div class="field-row">
+        <input type="text" id="navUrlTemplate" placeholder="ex : http://sigeo.evoriel.net/page.aspx/fr/sig/quick_access?var={N° MG}&amp;metier=ger;;2,27" style="flex:1;min-width:180px" />
+      </div>
+      <p class="hint">Écris <code>{Nom de colonne}</code> (ou une lettre : <code>{A}</code>) dans l'URL : la valeur de la ligne remplace le marqueur. Ex : <code>?var={N° MG}</code> → <code>?var=MG0383774</code>.</p>
+      <label class="checkbox-row">
+        <input type="checkbox" id="navWaitLoad" checked />
+        Attendre que la page soit chargée
+      </label>
+      <div class="field-row">
+        <label for="navWaitTimeout">Timeout chargement (ms) :</label>
+        <input type="number" id="navWaitTimeout" value="15000" min="500" step="500" />
+        <label for="navExtraWaitMs">attente en plus (ms) :</label>
+        <input type="number" id="navExtraWaitMs" value="0" min="0" step="100" />
+      </div>
+      <p class="hint">Avec la navigation activée, les champs de recherche deviennent facultatifs : tu peux extraire directement depuis la page ouverte.</p>
+    </div>
+
     <h2>Champs de recherche</h2>
     <p class="hint">Pour chaque ligne, ces valeurs sont tapées dans la page avant validation.</p>
     <div id="searchFieldsList"></div>
@@ -259,4 +282,79 @@
   <!-- ================= ONGLET EXPORT ================= -->
   <section class="panel" data-tab="export" hidden>
     <h2>Télécharger les données mises à jour</h2>
-    <p class="hi
+    <p class="hint" id="exportInfo">Les résultats de l'extraction sont écrits dans le tableau en mémoire ; télécharge-le ici.</p>
+    <div class="field-row">
+      <label for="outputNameInput">Nom du fichier :</label>
+      <input type="text" id="outputNameInput" placeholder="resultat.xlsx" style="flex:1;min-width:140px" />
+    </div>
+    <div class="field-row">
+      <button class="btn primary" id="downloadBtn" type="button"><svg class="icon"><use href="#icon-download"/></svg> Fichier Excel (.xlsx)</button>
+      <button class="btn" id="downloadJsonBtn" type="button"><svg class="icon"><use href="#icon-download"/></svg> JSON</button>
+    </div>
+  </section>
+
+  <!-- ================= MODAL : MODÈLES DE COLONNES ================= -->
+  <div class="modal-overlay" id="modelsModal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Modèles de colonnes</h3>
+        <button class="btn icon-only" id="closeModelsBtn" type="button"><svg class="icon"><use href="#icon-close"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <p class="hint">Un modèle nomme les colonnes d'un tableau sans en-têtes. Un nom de colonne par ligne.</p>
+        <div id="modelsList"></div>
+        <h4>Nouveau modèle</h4>
+        <input type="text" id="newModelName" placeholder="nom du modèle (ex: PROP)" />
+        <textarea id="newModelColumns" rows="6" placeholder="N° PROP (TW)&#10;CIVILITE PROP&#10;NOM PROP&#10;…"></textarea>
+        <div class="field-row">
+          <button class="btn primary" id="addModelBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Créer le modèle</button>
+          <button class="btn" id="modelFromColumnsBtn" type="button">Depuis les colonnes actuelles</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= MODAL : MAPPING ================= -->
+  <div class="modal-overlay" id="mappingModal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Mapping colonnes → inputs</h3>
+        <button class="btn icon-only" id="closeMappingBtn" type="button"><svg class="icon"><use href="#icon-close"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <p class="hint">Pour chaque colonne, indique le(s) attribut(s) <code>name</code> des champs à remplir sur la page. Le bouton <svg class="icon icon-sm inline-icon"><use href="#icon-target"/></svg> permet de cliquer directement sur le champ du site.</p>
+        <div id="mappingFields"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="cancelMappingBtn" type="button">Annuler</button>
+        <button class="btn primary" id="saveMappingBtn" type="button"><svg class="icon icon-sm"><use href="#icon-save"/></svg> Sauvegarder</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= MODAL : RÈGLES DE VALEURS ================= -->
+  <div class="modal-overlay" id="valueRulesModal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Règles de valeurs</h3>
+        <button class="btn icon-only" id="closeValueRulesBtn" type="button"><svg class="icon"><use href="#icon-close"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <p class="hint">Chaque règle convertit une ou plusieurs valeurs sources (séparées par des virgules) en une valeur cible. La comparaison ignore la casse et les accents. La première règle qui correspond l'emporte. La valeur cible doit correspondre à une option du champ (ex. « Mme », « M. », « Oui »).</p>
+        <div id="valueRulesList"></div>
+        <button class="btn" id="addValueRuleBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter une règle</button>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="cancelValueRulesBtn" type="button">Annuler</button>
+        <button class="btn primary" id="saveValueRulesBtn" type="button"><svg class="icon icon-sm"><use href="#icon-save"/></svg> Sauvegarder</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast de statut -->
+  <div id="statusMessage" class="status-message"></div>
+
+  <script src="lib/xlsx.full.min.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

@@ -428,4 +428,53 @@ input[type="file"]::file-selector-button {
   counter-increment: scn;
 }
 .scn-head { display: flex; gap: 6px; align-items: center; }
-.scn-drag { 
+.scn-drag { flex: none; cursor: grab; color: var(--text-dim); }
+.scn-drag:active { cursor: grabbing; }
+.scn-step.scn-dragging { opacity: 0.5; border-color: var(--accent); }
+.scn-num {
+  flex: none; width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent);
+  border-radius: 50%; font-size: 11px; font-weight: 700;
+}
+.scn-num::before { content: counter(scn); }
+.scn-head .scn-type { flex: 1; min-width: 0; }
+.scn-body .scn-row {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  margin-top: 8px;
+}
+.scn-body .scn-row label { color: var(--text-dim); font-size: 11.5px; flex: none; }
+.scn-body .scn-row input[type="text"] { flex: 1; min-width: 110px; }
+.scn-body .scn-row select { max-width: 220px; }
+.scn-body .hint { margin-bottom: 0; }
+.scn-body .scn-inline { display: inline-flex; gap: 6px; align-items: center; }
+.scn-step [hidden] { display: none !important; }
+.scn-step:not([data-type="fill"]) .scn-only-fill { display: none; }
+.scn-step:not([data-type="goto"]) .scn-only-goto { display: none; }
+.scn-step:not([data-type="click"]) .scn-only-click { display: none; }
+.scn-step:not([data-type="wait"]) .scn-only-wait { display: none; }
+.scn-step:not([data-type="cond"]) .scn-only-cond { display: none; }
+
+/* ---------- Toast ---------- */
+.status-message {
+  position: fixed; bottom: 14px; left: 12px; right: 12px;
+  background: var(--bg-softer);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 12.5px; font-weight: 600;
+  opacity: 0; transform: translateY(8px);
+  transition: opacity 0.2s, transform 0.2s;
+  pointer-events: none;
+  z-index: 200;
+  text-align: center;
+}
+.status-message.show { opacity: 1; transform: translateY(0); }
+.status-message.success { color: var(--ok); border-color: rgba(74, 222, 128, 0.4); }
+.status-message.error { color: var(--err); border-color: rgba(248, 113, 113, 0.4); }
+.status-message.info { color: var(--text); }
+
+/* ---------- Scrollbars ---------- */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #44445a; }

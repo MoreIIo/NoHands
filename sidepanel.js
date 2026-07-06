@@ -1599,6 +1599,13 @@ function performRowActionInjected(config) {
         return resolve({ ok: false, error: "Champ(s) de recherche introuvable(s) : " + missingFields.join(", ") });
       }
 
+      // Aucun champ de recherche (mode navigation seule) : on lit directement
+      // les résultats après le délai d'attente, sans remplir ni valider.
+      if (!fields.length) {
+        setTimeout(readResults, config.waitMs || 0);
+        return;
+      }
+
       function setElementValue(el, val) {
         if ("value" in el) {
           el.focus();
@@ -1692,6 +1699,53 @@ function performRowActionInjected(config) {
   });
 }
 
+/* ---------- Navigation : ouvrir une URL construite depuis la ligne ---------- */
+
+$("navEnabled").addEventListener("change", () => {
+  $("navOptions").style.display = $("navEnabled").checked ? "block" : "none";
+});
+
+// Remplace les {Nom de colonne} (ou {A}) du modèle d'URL par les valeurs de la ligne.
+// Retourne { url, missing: [colonnes introuvables], values: [valeurs insérées] }.
+function buildNavUrl(template, row) {
+  const missing = [];
+  const values = [];
+  const url = String(template || "").replace(/\{([^{}]+)\}/g, (_, name) => {
+    const idx = colIndexByName(name.trim());
+    if (idx < 0) { missing.push(name.trim()); return ""; }
+    const v = getCellByIndex(row, idx).trim();
+    values.push(v);
+    return encodeURIComponent(v);
+  });
+  return { url, missing, values };
+}
+
+// Navigue l'onglet vers l'URL. Si waitForLoad, attend la fin du chargement
+// (status "complete") avec timeout ; en cas de timeout on continue quand même
+// (timedOut: true) car la page est souvent déjà exploitable.
+function navigateTabAndWait(tabId, url, waitForLoad, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (res) => {
+      if (settled) return;
+      settled = true;
+      try { chrome.tabs.onUpdated.removeListener(onUpdated); } catch (_) {}
+      resolve(res);
+    };
+    function onUpdated(id, info) {
+      if (id === tabId && info.status === "complete") finish({ ok: true });
+    }
+    if (waitForLoad) {
+      chrome.tabs.onUpdated.addListener(onUpdated);
+      setTimeout(() => finish({ ok: true, timedOut: true }), Math.max(500, timeoutMs || 0));
+    }
+    chrome.tabs.update(tabId, { url }, () => {
+      if (chrome.runtime.lastError) return finish({ ok: false, error: chrome.runtime.lastError.message });
+      if (!waitForLoad) finish({ ok: true });
+    });
+  });
+}
+
 /* ---------- Log & progression ---------- */
 
 function logLine(text, cls = "") {
@@ -1737,9 +1791,24 @@ async function runAutomation() {
   const submitSelector = $("submitSelector").value.trim();
   const waitMs = parseInt($("waitMs").value, 10) || 0;
   const rowDelayMs = parseInt($("rowDelayMs").value, 10) || 0;
+  const navEnabled = $("navEnabled").checked;
+  const navUrlTemplate = $("navUrlTemplate").value.trim();
+  const navWaitLoad = $("navWaitLoad").checked;
+  const navWaitTimeout = parseInt($("navWaitTimeout").value, 10) || 15000;
+  const navExtraWaitMs = parseInt($("navExtraWaitMs").value, 10) || 0;
 
-  if (!searchFields.length) { logLine("Ajoute au moins un champ de recherche.", "err"); return; }
+  if (navEnabled && !navUrlTemplate) { logLine("Navigation activée : indique l'URL à ouvrir.", "err"); return; }
+  if (!searchFields.length && !navEnabled) { logLine("Ajoute au moins un champ de recherche (ou active la navigation).", "err"); return; }
   if (!outputs.length) { logLine("Ajoute au moins un résultat à récupérer.", "err"); return; }
+
+  // Vérifie en amont que les colonnes citées dans l'URL existent.
+  if (navEnabled) {
+    const { missing } = buildNavUrl(navUrlTemplate, state.rows[dataStartIdx()] || []);
+    if (missing.length) {
+      logLine("Colonne(s) introuvable(s) dans l'URL de navigation : " + missing.join(", "), "err");
+      return;
+    }
+  }
 
   // Résolution des indices de colonnes en amont
   const searchResolved = searchFields.map((f) => ({ ...f, colIdx: colIndexByName(f.col) }));
@@ -1795,12 +1864,34 @@ async function runAutomation() {
     }
 
     const searchFieldValues = searchResolved.map((f) => ({ selector: f.selector, value: getCellByIndex(row, f.colIdx) }));
-    const searchLabel = searchFieldValues.map((f) => f.value).filter((v) => v.trim()).join(" / ");
-    if (!searchFieldValues.some((f) => f.value.trim())) {
+    let searchLabel = searchFieldValues.map((f) => f.value).filter((v) => v.trim()).join(" / ");
+    if (searchResolved.length && !searchFieldValues.some((f) => f.value.trim())) {
       logLine(`Ligne ${rowNum} : ignorée (valeur(s) de recherche vide(s)).`, "skip");
       runLog.push({ row: rowNum, search: "", values: [], status: "skip", note: "Valeur vide" });
       done++; setProgress(done, total);
       continue;
+    }
+
+    // Navigation : ouvrir l'URL construite pour cette ligne avant la recherche.
+    if (navEnabled) {
+      const { url, values } = buildNavUrl(navUrlTemplate, row);
+      if (values.length && values.every((v) => !v)) {
+        logLine(`Ligne ${rowNum} : ignorée (valeur de navigation vide).`, "skip");
+        runLog.push({ row: rowNum, search: searchLabel, values: [], status: "skip", note: "Valeur de navigation vide" });
+        done++; setProgress(done, total);
+        continue;
+      }
+      if (!searchLabel) searchLabel = values.filter(Boolean).join(" / ");
+      const nav = await navigateTabAndWait(tabId, url, navWaitLoad, navWaitTimeout);
+      if (!nav.ok) {
+        logLine(`Ligne ${rowNum} : erreur navigation — ${nav.error}`, "err");
+        runLog.push({ row: rowNum, search: searchLabel, values: [], status: "err", note: "Navigation : " + nav.error });
+        done++; setProgress(done, total);
+        continue;
+      }
+      if (nav.timedOut) logLine(`Ligne ${rowNum} : page toujours en chargement après ${navWaitTimeout} ms — on continue.`, "skip");
+      if (navExtraWaitMs > 0) await sleep(navExtraWaitMs);
+      if (stopRequested) { logLine("Arrêté par l'utilisateur.", "skip"); break; }
     }
 
     try {
@@ -1947,10 +2038,964 @@ function addScenarioStep(step = {}) {
       <span class="scn-num"></span>
       <select class="scn-type" title="Type d'étape">
         <option value="fill">Remplir les champs</option>
+        <option value="goto">Ouvrir une URL</option>
         <option value="click">Cliquer sur un élément</option>
         <option value="wait">Attendre</option>
         <option value="cond">Condition (si… alors…)</option>
       </select>
       <button class="btn icon-only scn-move-up" title="Monter" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-up"/></svg></button>
       <button class="btn icon-only scn-move-down" title="Descendre" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-down"/></svg></button>
-      <button class="remove-btn" title="Supprimer l'étape" type="but
+      <button class="remove-btn" title="Supprimer l'étape" type="button"><svg class="icon icon-sm"><use href="#icon-close"/></svg></button>
+    </div>
+    <div class="scn-body">
+      <p class="hint scn-only-fill">Remplit tous les champs mappés trouvés sur la page (+ champs personnalisés). Les champs absents — par ex. sur un autre panel — sont simplement ignorés.</p>
+
+      <div class="scn-row scn-only-goto">
+        <input type="text" class="scn-goto-url" placeholder="ex : http://sigeo.evoriel.net/…/quick_access?var={N° MG}&metier=ger;;2,27" value="${escapeAttr(step.gotoUrl || "")}" />
+      </div>
+      <p class="hint scn-only-goto">Navigue l'onglet cible vers cette URL. <code>{Nom de colonne}</code> (ou <code>{A}</code>) est remplacé par la valeur de la ligne active.</p>
+      <div class="scn-row scn-only-goto">
+        <label class="checkbox-row"><input type="checkbox" class="scn-goto-wait" ${step.gotoWait === false ? "" : "checked"} /> attendre le chargement</label>
+        <label>timeout (ms) :</label>
+        <input type="number" class="scn-goto-timeout" min="500" step="500" value="${escapeAttr(step.gotoTimeout ?? 15000)}" />
+      </div>
+
+      <div class="scn-row scn-only-click">
+        <input type="text" class="scn-click-selector" placeholder="sélecteur CSS de l'élément / bouton" value="${escapeAttr(step.clickSelector || "")}" />
+        <button class="btn pick icon-only scn-pick-click" title="Choisir sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+      </div>
+      <div class="scn-row scn-only-click">
+        <label>attendre l'élément max (ms) :</label>
+        <input type="number" class="scn-click-timeout" min="0" step="100" value="${escapeAttr(step.clickTimeout ?? 5000)}" />
+      </div>
+
+      <div class="scn-row scn-only-wait">
+        <select class="scn-wait-mode">
+          <option value="delay">un délai fixe</option>
+          <option value="appear">qu'un élément apparaisse</option>
+          <option value="gone">qu'un élément disparaisse</option>
+        </select>
+        <span class="scn-inline scn-wait-delay-wrap">
+          <input type="number" class="scn-wait-ms" min="0" step="100" value="${escapeAttr(step.waitMs ?? 1000)}" />
+          <label>ms</label>
+        </span>
+      </div>
+      <div class="scn-row scn-only-wait scn-wait-elt-wrap">
+        <input type="text" class="scn-wait-selector" placeholder="sélecteur CSS de l'élément" value="${escapeAttr(step.waitSelector || "")}" />
+        <button class="btn pick icon-only scn-pick-wait" title="Choisir sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+        <label>timeout (ms) :</label>
+        <input type="number" class="scn-wait-timeout" min="100" step="100" value="${escapeAttr(step.waitTimeout ?? 10000)}" />
+      </div>
+
+      <div class="scn-row scn-only-cond">
+        <label>Si</label>
+        <select class="scn-cond-source">
+          <option value="excel">une colonne Excel</option>
+          <option value="page">un élément de la page</option>
+        </select>
+      </div>
+      <div class="scn-row scn-only-cond scn-cond-excel-wrap">
+        <select class="scn-cond-col" data-colselect="plain"></select>
+        <select class="scn-cond-op">${excelOpOptions}</select>
+        <input type="text" class="scn-cond-val" placeholder="valeur" value="${escapeAttr(step.condVal || "")}" />
+      </div>
+      <div class="scn-row scn-only-cond scn-cond-page-wrap">
+        <input type="text" class="scn-cond-selector" placeholder="sélecteur CSS" value="${escapeAttr(step.condSelector || "")}" />
+        <button class="btn pick icon-only scn-pick-cond" title="Choisir sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+        <select class="scn-cond-pageop">${pageOpOptions}</select>
+        <input type="text" class="scn-cond-pageval" placeholder="texte" value="${escapeAttr(step.condPageVal || "")}" />
+      </div>
+      <div class="scn-row scn-only-cond">
+        <label>alors</label>
+        <select class="scn-cond-action">
+          <option value="skip">sauter les étapes suivantes</option>
+          <option value="stop">arrêter le scénario</option>
+        </select>
+        <span class="scn-inline scn-cond-skip-wrap">
+          <input type="number" class="scn-cond-skip" min="1" value="${escapeAttr(step.condSkip ?? 1)}" />
+          <label>étape(s)</label>
+        </span>
+      </div>
+    </div>
+  `;
+
+  // Valeurs initiales des selects
+  div.querySelector(".scn-type").value = step.type || "fill";
+  div.querySelector(".scn-wait-mode").value = step.waitMode || "delay";
+  div.querySelector(".scn-cond-source").value = step.condSource || "excel";
+  div.querySelector(".scn-cond-op").value = step.condOp || "equals";
+  div.querySelector(".scn-cond-pageop").value = step.condPageOp || "exists";
+  div.querySelector(".scn-cond-action").value = step.condAction || "skip";
+  fillColumnSelect(div.querySelector(".scn-cond-col"), step.condCol || "");
+
+  // Affichage conditionnel interne à l'étape
+  const typeSelect = div.querySelector(".scn-type");
+  const waitMode = div.querySelector(".scn-wait-mode");
+  const waitDelayWrap = div.querySelector(".scn-wait-delay-wrap");
+  const waitEltWrap = div.querySelector(".scn-wait-elt-wrap");
+  const condSource = div.querySelector(".scn-cond-source");
+  const condExcelWrap = div.querySelector(".scn-cond-excel-wrap");
+  const condPageWrap = div.querySelector(".scn-cond-page-wrap");
+  const condOp = div.querySelector(".scn-cond-op");
+  const condVal = div.querySelector(".scn-cond-val");
+  const condPageOp = div.querySelector(".scn-cond-pageop");
+  const condPageVal = div.querySelector(".scn-cond-pageval");
+  const condAction = div.querySelector(".scn-cond-action");
+  const condSkipWrap = div.querySelector(".scn-cond-skip-wrap");
+
+  function syncStepUI() {
+    div.dataset.type = typeSelect.value;
+    const delayMode = waitMode.value === "delay";
+    waitDelayWrap.hidden = !delayMode;
+    waitEltWrap.hidden = delayMode;
+    condExcelWrap.hidden = condSource.value !== "excel";
+    condPageWrap.hidden = condSource.value !== "page";
+    condVal.hidden = ["empty", "not_empty"].includes(condOp.value);
+    condPageVal.hidden = ["exists", "not_exists"].includes(condPageOp.value);
+    condSkipWrap.hidden = condAction.value !== "skip";
+  }
+  [typeSelect, waitMode, condSource, condOp, condPageOp, condAction]
+    .forEach((sel) => sel.addEventListener("change", syncStepUI));
+  syncStepUI();
+
+  // Réordonner / supprimer
+  div.querySelector(".scn-move-up").addEventListener("click", () => {
+    const prev = div.previousElementSibling;
+    if (prev) { div.parentElement.insertBefore(div, prev); persistWorkingConfig(); }
+  });
+  div.querySelector(".scn-move-down").addEventListener("click", () => {
+    const next = div.nextElementSibling;
+    if (next) { div.parentElement.insertBefore(next, div); persistWorkingConfig(); }
+  });
+  div.querySelector(".remove-btn").addEventListener("click", () => {
+    div.remove();
+    persistWorkingConfig();
+  });
+
+  // Réordonner par glisser-déposer (drag & drop) via la poignée
+  const dragHandle = div.querySelector(".scn-drag");
+  dragHandle.addEventListener("mousedown", () => { div.draggable = true; });
+  dragHandle.addEventListener("mouseup", () => { div.draggable = false; });
+  div.addEventListener("dragstart", (e) => {
+    div.classList.add("scn-dragging");
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", ""); } catch (_) {}
+  });
+  div.addEventListener("dragend", () => {
+    div.classList.remove("scn-dragging");
+    div.draggable = false;
+    div.parentElement.querySelectorAll(".scn-drop-before, .scn-drop-after")
+      .forEach((el) => el.classList.remove("scn-drop-before", "scn-drop-after"));
+    persistWorkingConfig();
+  });
+
+  // Boutons 🎯
+  const wirePick = (btnSel, inputSel) => {
+    div.querySelector(btnSel).addEventListener("click", async () => {
+      const picked = await pickTargetOnActiveTab();
+      if (picked && picked.selector) {
+        div.querySelector(inputSel).value = picked.selector;
+        persistWorkingConfig();
+      }
+    });
+  };
+  wirePick(".scn-pick-click", ".scn-click-selector");
+  wirePick(".scn-pick-wait", ".scn-wait-selector");
+  wirePick(".scn-pick-cond", ".scn-cond-selector");
+
+  $("scenarioSteps").appendChild(div);
+}
+
+function getScenarioSteps() {
+  return Array.from($("scenarioSteps").querySelectorAll(".scn-step")).map((el) => ({
+    type: el.dataset.type,
+    gotoUrl: el.querySelector(".scn-goto-url").value.trim(),
+    gotoWait: el.querySelector(".scn-goto-wait").checked,
+    gotoTimeout: parseInt(el.querySelector(".scn-goto-timeout").value, 10) || 15000,
+    clickSelector: el.querySelector(".scn-click-selector").value.trim(),
+    clickTimeout: parseInt(el.querySelector(".scn-click-timeout").value, 10) || 0,
+    waitMode: el.querySelector(".scn-wait-mode").value,
+    waitMs: parseInt(el.querySelector(".scn-wait-ms").value, 10) || 0,
+    waitSelector: el.querySelector(".scn-wait-selector").value.trim(),
+    waitTimeout: parseInt(el.querySelector(".scn-wait-timeout").value, 10) || 10000,
+    condSource: el.querySelector(".scn-cond-source").value,
+    condCol: el.querySelector(".scn-cond-col").value,
+    condOp: el.querySelector(".scn-cond-op").value,
+    condVal: el.querySelector(".scn-cond-val").value,
+    condSelector: el.querySelector(".scn-cond-selector").value.trim(),
+    condPageOp: el.querySelector(".scn-cond-pageop").value,
+    condPageVal: el.querySelector(".scn-cond-pageval").value,
+    condAction: el.querySelector(".scn-cond-action").value,
+    condSkip: parseInt(el.querySelector(".scn-cond-skip").value, 10) || 1
+  }));
+}
+
+// Gestion du dépôt (drag & drop) au niveau du conteneur d'étapes
+(function initScenarioDnD() {
+  const container = $("scenarioSteps");
+  if (!container) return;
+
+  function stepAfterCursor(y) {
+    const steps = [...container.querySelectorAll(".scn-step:not(.scn-dragging)")];
+    return steps.reduce((closest, child) => {
+      const box = child.getBoundingClientRect();
+      const offset = y - box.top - box.height / 2;
+      if (offset < 0 && offset > closest.offset) return { offset, element: child };
+      return closest;
+    }, { offset: Number.NEGATIVE_INFINITY, element: null }).element;
+  }
+
+  container.addEventListener("dragover", (e) => {
+    const dragging = container.querySelector(".scn-dragging");
+    if (!dragging) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const after = stepAfterCursor(e.clientY);
+    if (after == null) container.appendChild(dragging);
+    else container.insertBefore(dragging, after);
+  });
+})();
+
+$("addStepBtn").addEventListener("click", () => {
+  addScenarioStep();
+  persistWorkingConfig();
+});
+
+$("clearStepsBtn").addEventListener("click", () => {
+  if (!$("scenarioSteps").children.length) return;
+  $("scenarioSteps").innerHTML = "";
+  persistWorkingConfig();
+  showStatus("Étapes du scénario supprimées.", "info");
+});
+
+/* ---------- Fonctions injectées (autonomes) ---------- */
+
+// Attend qu'un élément apparaisse (visible) ou disparaisse, avec timeout.
+function scnWaitInjected(cfg) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + Math.max(0, cfg.timeoutMs || 0);
+    function isVisible(el) {
+      if (!el) return false;
+      const cs = window.getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden") return false;
+      return el.getClientRects().length > 0;
+    }
+    (function poll() {
+      let el = null;
+      try { el = document.querySelector(cfg.selector); }
+      catch (e) { return resolve({ ok: false, error: "sélecteur invalide : " + cfg.selector }); }
+      const visible = isVisible(el);
+      if (cfg.mode === "gone" ? !visible : visible) return resolve({ ok: true });
+      if (Date.now() >= deadline) {
+        return resolve({
+          ok: false,
+          error: (cfg.mode === "gone" ? "l'élément est toujours visible après attente : " : "élément introuvable/invisible après attente : ") + cfg.selector
+        });
+      }
+      setTimeout(poll, 120);
+    })();
+  });
+}
+
+// Attend l'élément (jusqu'au timeout) puis clique dessus.
+function scnClickInjected(cfg) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + Math.max(0, cfg.timeoutMs || 0);
+    function isVisible(el) {
+      if (!el) return false;
+      const cs = window.getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden") return false;
+      return el.getClientRects().length > 0;
+    }
+    function doClick(el, note) {
+      try {
+        if (el.scrollIntoView) el.scrollIntoView({ block: "center", inline: "center" });
+        const opts = { bubbles: true, cancelable: true, view: window };
+        el.dispatchEvent(new MouseEvent("mousedown", opts));
+        el.dispatchEvent(new MouseEvent("mouseup", opts));
+        el.click();
+        resolve({ ok: true, info: note });
+      } catch (e) {
+        resolve({ ok: false, error: "échec du clic : " + (e.message || e) });
+      }
+    }
+    (function poll() {
+      let el = null;
+      try { el = document.querySelector(cfg.selector); }
+      catch (e) { return resolve({ ok: false, error: "sélecteur invalide : " + cfg.selector }); }
+      if (el && isVisible(el)) return doClick(el, "");
+      if (Date.now() >= deadline) {
+        // Présent mais masqué : on tente quand même (menus/onglets techniques).
+        if (el) return doClick(el, "cliqué (élément non visible)");
+        return resolve({ ok: false, error: "élément à cliquer introuvable : " + cfg.selector });
+      }
+      setTimeout(poll, 120);
+    })();
+  });
+}
+
+// Teste l'état d'un élément (condition « page »).
+function scnCheckInjected(cfg) {
+  let el = null;
+  try { el = document.querySelector(cfg.selector); }
+  catch (e) { return { ok: false, error: "sélecteur invalide : " + cfg.selector }; }
+  function isVisible(node) {
+    if (!node) return false;
+    const cs = window.getComputedStyle(node);
+    if (cs.display === "none" || cs.visibility === "hidden") return false;
+    return node.getClientRects().length > 0;
+  }
+  let text = "";
+  if (el) {
+    text = ("value" in el && el.tagName !== "DIV") ? String(el.value) : (el.innerText || el.textContent || "");
+    text = text.trim();
+  }
+  const present = isVisible(el);
+  const needle = String(cfg.value || "").trim().toLowerCase();
+  const hay = text.toLowerCase();
+  let match = false;
+  switch (cfg.op) {
+    case "exists": match = present; break;
+    case "not_exists": match = !present; break;
+    case "contains": match = !!el && hay.includes(needle); break;
+    case "not_contains": match = !el || !hay.includes(needle); break;
+    case "equals": match = !!el && hay === needle; break;
+  }
+  return { ok: true, match };
+}
+
+/* ---------- Moteur d'exécution ---------- */
+
+function scnTrunc(s, n = 45) {
+  s = String(s || "");
+  return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+function scnStepLabel(s) {
+  switch (s.type) {
+    case "fill": return "Remplir";
+    case "goto": return "Ouvrir " + scnTrunc(s.gotoUrl || "?");
+    case "click": return "Cliquer " + scnTrunc(s.clickSelector || "?");
+    case "wait":
+      if (s.waitMode === "delay") return `Attendre ${s.waitMs} ms`;
+      return (s.waitMode === "gone" ? "Attendre disparition de " : "Attendre ") + scnTrunc(s.waitSelector || "?");
+    case "cond":
+      return s.condSource === "page" ? `Si ${scnTrunc(s.condSelector || "?", 30)}…` : `Si « ${s.condCol} »…`;
+  }
+  return s.type;
+}
+
+// Exécute une étape. Retourne { ok, error?, info?, warn?, skip?, stop? }.
+async function execScenarioStep(step, rowIdx, tabId) {
+  try {
+    switch (step.type) {
+      case "fill": {
+        const { data, mapping, customFields } = buildFillPayload(rowIdx);
+        if (!Object.keys(mapping).length && !Object.keys(customFields).length) {
+          return { ok: false, error: "aucun mapping ni champ personnalisé configuré" };
+        }
+        const { totalFilled } = await sendFillToAllTabs({
+          action: "fillForm",
+          data,
+          mapping,
+          customFields: Object.keys(customFields).length ? customFields : undefined
+        });
+        return { ok: true, info: `${totalFilled} champ(s) rempli(s)`, warn: totalFilled === 0 };
+      }
+      case "goto": {
+        if (!step.gotoUrl) return { ok: false, error: "URL manquante" };
+        let url = step.gotoUrl;
+        if (/\{[^{}]+\}/.test(url)) {
+          if (rowIdx === null || rowIdx === undefined) return { ok: false, error: "aucune ligne active pour construire l'URL" };
+          const { url: built, missing, values } = buildNavUrl(url, state.rows[rowIdx] || []);
+          if (missing.length) return { ok: false, error: "colonne(s) introuvable(s) : " + missing.join(", ") };
+          if (values.length && values.every((v) => !v)) return { ok: false, error: "valeur(s) de la ligne vide(s) pour l'URL" };
+          url = built;
+        }
+        const res = await navigateTabAndWait(tabId, url, step.gotoWait !== false, step.gotoTimeout);
+        if (!res.ok) return { ok: false, error: res.error };
+        return {
+          ok: true,
+          info: res.timedOut ? "page toujours en chargement après " + step.gotoTimeout + " ms — on continue" : scnTrunc(url, 60),
+          warn: !!res.timedOut
+        };
+      }
+      case "click": {
+        if (!step.clickSelector) return { ok: false, error: "sélecteur manquant" };
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: scnClickInjected,
+          args: [{ selector: step.clickSelector, timeoutMs: step.clickTimeout }]
+        });
+        return result || { ok: false, error: "pas de réponse de la page" };
+      }
+      case "wait": {
+        if (step.waitMode === "delay") {
+          await scnSleep(step.waitMs);
+          return { ok: true, info: `${step.waitMs} ms` };
+        }
+        if (!step.waitSelector) return { ok: false, error: "sélecteur manquant" };
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: scnWaitInjected,
+          args: [{ selector: step.waitSelector, timeoutMs: step.waitTimeout, mode: step.waitMode }]
+        });
+        return result || { ok: false, error: "pas de réponse de la page" };
+      }
+      case "cond": {
+        let match;
+        if (step.condSource === "page") {
+          if (!step.condSelector) return { ok: false, error: "sélecteur manquant" };
+          const [{ result }] = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: scnCheckInjected,
+            args: [{ selector: step.condSelector, op: step.condPageOp, value: step.condPageVal }]
+          });
+          if (!result || !result.ok) return { ok: false, error: result ? result.error : "pas de réponse de la page" };
+          match = result.match;
+        } else {
+          if (rowIdx === null || rowIdx === undefined) return { ok: false, error: "aucune ligne active pour la condition Excel" };
+          const idx = colIndexByName(step.condCol);
+          if (idx < 0) return { ok: false, error: `colonne introuvable (${step.condCol})` };
+          match = cellMatches(getCellByIndex(state.rows[rowIdx] || [], idx), step.condOp, step.condVal);
+        }
+        if (!match) return { ok: true, info: "condition non remplie → on continue" };
+        if (step.condAction === "stop") return { ok: true, stop: true, info: "condition remplie → arrêt du scénario" };
+        const n = Math.max(1, step.condSkip || 1);
+        return { ok: true, skip: n, info: `condition remplie → saute ${n} étape(s)` };
+      }
+    }
+    return { ok: false, error: "type d'étape inconnu" };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  }
+}
+
+// Exécute toutes les étapes pour une ligne. prefix = préfixe de log (mode boucle).
+async function runScenarioForRow(rowIdx, tabId, steps, prefix = "") {
+  for (let i = 0; i < steps.length; i++) {
+    if (scnStopRequested) return { stopped: true };
+    const step = steps[i];
+    const label = `${prefix}Étape ${i + 1} — ${scnStepLabel(step)}`;
+    const res = await execScenarioStep(step, rowIdx, tabId);
+    if (!res.ok) {
+      scnLog(`✗ ${label} : ${res.error}`, "err");
+      return { ok: false };
+    }
+    scnLog(
+      `${res.stop || res.skip ? "→" : "✓"} ${label}${res.info ? " : " + res.info : ""}`,
+      res.stop || res.skip || res.warn ? "skip" : "ok"
+    );
+    if (!prefix) scnSetProgress(i + 1, steps.length);
+    if (res.stop) return { ok: true };
+    if (res.skip) i += res.skip;
+  }
+  return { ok: true };
+}
+
+function scenarioNeedsRow(steps) {
+  return steps.some((s) =>
+    s.type === "fill" ||
+    (s.type === "cond" && s.condSource === "excel") ||
+    (s.type === "goto" && /\{[^{}]+\}/.test(s.gotoUrl || ""))
+  );
+}
+
+function scnBegin() {
+  scnRunning = true;
+  scnStopRequested = false;
+  $("runScenarioBtn").disabled = true;
+  $("runScenarioLoopBtn").disabled = true;
+  $("addStepBtn").disabled = true;
+  $("stopScenarioBtn").disabled = false;
+  $("scnLog").innerHTML = "";
+}
+
+function scnFinish() {
+  scnRunning = false;
+  $("runScenarioBtn").disabled = false;
+  $("runScenarioLoopBtn").disabled = false;
+  $("addStepBtn").disabled = false;
+  $("stopScenarioBtn").disabled = true;
+  persistSession();
+}
+
+$("stopScenarioBtn").addEventListener("click", () => { scnStopRequested = true; });
+
+// Exécution sur la ligne active
+$("runScenarioBtn").addEventListener("click", async () => {
+  if (scnRunning) return;
+  const steps = getScenarioSteps();
+  if (!steps.length) { showStatus("Ajoute au moins une étape au scénario.", "error"); return; }
+  if (scenarioNeedsRow(steps) && (state.selectedRowIdx === null || !state.rows.length)) {
+    showStatus("Sélectionne d'abord une ligne à saisir.", "error");
+    return;
+  }
+  saveCustomFields();
+
+  let tabId;
+  try { tabId = await resolveTargetTabId(); }
+  catch (err) { showStatus(err.message, "error"); return; }
+
+  scnBegin();
+  scnSetProgress(0, steps.length);
+  scnLog(state.selectedRowIdx !== null ? `— Scénario : ligne L${state.selectedRowIdx + 1} —` : "— Scénario —");
+  const res = await runScenarioForRow(state.selectedRowIdx, tabId, steps);
+  if (res.stopped) scnLog("Arrêté par l'utilisateur.", "skip");
+  else scnLog(res.ok ? "Scénario terminé." : "Scénario interrompu (erreur).", res.ok ? "ok" : "err");
+  scnFinish();
+});
+
+// Exécution en boucle sur une plage de lignes
+$("runScenarioLoopBtn").addEventListener("click", async () => {
+  if (scnRunning) return;
+  const steps = getScenarioSteps();
+  if (!steps.length) { showStatus("Ajoute au moins une étape au scénario.", "error"); return; }
+  if (!state.rows.length) { showStatus("Charge d'abord des données (onglet Données).", "error"); return; }
+  saveCustomFields();
+
+  const startRowInput = parseInt($("scnStartRow").value, 10) || (dataStartIdx() + 1);
+  const endRowInput = $("scnEndRow").value.trim();
+  const startIdx = Math.max(0, startRowInput - 1);
+  const endIdx = Math.min(state.rows.length - 1, endRowInput ? parseInt(endRowInput, 10) - 1 : state.rows.length - 1);
+  if (endIdx < startIdx) { showStatus("Plage de lignes invalide.", "error"); return; }
+  const rowDelayMs = parseInt($("scnRowDelayMs").value, 10) || 0;
+
+  let tabId;
+  try { tabId = await resolveTargetTabId(); }
+  catch (err) { showStatus(err.message, "error"); return; }
+
+  scnBegin();
+  const total = endIdx - startIdx + 1;
+  let done = 0, okCount = 0, errCount = 0, skippedCount = 0;
+  scnSetProgress(0, total);
+
+  for (let idx = startIdx; idx <= endIdx; idx++) {
+    if (scnStopRequested) { scnLog("Arrêté par l'utilisateur.", "skip"); break; }
+    const row = state.rows[idx] || [];
+    if (!row.some((v) => String(v ?? "").trim() !== "")) {
+      scnLog(`L${idx + 1} : ligne vide, ignorée.`, "skip");
+      skippedCount++; done++; scnSetProgress(done, total);
+      continue;
+    }
+    selectRow(idx); // la ligne active suit la boucle (visible dans l'UI)
+    scnLog(`— Ligne L${idx + 1} —`);
+    const res = await runScenarioForRow(idx, tabId, steps, `L${idx + 1} · `);
+    if (res.stopped) { scnLog("Arrêté par l'utilisateur.", "skip"); break; }
+    if (res.ok) okCount++; else errCount++;
+    done++; scnSetProgress(done, total);
+    if (rowDelayMs > 0 && idx < endIdx && !scnStopRequested) await scnSleep(rowDelayMs);
+  }
+
+  scnLog(`Boucle terminée : ${okCount} OK, ${errCount} erreur(s), ${skippedCount} ligne(s) vide(s).`, errCount ? "err" : "ok");
+  scnFinish();
+});
+
+/* ================== 6. EXPORT / PROFILS / ONGLETS / INIT ================== */
+
+/* ---------- Export ---------- */
+
+function getOrBuildWorkbook() {
+  const ws = XLSX.utils.aoa_to_sheet(state.rows);
+  if (state.workbook && state.sheetName) {
+    state.workbook.Sheets[state.sheetName] = ws;
+    return state.workbook;
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, (state.sheetName || "Feuil1").slice(0, 31));
+  return wb;
+}
+
+function rowsToJson(allRows) {
+  if (!allRows.length) return [];
+  const cols = getColumns();
+  const start = dataStartIdx();
+  return allRows.slice(start).map((r) => {
+    const obj = {};
+    cols.forEach((c) => { obj[c.name] = r[c.index] !== undefined ? r[c.index] : ""; });
+    return obj;
+  });
+}
+
+// Nom du fichier de sortie : modifiable par l'utilisateur dans l'onglet Export.
+function sanitizeFileName(name) {
+  return (name || "").trim().replace(/[\\/:*?"<>|]/g, "_");
+}
+
+function currentOutputName() {
+  let name = sanitizeFileName($("outputNameInput").value) || state.originalFileName || "resultat.xlsx";
+  if (!/\.xlsx$/i.test(name)) name += ".xlsx";
+  return name;
+}
+
+$("outputNameInput").addEventListener("change", () => {
+  state.originalFileName = currentOutputName();
+  $("outputNameInput").value = state.originalFileName;
+  persistSession();
+});
+
+$("downloadBtn").addEventListener("click", () => {
+  if (!state.rows.length) { showStatus("Aucune donnée chargée.", "error"); return; }
+  XLSX.writeFile(getOrBuildWorkbook(), currentOutputName());
+  hasDownloaded = true;
+  updateDoneMarkers();
+});
+
+$("downloadJsonBtn").addEventListener("click", () => {
+  if (!state.rows.length) { showStatus("Aucune donnée chargée.", "error"); return; }
+  const data = rowsToJson(state.rows);
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = currentOutputName().replace(/\.xlsx$/i, "") + ".json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  hasDownloaded = true;
+  updateDoneMarkers();
+  showStatus("Export JSON téléchargé.", "success");
+});
+
+/* ---------- Profils (configurations nommées) ---------- */
+
+function buildProfileConfig() {
+  return {
+    headerMode: state.headerMode,
+    modelName: state.modelName,
+    mapping: state.mapping,
+    customFields: getCustomFieldsFromDOM().filter((f) => f.name || f.value),
+    valueRules: state.valueRules,
+    extraction: {
+      conditions: getConditions(),
+      searchFields: Array.from($("searchFieldsList").querySelectorAll(".search-field-item")).map((el) => ({
+        selector: el.querySelector(".selector-input").value.trim(),
+        col: el.querySelector(".col-select").value
+      })),
+      navEnabled: $("navEnabled").checked,
+      navUrlTemplate: $("navUrlTemplate").value,
+      navWaitLoad: $("navWaitLoad").checked,
+      navWaitTimeout: $("navWaitTimeout").value,
+      navExtraWaitMs: $("navExtraWaitMs").value,
+      submitMode: document.querySelector('input[name="submitMode"]:checked').value,
+      submitSelector: $("submitSelector").value,
+      waitMs: $("waitMs").value,
+      rowDelayMs: $("rowDelayMs").value,
+      startRow: $("startRow").value,
+      endRow: $("endRow").value,
+      outputs: getOutputs()
+    },
+    scenario: {
+      steps: getScenarioSteps(),
+      startRow: $("scnStartRow").value,
+      endRow: $("scnEndRow").value,
+      rowDelayMs: $("scnRowDelayMs").value
+    }
+  };
+}
+
+function applyProfileConfig(cfg) {
+  if (!cfg) return;
+  state.headerMode = cfg.headerMode || "auto";
+  $("headerModeSelect").value = state.headerMode;
+  state.modelName = cfg.modelName || "";
+  renderModelSelect();
+
+  if (cfg.mapping && Object.keys(cfg.mapping).length) {
+    state.mapping = cfg.mapping;
+    if (state.rows.length) {
+      allMappings[mappingKey()] = cfg.mapping;
+      chrome.storage.local.set({ allMappings });
+    }
+  }
+
+  state.customFields = Array.isArray(cfg.customFields) ? cfg.customFields : [];
+  renderCustomFields();
+
+  if (Array.isArray(cfg.valueRules)) {
+    state.valueRules = cfg.valueRules;
+    persistValueRules();
+    updateValueRulesInfo();
+  }
+
+  const ex = cfg.extraction || {};
+  $("conditionsList").innerHTML = "";
+  (ex.conditions || []).forEach((c) => addConditionRow(c.col, c.op, c.val));
+  $("searchFieldsList").innerHTML = "";
+  (ex.searchFields || []).forEach((f) => addSearchFieldRow(f.selector, f.col));
+  $("outputsList").innerHTML = "";
+  (ex.outputs || []).forEach((o) => addOutputRow(o.newCol ? { ...o, col: "__other__", newCol: o.newCol || o.col } : o));
+  $("navEnabled").checked = !!ex.navEnabled;
+  $("navUrlTemplate").value = ex.navUrlTemplate || "";
+  $("navWaitLoad").checked = ex.navWaitLoad !== false;
+  $("navWaitTimeout").value = ex.navWaitTimeout || 15000;
+  $("navExtraWaitMs").value = ex.navExtraWaitMs || 0;
+  $("navOptions").style.display = ex.navEnabled ? "block" : "none";
+  const submitMode = ex.submitMode || "enter";
+  document.querySelector(`input[name="submitMode"][value="${submitMode}"]`).checked = true;
+  $("submitSelectorRow").style.display = submitMode === "click" ? "flex" : "none";
+  $("submitSelector").value = ex.submitSelector || "";
+  $("waitMs").value = ex.waitMs || 1200;
+  $("rowDelayMs").value = ex.rowDelayMs || 300;
+  $("startRow").value = ex.startRow || (dataStartIdx() + 1);
+  $("endRow").value = ex.endRow || "";
+
+  const sc = cfg.scenario || {};
+  $("scenarioSteps").innerHTML = "";
+  (sc.steps || []).forEach((s) => addScenarioStep(s));
+  $("scnStartRow").value = sc.startRow || 2;
+  $("scnEndRow").value = sc.endRow || "";
+  $("scnRowDelayMs").value = sc.rowDelayMs || 500;
+
+  renderColumns();
+  updateMappingInfo();
+  updateFillButtonState();
+}
+
+function persistProfiles() { chrome.storage.local.set({ profiles }); }
+
+/* ---------- Sauvegarde automatique des options de travail ----------
+   Mémorise en continu tous les réglages (Saisie + Extraction) pour les
+   restaurer à la réouverture du panneau, sans avoir à enregistrer un profil. */
+let workingConfigTimer = null;
+function persistWorkingConfig() {
+  if (!workingReady) return;            // on n'écrit pas pendant l'initialisation
+  clearTimeout(workingConfigTimer);
+  workingConfigTimer = setTimeout(() => {
+    try {
+      chrome.storage.local.set({ workingConfig: buildProfileConfig() });
+    } catch (e) { /* ignoré */ }
+  }, 400);
+}
+
+// Toute modification d'un champ de réglage déclenche la sauvegarde auto.
+["input", "change"].forEach((evt) => {
+  document.addEventListener(evt, (e) => {
+    const t = e.target;
+    if (!t) return;
+    if (t.type === "file" || t.id === "profileSelect") return; // gérés à part
+    persistWorkingConfig();
+  });
+});
+
+function renderProfileSelect(selected) {
+  const sel = $("profileSelect");
+  sel.innerHTML = '<option value="">— aucun profil —</option>';
+  Object.keys(profiles).sort().forEach((name) => {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  });
+  sel.value = selected || "";
+}
+
+$("profileSelect").addEventListener("change", () => {
+  const name = $("profileSelect").value;
+  chrome.storage.local.set({ activeProfileName: name });
+  if (name && profiles[name]) {
+    applyProfileConfig(profiles[name]);
+    showStatus(`Profil « ${name} » chargé.`, "success");
+  }
+});
+
+$("saveProfileBtn").addEventListener("click", () => {
+  const name = $("profileSelect").value;
+  if (!name) { showStatus("Choisis un profil, ou crée-en un avec +.", "error"); return; }
+  profiles[name] = buildProfileConfig();
+  persistProfiles();
+  showStatus(`Profil « ${name} » sauvegardé.`, "success");
+});
+
+$("newProfileBtn").addEventListener("click", () => {
+  $("newProfileRow").hidden = false;
+  $("newProfileName").focus();
+});
+$("cancelNewProfileBtn").addEventListener("click", () => {
+  $("newProfileRow").hidden = true;
+  $("newProfileName").value = "";
+});
+$("confirmNewProfileBtn").addEventListener("click", () => {
+  const name = $("newProfileName").value.trim();
+  if (!name) { showStatus("Donne un nom au profil.", "error"); return; }
+  profiles[name] = buildProfileConfig();
+  persistProfiles();
+  renderProfileSelect(name);
+  chrome.storage.local.set({ activeProfileName: name });
+  $("newProfileRow").hidden = true;
+  $("newProfileName").value = "";
+  showStatus(`Profil « ${name} » créé.`, "success");
+});
+$("newProfileName").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("confirmNewProfileBtn").click();
+});
+
+$("deleteProfileBtn").addEventListener("click", () => {
+  const name = $("profileSelect").value;
+  if (!name) { showStatus("Aucun profil sélectionné.", "error"); return; }
+  delete profiles[name];
+  persistProfiles();
+  renderProfileSelect("");
+  chrome.storage.local.set({ activeProfileName: "" });
+  showStatus(`Profil « ${name} » supprimé.`, "success");
+});
+
+/* ---------- Onglets principaux ---------- */
+
+function showTab(tabName) {
+  document.querySelectorAll(".panel[data-tab]").forEach((p) => {
+    p.hidden = p.getAttribute("data-tab") !== tabName;
+  });
+  document.querySelectorAll(".tab-btn[data-tab]").forEach((b) => {
+    b.classList.toggle("active", b.getAttribute("data-tab") === tabName);
+  });
+  updateDoneMarkers();
+  if (workingReady) chrome.storage.local.set({ lastTab: tabName });
+}
+
+document.querySelectorAll(".tab-btn[data-tab]").forEach((btn) => {
+  btn.addEventListener("click", () => showTab(btn.getAttribute("data-tab")));
+});
+
+function updateDoneMarkers() {
+  const done = {
+    donnees: state.rows.length > 0,
+    saisie: state.selectedRowIdx !== null && Object.keys(state.mapping).length > 0,
+    extraction: hasStartedRun && !isRunning,
+    export: hasDownloaded
+  };
+  document.querySelectorAll(".tab-btn[data-tab]").forEach((btn) => {
+    btn.classList.toggle("done", Boolean(done[btn.getAttribute("data-tab")]));
+  });
+}
+
+/* ---------- Migration de l'ancienne config OSA ---------- */
+
+function migrateLegacyOsaConfig(savedConfig) {
+  // Convertit l'ancienne config OSA (colonnes en lettres) en profil.
+  const legacyModelCols = [];
+  (savedConfig.mappings || []).forEach((m) => {
+    const idx = letterToIndex(m.col);
+    if (idx >= 0) {
+      while (legacyModelCols.length <= idx) legacyModelCols.push("");
+      legacyModelCols[idx] = m.label;
+    }
+  });
+  const searchFields = savedConfig.searchFields
+    || (savedConfig.searchSelector ? [{ selector: savedConfig.searchSelector, col: savedConfig.searchCol }] : []);
+  return {
+    headerMode: "auto",
+    modelName: "",
+    mapping: {},
+    customFields: [],
+    extraction: {
+      conditions: (savedConfig.conditions || []).map((c) => ({ col: (c.col || "").toUpperCase(), op: c.op, val: c.val })),
+      searchFields: searchFields.map((f) => ({ selector: f.selector, col: (f.col || "").toUpperCase() })),
+      submitMode: savedConfig.submitMode || "enter",
+      submitSelector: savedConfig.submitSelector || "",
+      waitMs: savedConfig.waitMs || 1200,
+      rowDelayMs: savedConfig.rowDelayMs || 300,
+      startRow: savedConfig.startRow || 2,
+      endRow: savedConfig.endRow || "",
+      outputs: (savedConfig.outputs || []).map((o) => ({
+        mode: o.mode || "css",
+        col: (o.col || "").toUpperCase(),
+        selector: o.selector || "",
+        rowSelector: o.rowSelector || "",
+        matchSourceCol: (o.matchSourceCol || "").toUpperCase(),
+        matchType: o.matchType || "contains",
+        matchTdIndex: o.matchTdIndex || 1,
+        extractTdIndex: o.extractTdIndex || 2
+      }))
+    }
+  };
+}
+
+/* ---------- Initialisation ---------- */
+
+async function init() {
+  const stored = await chrome.storage.local.get([
+    "models", "allMappings", "profiles", "activeProfileName",
+    "customFields", "session", "savedConfig", "migratedOsaLegacy",
+    "workingConfig", "lastTab", "valueRules"
+  ]);
+
+  // Règles de valeurs (seed avec la civilité au premier lancement).
+  if (Array.isArray(stored.valueRules)) {
+    state.valueRules = stored.valueRules;
+  } else {
+    state.valueRules = JSON.parse(JSON.stringify(DEFAULT_VALUE_RULES));
+    persistValueRules();
+  }
+
+  // Modèles (seed au premier lancement)
+  if (Array.isArray(stored.models) && stored.models.length) {
+    models = stored.models;
+  } else {
+    models = JSON.parse(JSON.stringify(DEFAULT_MODELS));
+    persistModels();
+  }
+
+  allMappings = stored.allMappings || {};
+  profiles = stored.profiles || {};
+
+  // Migration de l'ancienne config OSA -> profil "OSA (importé)"
+  if (stored.savedConfig && !stored.migratedOsaLegacy) {
+    profiles["OSA (importé)"] = migrateLegacyOsaConfig(stored.savedConfig);
+    persistProfiles();
+    chrome.storage.local.set({ migratedOsaLegacy: true });
+  }
+
+  // Champs personnalisés
+  if (Array.isArray(stored.customFields)) state.customFields = stored.customFields;
+  renderCustomFields();
+
+  // Session précédente (données + réglages)
+  if (stored.session && Array.isArray(stored.session.rows) && stored.session.rows.length) {
+    state.rows = stored.session.rows;
+    state.sheetName = stored.session.sheetName || null;
+    state.headerMode = stored.session.headerMode || "auto";
+    state.modelName = stored.session.modelName || "";
+    state.selectedRowIdx = stored.session.selectedRowIdx ?? null;
+    state.originalFileName = stored.session.originalFileName || "resultat.xlsx";
+    $("headerModeSelect").value = state.headerMode;
+    $("outputNameInput").value = state.originalFileName;
+    setLoadedInfo(`Session restaurée (« ${state.sheetName || "données"} »)`);
+  }
+
+  renderModelSelect();
+
+  // Profil actif
+  renderProfileSelect(stored.activeProfileName || "");
+  if (stored.activeProfileName && profiles[stored.activeProfileName]) {
+    applyProfileConfig(profiles[stored.activeProfileName]);
+  } else {
+    renderColumns();
+    updateMappingInfo();
+  }
+
+  // Dernier état de travail auto-sauvegardé : reflète les options exactes
+  // laissées à la fermeture précédente (prioritaire sur les valeurs du profil).
+  if (stored.workingConfig) {
+    applyProfileConfig(stored.workingConfig);
+  }
+
+  // Lignes par défaut dans l'onglet Extraction si vide
+  if (!$("searchFieldsList").children.length) addSearchFieldRow();
+  if (!$("outputsList").children.length) addOutputRow();
+
+  // Onglet actif restauré
+  if (stored.lastTab) showTab(stored.lastTab);
+
+  updateFillButtonState();
+  updateDoneMarkers();
+  updateValueRulesInfo();
+
+  // À partir d'ici, toute modification est sauvegardée automatiquement.
+  workingReady = true;
+}
+
+init();
+
+// (fin du fichier)

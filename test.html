@@ -140,4 +140,69 @@
         matches.slice(0, 20).forEach((m) => {
           const tr = document.createElement("tr");
           m.forEach((cell) => {
-            const td = documen
+            const td = document.createElement("td");
+            td.textContent = cell;
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+      } else {
+        val.textContent = "";
+        mail.textContent = "";
+      }
+    }, 600);
+  }
+
+  // ---- Validation du formulaire de saisie ----
+  const IBAN_FIELDS = ["txtIBAN1","txtIBAN2","txtIBAN3","txtIBAN4","txtIBAN5","txtIBAN6","txtIBAN7"];
+
+  function validateForm() {
+    const form = document.getElementById("testForm");
+    const box = document.getElementById("formResult");
+    const data = new FormData(form);
+
+    const rows = [
+      ["Civilité", data.get("civilite") || ""],
+      ["Nom", data.get("nom") || ""],
+      ["Prénom", data.get("prenom") || ""],
+      ["Email", data.get("email") || ""],
+      ["Date début mandat", data.get("dateDebut") || ""],
+      ["Assurance GL", form.querySelector('[name="assuranceGl"]').checked ? "Oui" : "Non"],
+      ["Mode de règlement", data.get("modeReglt") || ""],
+      ["IBAN", IBAN_FIELDS.map((n) => (data.get(n) || "").trim()).filter(Boolean).join(" ")],
+      ["Commentaire", data.get("commentaire") || ""]
+    ];
+
+    // Champs obligatoires pour la validation
+    const missing = [];
+    if (!data.get("nom")) missing.push("Nom");
+    if (!data.get("prenom")) missing.push("Prénom");
+    if (!data.get("email")) missing.push("Email");
+
+    let html = "<h3 style='margin:0 0 8px;font-size:15px'>Récapitulatif de la saisie</h3>";
+    html += "<table><tbody>";
+    rows.forEach(([k, v]) => {
+      html += `<tr><th>${k}</th><td>${v ? String(v).replace(/</g,"&lt;") : "<span class='hint'>(vide)</span>"}</td></tr>`;
+    });
+    html += "</tbody></table>";
+    if (missing.length) {
+      html += `<p class="form-error">⚠ Champs obligatoires manquants : ${missing.join(", ")}</p>`;
+    } else {
+      html += `<p style="color:#2e8b57;font-weight:bold;margin-bottom:0">✔ Formulaire validé.</p>`;
+    }
+    box.innerHTML = html;
+    box.style.display = "block";
+  }
+
+  document.getElementById("testForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    validateForm();
+  });
+
+  document.getElementById("searchBtn").addEventListener("click", doSearch);
+  document.getElementById("searchInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") doSearch();
+  });
+</script>
+</body>
+</html>

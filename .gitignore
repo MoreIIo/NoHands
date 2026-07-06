@@ -8,4 +8,8 @@ backup_avant_fusion/
 .DS_Store
 Thumbs.db
 
-# Dé
+# Dépendances
+node_modules/
+
+# Logs
+*.log
