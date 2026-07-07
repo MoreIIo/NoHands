@@ -203,7 +203,7 @@ const DEFAULT_VALUE_RULES = [
 // Normalise pour comparaison : minuscules, sans accents, sans espaces superflus.
 function normalizeForMatch(s) {
   return String(s ?? "")
-    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .toLowerCase().trim();
 }
 
@@ -1848,7 +1848,14 @@ function addOutputRow(o = {}) {
         <input type="checkbox" class="notfound-check" ${o.notFoundEnabled ? "checked" : ""} />
         Si rien n'est trouvé, écrire un message
       </label>
-      <input type="text" class="notfound-msg" placeholder="ex : non trouvé" value="${escapeAttr(o.notFoundMsg || "")}" ${o.notFoundEnabled ? "" : "style=display:none"} />
+      <input type="text" class="notfound-msg" placeholder="ex : KO" value="${escapeAttr(o.notFoundMsg || "")}" ${o.notFoundEnabled ? "" : "style=display:none"} />
+    </div>
+    <div class="out-item-found">
+      <label class="checkbox-row">
+        <input type="checkbox" class="found-check" ${o.foundEnabled ? "checked" : ""} />
+        Si un résultat est trouvé, écrire un message à la place
+      </label>
+      <input type="text" class="found-msg" placeholder="ex : OK" value="${escapeAttr(o.foundMsg || "")}" ${o.foundEnabled ? "" : "style=display:none"} />
     </div>
     <div class="out-item-regex">
       <label class="checkbox-row">
@@ -1935,6 +1942,14 @@ function addOutputRow(o = {}) {
     if (notFoundCheck.checked) notFoundMsg.focus();
   });
 
+  // Case à cocher "message si un résultat est trouvé"
+  const foundCheck = div.querySelector(".found-check");
+  const foundMsg = div.querySelector(".found-msg");
+  foundCheck.addEventListener("change", () => {
+    foundMsg.style.display = foundCheck.checked ? "block" : "none";
+    if (foundCheck.checked) foundMsg.focus();
+  });
+
   // Bloc "Formater le résultat (regex)"
   const regexCheck = div.querySelector(".regex-check");
   const regexBody = div.querySelector(".regex-body");
@@ -1998,12 +2013,14 @@ function getOutputs() {
     }
     const notFoundEnabled = el.querySelector(".notfound-check").checked;
     const notFoundMsg = el.querySelector(".notfound-msg").value;
+    const foundEnabled = el.querySelector(".found-check").checked;
+    const foundMsg = el.querySelector(".found-msg").value;
     const regexEnabled = el.querySelector(".regex-check").checked;
     const regexMode = el.querySelector(".regex-mode").value;
     const regexPattern = el.querySelector(".regex-pattern").value;
     const regexReplace = el.querySelector(".regex-replace").value;
     const regexFlagI = el.querySelector(".regex-i").checked;
-    const base = { mode, col, newCol, notFoundEnabled, notFoundMsg, regexEnabled, regexMode, regexPattern, regexReplace, regexFlagI };
+    const base = { mode, col, newCol, notFoundEnabled, notFoundMsg, foundEnabled, foundMsg, regexEnabled, regexMode, regexPattern, regexReplace, regexFlagI };
     if (mode === "tableMatch") {
       return {
         ...base,
@@ -2087,7 +2104,8 @@ function performRowActionInjected(config) {
           if (out.mode === "tableMatch") {
             const { found, value, reason } = readTableMatch(out);
             if (found) {
-              values.push(value);
+              // Si un message perso "trouvé" est défini, il remplace la valeur extraite.
+              values.push(out.foundEnabled ? (out.foundMsg || "") : value);
             } else {
               values.push(fallback);
               // Si un message perso est défini, on ne signale plus d'erreur "introuvable".
@@ -2104,7 +2122,7 @@ function performRowActionInjected(config) {
               if (!out.notFoundEnabled) notFound.push(out.selector);
               continue;
             }
-            values.push(textOf(el));
+            values.push(out.foundEnabled ? (out.foundMsg || "") : textOf(el));
           }
         }
         resolve({ ok: true, values, notFound });
@@ -2409,12 +2427,16 @@ async function runAutomation() {
             extractTdIndex: o.extractTdIndex,
             matchValue: getCellByIndex(row, o.matchSourceIdx),
             notFoundEnabled: o.notFoundEnabled,
-            notFoundMsg: o.notFoundMsg
+            notFoundMsg: o.notFoundMsg,
+            foundEnabled: o.foundEnabled,
+            foundMsg: o.foundMsg
           } : {
             mode: "css",
             selector: o.selector,
             notFoundEnabled: o.notFoundEnabled,
-            notFoundMsg: o.notFoundMsg
+            notFoundMsg: o.notFoundMsg,
+            foundEnabled: o.foundEnabled,
+            foundMsg: o.foundMsg
           })
         }]
       });
@@ -2428,7 +2450,8 @@ async function runAutomation() {
           let val = result.values[i];
           // Ne pas reformater le message "non trouvé" éventuel.
           const isNotFoundMsg = o.notFoundEnabled && val === (o.notFoundMsg || "");
-          if (!isNotFoundMsg) val = applyOutputRegex(val, o);
+          const isFoundMsg = o.foundEnabled && val === (o.foundMsg || "");
+          if (!isNotFoundMsg && !isFoundMsg) val = applyOutputRegex(val, o);
           setCellByIndex(row, o.targetIdx, val);
         });
         state.rows[idx] = row;
@@ -2552,6 +2575,7 @@ function estimateScenarioStepMs(s) {
       if (s.waitMode === "delay") return parseInt(s.waitMs, 10) || 0;
       return 1200; // attente d'un sélecteur : moyenne estimée
     case "cond": return 250;
+    case "pdfcheck": case "pdfwrite": return 50; // local, quasi instantané
   }
   return 300;
 }
@@ -2601,6 +2625,8 @@ function addScenarioStep(step = {}) {
         <option value="click">Cliquer sur un élément</option>
         <option value="wait">Attendre</option>
         <option value="cond">Condition (si… alors…)</option>
+        <option value="pdfcheck">PDF β : vérifier un champ</option>
+        <option value="pdfwrite">PDF β : écrire un champ</option>
       </select>
       <button class="btn icon-only scn-move-up" title="Monter" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-up"/></svg></button>
       <button class="btn icon-only scn-move-down" title="Descendre" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-down"/></svg></button>
@@ -2676,6 +2702,43 @@ function addScenarioStep(step = {}) {
         </span>
       </div>
       <p class="hint scn-only-cond">Valeur dynamique : <code>{Nom de colonne}</code> (ou <code>{A}</code>) est remplacé par la valeur de la ligne active. Ex : <code>MG{N° MG}</code>.</p>
+
+      <div class="scn-row scn-only-pdf">
+        <label>Document</label>
+        <select class="scn-pdf-docmode">
+          <option value="active">PDF sélectionné dans la Toolbox</option>
+          <option value="match">retrouver par nom de fichier</option>
+        </select>
+        <input type="text" class="scn-pdf-docmatch" placeholder="le nom contient… (ex : {N° DPE})" title="Valeur dynamique : {Nom de colonne} ou {A}. Le PDF dont le nom de fichier contient cette valeur est utilisé." value="${escapeAttr(step.pdfDocMatch || "")}" />
+      </div>
+      <div class="scn-row scn-only-pdf">
+        <label>Champ</label>
+        <select class="scn-pdf-field"></select>
+      </div>
+      <div class="scn-row scn-only-pdfcheck">
+        <select class="scn-pdf-op">${excelOpOptions}</select>
+        <input type="text" class="scn-pdf-val" placeholder="valeur attendue (ex : {SIRET})" title="Valeur dynamique : {Nom de colonne} ou {A} est remplacé par la valeur de la ligne active." value="${escapeAttr(step.pdfVal || "")}" />
+      </div>
+      <div class="scn-row scn-only-pdfcheck">
+        <label>si écart</label>
+        <select class="scn-pdf-missaction">
+          <option value="error">erreur (interrompt la ligne)</option>
+          <option value="warn">avertir et continuer</option>
+          <option value="skip">sauter les étapes suivantes</option>
+          <option value="stop">arrêter le scénario</option>
+        </select>
+        <span class="scn-inline scn-pdf-skip-wrap">
+          <input type="number" class="scn-pdf-skip" min="1" value="${escapeAttr(step.pdfMissSkip ?? 1)}" />
+          <label>étape(s)</label>
+        </span>
+      </div>
+      <p class="hint scn-only-pdfcheck">« égal à / contient » : au moins une valeur du champ PDF correspond. Charge les PDF dans l'onglet <strong>Toolbox</strong>.</p>
+      <div class="scn-row scn-only-pdfwrite">
+        <label>vers la colonne</label>
+        <select class="scn-pdf-targetcol" data-colselect="target"></select>
+        <input type="text" class="new-col-input scn-pdf-newcol" placeholder="lettre (C) ou nom de nouvelle colonne" style="display:none" value="${escapeAttr(step.pdfNewCol || "")}" />
+      </div>
+      <p class="hint scn-only-pdfwrite">Écrit la valeur du champ PDF (valeurs multiples séparées par « | ») dans la colonne, sur la ligne active.</p>
     </div>
   `;
 
@@ -2687,6 +2750,12 @@ function addScenarioStep(step = {}) {
   div.querySelector(".scn-cond-pageop").value = step.condPageOp || "exists";
   div.querySelector(".scn-cond-action").value = step.condAction || "skip";
   fillColumnSelect(div.querySelector(".scn-cond-col"), step.condCol || "");
+  div.querySelector(".scn-pdf-docmode").value = step.pdfDocMode || "active";
+  tbFillFieldSelect(div.querySelector(".scn-pdf-field"), step.pdfField || "");
+  div.querySelector(".scn-pdf-op").value = step.pdfOp || "equals";
+  div.querySelector(".scn-pdf-missaction").value = step.pdfMissAction || "error";
+  fillColumnSelect(div.querySelector(".scn-pdf-targetcol"), step.pdfTargetCol || "",
+    [{ value: "__other__", label: "➕ Autre (lettre ou nouvelle colonne)…" }]);
 
   // Affichage conditionnel interne à l'étape
   const typeSelect = div.querySelector(".scn-type");
@@ -2702,6 +2771,14 @@ function addScenarioStep(step = {}) {
   const condPageVal = div.querySelector(".scn-cond-pageval");
   const condAction = div.querySelector(".scn-cond-action");
   const condSkipWrap = div.querySelector(".scn-cond-skip-wrap");
+  const pdfDocMode = div.querySelector(".scn-pdf-docmode");
+  const pdfDocMatch = div.querySelector(".scn-pdf-docmatch");
+  const pdfOp = div.querySelector(".scn-pdf-op");
+  const pdfVal = div.querySelector(".scn-pdf-val");
+  const pdfMissAction = div.querySelector(".scn-pdf-missaction");
+  const pdfSkipWrap = div.querySelector(".scn-pdf-skip-wrap");
+  const pdfTargetCol = div.querySelector(".scn-pdf-targetcol");
+  const pdfNewCol = div.querySelector(".scn-pdf-newcol");
 
   function syncStepUI() {
     div.dataset.type = typeSelect.value;
@@ -2713,8 +2790,13 @@ function addScenarioStep(step = {}) {
     condVal.hidden = ["empty", "not_empty"].includes(condOp.value);
     condPageVal.hidden = ["exists", "not_exists"].includes(condPageOp.value);
     condSkipWrap.hidden = condAction.value !== "skip";
+    pdfDocMatch.hidden = pdfDocMode.value !== "match";
+    pdfVal.hidden = ["empty", "not_empty"].includes(pdfOp.value);
+    pdfSkipWrap.hidden = pdfMissAction.value !== "skip";
+    pdfNewCol.style.display = pdfTargetCol.value === "__other__" ? "block" : "none";
   }
-  [typeSelect, waitMode, condSource, condOp, condPageOp, condAction]
+  [typeSelect, waitMode, condSource, condOp, condPageOp, condAction,
+    pdfDocMode, pdfOp, pdfMissAction, pdfTargetCol]
     .forEach((sel) => sel.addEventListener("change", syncStepUI));
   syncStepUI();
 
@@ -2786,7 +2868,16 @@ function getScenarioSteps() {
     condPageOp: el.querySelector(".scn-cond-pageop").value,
     condPageVal: el.querySelector(".scn-cond-pageval").value,
     condAction: el.querySelector(".scn-cond-action").value,
-    condSkip: parseInt(el.querySelector(".scn-cond-skip").value, 10) || 1
+    condSkip: parseInt(el.querySelector(".scn-cond-skip").value, 10) || 1,
+    pdfDocMode: el.querySelector(".scn-pdf-docmode").value,
+    pdfDocMatch: el.querySelector(".scn-pdf-docmatch").value.trim(),
+    pdfField: el.querySelector(".scn-pdf-field").value,
+    pdfOp: el.querySelector(".scn-pdf-op").value,
+    pdfVal: el.querySelector(".scn-pdf-val").value,
+    pdfMissAction: el.querySelector(".scn-pdf-missaction").value,
+    pdfMissSkip: parseInt(el.querySelector(".scn-pdf-skip").value, 10) || 1,
+    pdfTargetCol: el.querySelector(".scn-pdf-targetcol").value,
+    pdfNewCol: el.querySelector(".scn-pdf-newcol").value.trim()
   }));
 }
 
@@ -2947,6 +3038,10 @@ function scnStepLabel(s) {
       return (s.waitMode === "gone" ? "Attendre disparition de " : "Attendre ") + scnTrunc(s.waitSelector || "?");
     case "cond":
       return s.condSource === "page" ? `Si ${scnTrunc(s.condSelector || "?", 30)}…` : `Si « ${s.condCol} »…`;
+    case "pdfcheck":
+      return `PDF : vérifier « ${tbFieldLabel(s.pdfField)} »`;
+    case "pdfwrite":
+      return `PDF : « ${tbFieldLabel(s.pdfField)} » → ${s.pdfTargetCol === "__other__" ? (s.pdfNewCol || "?") : (s.pdfTargetCol || "?")}`;
   }
   return s.type;
 }
@@ -3032,6 +3127,53 @@ async function execScenarioStep(step, rowIdx, tabId) {
         const n = Math.max(1, step.condSkip || 1);
         return { ok: true, skip: n, info: `condition remplie → saute ${n} étape(s)` };
       }
+      case "pdfcheck": {
+        const row = (rowIdx !== null && rowIdx !== undefined) ? (state.rows[rowIdx] || []) : null;
+        const { doc, error, warn } = tbGetDocForStep(step, row);
+        if (error) return { ok: false, error };
+        const values = tbFieldValues(doc, step.pdfField);
+        const expected = resolveRowTemplate(step.pdfVal ?? "", row);
+        const match = tbFieldMatches(values, step.pdfOp, expected);
+        const shown = values.length ? scnTrunc(values.join(" | "), 60) : "(vide)";
+        if (match) {
+          return { ok: true, info: `OK — ${doc.name} : ${shown}${warn ? " ⚠ " + warn : ""}` };
+        }
+        const opLabel = (OPERATORS.find((o) => o.v === step.pdfOp) || {}).t || step.pdfOp;
+        const msg = `écart PDF (${doc.name}) — « ${tbFieldLabel(step.pdfField)} » = ${shown}, attendu : ${opLabel} « ${scnTrunc(expected, 40)} »`;
+        switch (step.pdfMissAction) {
+          case "warn": return { ok: true, warn: true, info: msg + " → on continue" };
+          case "stop": return { ok: true, stop: true, info: msg + " → arrêt du scénario" };
+          case "skip": {
+            const n = Math.max(1, step.pdfMissSkip || 1);
+            return { ok: true, skip: n, info: msg + ` → saute ${n} étape(s)` };
+          }
+          default: return { ok: false, error: msg };
+        }
+      }
+      case "pdfwrite": {
+        if (rowIdx === null || rowIdx === undefined || !state.rows.length) {
+          return { ok: false, error: "aucune ligne active pour écrire la valeur" };
+        }
+        const row = state.rows[rowIdx] = state.rows[rowIdx] || [];
+        const { doc, error, warn } = tbGetDocForStep(step, row);
+        if (error) return { ok: false, error };
+        const values = tbFieldValues(doc, step.pdfField);
+        const val = values.join(" | ");
+        const ref = step.pdfTargetCol === "__other__" ? (step.pdfNewCol || "").trim() : step.pdfTargetCol;
+        if (!ref) return { ok: false, error: "colonne cible manquante" };
+        const existed = colIndexByName(ref) >= 0;
+        const idx = resolveOutputTarget(ref, {});
+        if (idx < 0) return { ok: false, error: `colonne cible introuvable (${ref})` };
+        setCellByIndex(row, idx, val);
+        persistSession();
+        if (existed) { renderPreview(); renderSelectedRowFields(); }
+        else renderColumns(); // nouvelle colonne : rafraîchit chips + selects
+        return {
+          ok: true,
+          info: `« ${ref} » ← ${val ? scnTrunc(val, 50) : "(vide)"}${warn ? " ⚠ " + warn : ""}`,
+          warn: !val
+        };
+      }
     }
     return { ok: false, error: "type d'étape inconnu" };
   } catch (e) {
@@ -3068,7 +3210,10 @@ function scenarioNeedsRow(steps) {
   return steps.some((s) =>
     (s.type === "fill" && Object.keys(state.mapping).length > 0) ||
     (s.type === "cond" && s.condSource === "excel") ||
-    (s.type === "goto" && /\{[^{}]+\}/.test(s.gotoUrl || ""))
+    (s.type === "goto" && /\{[^{}]+\}/.test(s.gotoUrl || "")) ||
+    (s.type === "pdfwrite") ||
+    (s.type === "pdfcheck" && (/\{[^{}]+\}/.test(s.pdfVal || "") ||
+      (s.pdfDocMode === "match" && /\{[^{}]+\}/.test(s.pdfDocMatch || ""))))
   );
 }
 
@@ -3168,348 +3313,78 @@ $("runScenarioLoopBtn").addEventListener("click", async () => {
   updateScenarioEstimate();
 });
 
-/* ================== 6. EXPORT / PROFILS / ONGLETS / INIT ================== */
+/* ================== 5ter. TOOLBOX PDF (BÊTA) ================== */
+// Analyse locale de PDF (pdf.js) : extraction du texte page par page avec
+// reconstruction des espaces (certains PDF — polices mal encodées — perdent
+// les espaces), détection de champs par motifs intégrés (SIRET, n° ADEME,
+// dates, emails…) + libellés « Libellé : valeur » + motifs personnalisés.
+// Les documents ne sont PAS persistés (session en cours uniquement).
 
-/* ---------- Export ---------- */
+const tbState = {
+  docs: [],          // [{id, name, size, pages, text, fields:[{key,label,values}], error, loading}]
+  activeDocId: null,
+  sendKeys: new Set(), // champs cochés pour « Vers la ligne active »
+  patterns: []       // motifs perso [{name, kind:"label"|"regex", value}]
+};
+let tbDocSeq = 1;
 
-function getOrBuildWorkbook() {
-  const ws = XLSX.utils.aoa_to_sheet(state.rows);
-  if (state.workbook && state.sheetName) {
-    state.workbook.Sheets[state.sheetName] = ws;
-    return state.workbook;
-  }
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, (state.sheetName || "Feuil1").slice(0, 31));
-  return wb;
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("lib/pdf.worker.min.js");
 }
 
-function rowsToJson(allRows) {
-  if (!allRows.length) return [];
-  const cols = getColumns();
-  const start = dataStartIdx();
-  return allRows.slice(start).map((r) => {
-    const obj = {};
-    cols.forEach((c) => { obj[c.name] = r[c.index] !== undefined ? r[c.index] : ""; });
-    return obj;
-  });
+// Normalisation : minuscules + accents retirés (longueur conservée) — permet
+// de faire correspondre libellés/valeurs sans se soucier des accents.
+function tbNorm(s) {
+  return String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[’‘]/g, "'").toLowerCase();
 }
 
-// Nom du fichier de sortie : modifiable par l'utilisateur dans l'onglet Export.
-function sanitizeFileName(name) {
-  return (name || "").trim().replace(/[\\/:*?"<>|]/g, "_");
+function tbEscapeRegex(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+// Motifs intégrés (regex, valeurs multiples possibles).
+const TB_BUILTIN_PATTERNS = [
+  { key: "ademe", label: "N° ADEME / DPE", re: "\\b(\\d{4}[A-Z]\\d{7}[A-Z])\\b" },
+  { key: "siret", label: "SIRET", re: "\\b(\\d{3}[ .]?\\d{3}[ .]?\\d{3}[ .]?\\d{5})\\b" },
+  { key: "siren", label: "SIREN", re: "\\b(\\d{3}[ .]?\\d{3}[ .]?\\d{3})\\b(?![ .]?\\d)" },
+  { key: "tva", label: "TVA intracom.", re: "\\b(FR ?\\d{2} ?\\d{9})\\b" },
+  { key: "iban", label: "IBAN", re: "\\b(FR\\d{2}(?: ?[A-Z0-9]{4}){5} ?[A-Z0-9]{0,3})\\b" },
+  { key: "date", label: "Dates", re: "\\b(\\d{2}/\\d{2}/\\d{4})\\b" },
+  { key: "email", label: "Emails", re: "\\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})\\b" },
+  { key: "tel", label: "Téléphones", re: "\\b(0[1-9](?:[ .]?\\d{2}){4})\\b" },
+  { key: "cpville", label: "CP + Ville", re: "\\b(\\d{5} ?[A-ZÀ-Ü][A-ZÀ-Üa-zà-ü' -]{2,})" },
+  { key: "surface", label: "Surfaces (m²)", re: "\\b(\\d+(?:[.,]\\d+)?) ?m²" }
+];
+
+// Libellés intégrés : cherche « Libellé : valeur » ligne par ligne.
+const TB_BUILTIN_LABELS = [
+  { key: "proprietaire", label: "Propriétaire" },
+  { key: "adresse", label: "Adresse" },
+  { key: "type_bien", label: "Type de bien" },
+  { key: "surface_habitable", label: "Surface habitable" },
+  { key: "annee_construction", label: "Année de construction" },
+  { key: "etabli_le", label: "Établi le" },
+  { key: "valable_jusquau", label: "Valable jusqu'au" },
+  { key: "diagnostiqueur", label: "Diagnostiqueur" },
+  { key: "certification", label: "N° de certification" }
+];
+
+// Regex de libellé : accents/espaces tolérés, deux-points requis.
+function tbLabelRegex(label, valueRequired) {
+  const esc = tbEscapeRegex(tbNorm(label)).replace(/ +/g, "[ ]?").replace(/'/g, "'?");
+  return new RegExp("(^|[^a-z0-9])" + esc + "[ ]*:[ ]*" + (valueRequired ? "(.+)$" : "$"), "i");
 }
 
-function currentOutputName() {
-  let name = sanitizeFileName($("outputNameInput").value) || state.originalFileName || "resultat.xlsx";
-  if (!/\.xlsx$/i.test(name)) name += ".xlsx";
-  return name;
-}
+/* ---------- Extraction du texte (pdf.js) ---------- */
 
-$("outputNameInput").addEventListener("change", () => {
-  state.originalFileName = currentOutputName();
-  $("outputNameInput").value = state.originalFileName;
-  persistSession();
-});
-
-$("downloadBtn").addEventListener("click", () => {
-  if (!state.rows.length) { showStatus("Aucune donnée chargée.", "error"); return; }
-  XLSX.writeFile(getOrBuildWorkbook(), currentOutputName());
-  hasDownloaded = true;
-  updateDoneMarkers();
-});
-
-$("downloadJsonBtn").addEventListener("click", () => {
-  if (!state.rows.length) { showStatus("Aucune donnée chargée.", "error"); return; }
-  const data = rowsToJson(state.rows);
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = currentOutputName().replace(/\.xlsx$/i, "") + ".json";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  hasDownloaded = true;
-  updateDoneMarkers();
-  showStatus("Export JSON téléchargé.", "success");
-});
-
-/* ---------- Profils (configurations nommées) ---------- */
-
-function buildProfileConfig() {
-  return {
-    headerMode: state.headerMode,
-    modelName: state.modelName,
-    mapping: state.mapping,
-    customFields: getCustomFieldsFromDOM().filter((f) => f.name || f.value),
-    valueRules: state.valueRules,
-    extraction: {
-      conditions: getConditions(),
-      searchFields: Array.from($("searchFieldsList").querySelectorAll(".search-field-item")).map((el) => ({
-        selector: el.querySelector(".selector-input").value.trim(),
-        col: el.querySelector(".col-select").value
-      })),
-      navEnabled: $("navEnabled").checked,
-      navUrlTemplate: $("navUrlTemplate").value,
-      navWaitLoad: $("navWaitLoad").checked,
-      navWaitTimeout: $("navWaitTimeout").value,
-      navExtraWaitMs: $("navExtraWaitMs").value,
-      submitMode: document.querySelector('input[name="submitMode"]:checked').value,
-      submitSelector: $("submitSelector").value,
-      waitMs: $("waitMs").value,
-      rowDelayMs: $("rowDelayMs").value,
-      startRow: $("startRow").value,
-      endRow: $("endRow").value,
-      outputs: getOutputs()
-    },
-    scenario: {
-      steps: getScenarioSteps(),
-      startRow: $("scnStartRow").value,
-      endRow: $("scnEndRow").value,
-      rowDelayMs: $("scnRowDelayMs").value
-    }
-  };
-}
-
-function applyProfileConfig(cfg) {
-  if (!cfg) return;
-  state.headerMode = cfg.headerMode || "auto";
-  $("headerModeSelect").value = state.headerMode;
-  state.modelName = cfg.modelName || "";
-  renderModelSelect();
-
-  if (cfg.mapping && Object.keys(cfg.mapping).length) {
-    state.mapping = cfg.mapping;
-    if (state.rows.length) {
-      allMappings[mappingKey()] = cfg.mapping;
-      chrome.storage.local.set({ allMappings });
-    }
-  }
-
-  state.customFields = Array.isArray(cfg.customFields) ? cfg.customFields : [];
-  renderCustomFields();
-
-  if (Array.isArray(cfg.valueRules)) {
-    state.valueRules = cfg.valueRules;
-    persistValueRules();
-    updateValueRulesInfo();
-  }
-
-  const ex = cfg.extraction || {};
-  $("conditionsList").innerHTML = "";
-  (ex.conditions || []).forEach((c) => addConditionRow(c.col, c.op, c.val));
-  $("searchFieldsList").innerHTML = "";
-  (ex.searchFields || []).forEach((f) => addSearchFieldRow(f.selector, f.col));
-  $("outputsList").innerHTML = "";
-  (ex.outputs || []).forEach((o) => addOutputRow(o.newCol ? { ...o, col: "__other__", newCol: o.newCol || o.col } : o));
-  $("navEnabled").checked = !!ex.navEnabled;
-  $("navUrlTemplate").value = ex.navUrlTemplate || "";
-  $("navWaitLoad").checked = ex.navWaitLoad !== false;
-  $("navWaitTimeout").value = ex.navWaitTimeout || 15000;
-  $("navExtraWaitMs").value = ex.navExtraWaitMs || 0;
-  $("navOptions").style.display = ex.navEnabled ? "block" : "none";
-  const submitMode = ex.submitMode || "enter";
-  document.querySelector(`input[name="submitMode"][value="${submitMode}"]`).checked = true;
-  $("submitSelectorRow").style.display = submitMode === "click" ? "flex" : "none";
-  $("submitSelector").value = ex.submitSelector || "";
-  $("waitMs").value = ex.waitMs || 1200;
-  $("rowDelayMs").value = ex.rowDelayMs || 300;
-  $("startRow").value = ex.startRow || (dataStartIdx() + 1);
-  $("endRow").value = ex.endRow || "";
-
-  const sc = cfg.scenario || {};
-  $("scenarioSteps").innerHTML = "";
-  (sc.steps || []).forEach((s) => addScenarioStep(s));
-  $("scnStartRow").value = sc.startRow || 2;
-  $("scnEndRow").value = sc.endRow || "";
-  $("scnRowDelayMs").value = sc.rowDelayMs || 500;
-
-  renderColumns();
-  updateMappingInfo();
-  updateFillButtonState();
-}
-
-function persistProfiles() { chrome.storage.local.set({ profiles }); }
-
-/* ---------- Sauvegarde automatique des options de travail ----------
-   Mémorise en continu tous les réglages (Saisie + Extraction) pour les
-   restaurer à la réouverture du panneau, sans avoir à enregistrer un profil. */
-let workingConfigTimer = null;
-function persistWorkingConfig() {
-  if (!workingReady) return;            // on n'écrit pas pendant l'initialisation
-  clearTimeout(workingConfigTimer);
-  workingConfigTimer = setTimeout(() => {
-    try {
-      chrome.storage.local.set({ workingConfig: buildProfileConfig() });
-    } catch (e) { /* ignoré */ }
-  }, 400);
-}
-
-// Toute modification d'un champ de réglage déclenche la sauvegarde auto.
-["input", "change"].forEach((evt) => {
-  document.addEventListener(evt, (e) => {
-    const t = e.target;
-    if (!t) return;
-    if (t.type === "file" || t.id === "profileSelect") return; // gérés à part
-    persistWorkingConfig();
-  });
-});
-
-function renderProfileSelect(selected) {
-  const sel = $("profileSelect");
-  sel.innerHTML = '<option value="">— aucun profil —</option>';
-  Object.keys(profiles).sort().forEach((name) => {
-    const opt = document.createElement("option");
-    opt.value = name;
-    opt.textContent = name;
-    sel.appendChild(opt);
-  });
-  sel.value = selected || "";
-}
-
-$("profileSelect").addEventListener("change", () => {
-  const name = $("profileSelect").value;
-  chrome.storage.local.set({ activeProfileName: name });
-  if (name && profiles[name]) {
-    applyProfileConfig(profiles[name]);
-    showStatus(`Profil « ${name} » chargé.`, "success");
-  }
-});
-
-$("saveProfileBtn").addEventListener("click", () => {
-  const name = $("profileSelect").value;
-  if (!name) { showStatus("Choisis un profil, ou crée-en un avec +.", "error"); return; }
-  profiles[name] = buildProfileConfig();
-  persistProfiles();
-  showStatus(`Profil « ${name} » sauvegardé.`, "success");
-});
-
-$("newProfileBtn").addEventListener("click", () => {
-  $("newProfileRow").hidden = false;
-  $("newProfileName").focus();
-});
-$("cancelNewProfileBtn").addEventListener("click", () => {
-  $("newProfileRow").hidden = true;
-  $("newProfileName").value = "";
-});
-$("confirmNewProfileBtn").addEventListener("click", () => {
-  const name = $("newProfileName").value.trim();
-  if (!name) { showStatus("Donne un nom au profil.", "error"); return; }
-  profiles[name] = buildProfileConfig();
-  persistProfiles();
-  renderProfileSelect(name);
-  chrome.storage.local.set({ activeProfileName: name });
-  $("newProfileRow").hidden = true;
-  $("newProfileName").value = "";
-  showStatus(`Profil « ${name} » créé.`, "success");
-});
-$("newProfileName").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") $("confirmNewProfileBtn").click();
-});
-
-$("deleteProfileBtn").addEventListener("click", () => {
-  const name = $("profileSelect").value;
-  if (!name) { showStatus("Aucun profil sélectionné.", "error"); return; }
-  delete profiles[name];
-  persistProfiles();
-  renderProfileSelect("");
-  chrome.storage.local.set({ activeProfileName: "" });
-  showStatus(`Profil « ${name} » supprimé.`, "success");
-});
-
-/* ---------- Onglets principaux ---------- */
-
-function showTab(tabName) {
-  document.querySelectorAll(".panel[data-tab]").forEach((p) => {
-    p.hidden = p.getAttribute("data-tab") !== tabName;
-  });
-  document.querySelectorAll(".tab-btn[data-tab]").forEach((b) => {
-    b.classList.toggle("active", b.getAttribute("data-tab") === tabName);
-  });
-  updateDoneMarkers();
-  if (tabName === "extraction") updateExtractEstimate();
-  if (tabName === "saisie") updateScenarioEstimate();
-  if (workingReady) chrome.storage.local.set({ lastTab: tabName });
-}
-
-document.querySelectorAll(".tab-btn[data-tab]").forEach((btn) => {
-  btn.addEventListener("click", () => showTab(btn.getAttribute("data-tab")));
-});
-
-// Recalcule l'estimation d'extraction dès qu'un paramètre de temps / de plage change.
-["waitMs", "rowDelayMs", "navExtraWaitMs", "navEnabled", "startRow", "endRow"].forEach((id) => {
-  const el = $(id);
-  if (el) el.addEventListener("input", updateExtractEstimate);
-});
-// Idem pour le scénario de saisie (plage de la boucle et pause).
-["scnStartRow", "scnEndRow", "scnRowDelayMs"].forEach((id) => {
-  const el = $(id);
-  if (el) el.addEventListener("input", updateScenarioEstimate);
-});
-
-function updateDoneMarkers() {
-  const done = {
-    donnees: state.rows.length > 0,
-    saisie: state.selectedRowIdx !== null && Object.keys(state.mapping).length > 0,
-    extraction: hasStartedRun && !isRunning,
-    export: hasDownloaded
-  };
-  document.querySelectorAll(".tab-btn[data-tab]").forEach((btn) => {
-    btn.classList.toggle("done", Boolean(done[btn.getAttribute("data-tab")]));
-  });
-}
-
-/* ---------- Migration de l'ancienne config OSA ---------- */
-
-function migrateLegacyOsaConfig(savedConfig) {
-  // Convertit l'ancienne config OSA (colonnes en lettres) en profil.
-  const legacyModelCols = [];
-  (savedConfig.mappings || []).forEach((m) => {
-    const idx = letterToIndex(m.col);
-    if (idx >= 0) {
-      while (legacyModelCols.length <= idx) legacyModelCols.push("");
-      legacyModelCols[idx] = m.label;
-    }
-  });
-  const searchFields = savedConfig.searchFields
-    || (savedConfig.searchSelector ? [{ selector: savedConfig.searchSelector, col: savedConfig.searchCol }] : []);
-  return {
-    headerMode: "auto",
-    modelName: "",
-    mapping: {},
-    customFields: [],
-    extraction: {
-      conditions: (savedConfig.conditions || []).map((c) => ({ col: (c.col || "").toUpperCase(), op: c.op, val: c.val })),
-      searchFields: searchFields.map((f) => ({ selector: f.selector, col: (f.col || "").toUpperCase() })),
-      submitMode: savedConfig.submitMode || "enter",
-      submitSelector: savedConfig.submitSelector || "",
-      waitMs: savedConfig.waitMs || 1200,
-      rowDelayMs: savedConfig.rowDelayMs || 300,
-      startRow: savedConfig.startRow || 2,
-      endRow: savedConfig.endRow || "",
-      outputs: (savedConfig.outputs || []).map((o) => ({
-        mode: o.mode || "css",
-        col: (o.col || "").toUpperCase(),
-        selector: o.selector || "",
-        rowSelector: o.rowSelector || "",
-        matchSourceCol: (o.matchSourceCol || "").toUpperCase(),
-        matchType: o.matchType || "contains",
-        matchTdIndex: o.matchTdIndex || 1,
-        extractTdIndex: o.extractTdIndex || 2
-      }))
-    }
-  };
-}
-
-/* ---------- Initialisation ---------- */
-
-async function init() {
-  const stored = await chrome.storage.local.get([
-    "models", "allMappings", "profiles", "activeProfileName",
-    "customFields", "session", "savedConfig", "migratedOsaLegacy",
-    "workingConfig", "lastTab", "valueRules"
-  ]);
-
-  // Règles de valeurs (seed avec la civilité au premier lancement).
-  if (Array.isArray(stored.valueRules)
+// Reconstruit le texte d'un PDF : regroupe les items par ligne (y proche),
+// trie par x et réinsère les espaces d'après les écarts horizontaux.
+async function tbExtractTextFromPdf(arrayBuffer) {
+  if (!window.pdfjsLib) throw new Error("pdf.js non chargé (lib/pdf.min.js manquant)");
+  const doc = await pdfjsLib.getDocument({ data: arrayBuffer, useSystemFonts: true }).promise;
+  const pageTexts = [];
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p);
+    const tc = await page.getTextContent();
+    const rows = new Map();
+    for (const it of tc.items) {
+      if (!it.str) continue;
+      const key = Math.round(it.transform[5] / 2) * 2; // tolérance verticale ~2p

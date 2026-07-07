@@ -68,6 +68,28 @@ deux modes :
 Télécharge le fichier mis à jour en `.xlsx` (même feuille remplacée si le
 fichier vient d'Excel) ou en `.json`.
 
+## 5. Onglet Toolbox (bêta)
+
+Analyse locale de **PDF** (pdf.js embarqué, rien n'est envoyé sur internet) :
+
+1. **Documents** : charge un ou plusieurs PDF ; le texte est extrait page par
+   page (avec reconstruction des espaces pour les PDF mal encodés).
+2. **Champs détectés** : motifs intégrés (n° ADEME/DPE, SIRET, SIREN, TVA,
+   IBAN, dates, emails, téléphones, CP+ville, surfaces) + libellés
+   « Libellé : valeur » (propriétaire, adresse, diagnostiqueur…). Clic sur une
+   valeur = copie. Les champs cochés peuvent être écrits d'un coup dans la
+   **ligne active** (colonnes du même nom, créées si besoin).
+3. **Motifs personnalisés** : ajoute tes propres champs (libellé ou regex),
+   mémorisés dans le navigateur.
+4. **Scénario** : deux nouveaux types d'étape dans le scénario de saisie —
+   **PDF β : vérifier un champ** (compare une donnée du PDF à une valeur fixe
+   ou `{Colonne}` ; en cas d'écart : erreur, avertissement, saut d'étapes ou
+   arrêt) et **PDF β : écrire un champ** (reporte la valeur dans une colonne).
+   En boucle, le bon document est retrouvé par son **nom de fichier**
+   (ex. `{N° DPE}`).
+
+Limite : PDF scannés (images) non gérés — pas d'OCR.
+
 ## Profils
 
 La barre du haut permet d'enregistrer des **profils** nommés : mapping,
@@ -109,27 +131,4 @@ GitHub `MoreIIo/NoHands` et afficher une bannière avec les notes de version.
    `manifest.json` sur la branche `main`. Si une version supérieure existe, une
    bannière « Nouvelle version disponible » s'affiche avec un lien vers GitHub.
 
-La vérification se relance automatiquement à l'ouverture du panneau (au plus une
-fois toutes les 3 h ; désactivable via la case à cocher). Les notes proviennent
-de la dernière *release* si elle existe, sinon des derniers messages de commit.
-
-> L'extension étant chargée « non empaquetée », la mise à jour reste **manuelle** :
-> récupère la nouvelle version sur GitHub puis recharge l'extension dans
-> `chrome://extensions`. La bannière sert d'alerte, pas d'installateur automatique.
-
-## Structure du projet
-
-```
-├── manifest.json      Manifest V3 (side panel, content script, menus)
-├── background.js      Service worker : panneau, menu contextuel, injection
-├── content.js         Moteur de remplissage (mode Saisie)
-├── sidepanel.html     Interface (Données / Saisie / Extraction / Export)
-├── sidepanel.css      Styles
-├── sidepanel.js       Logique complète
-├── update-check.js    Vérification de mise à jour via GitHub
-├── lib/xlsx.full.min.js  SheetJS (lecture/écriture Excel)
-├── icons/             Icônes de l'extension
-└── test.html          Page de test locale des deux modes
-```
-
-**Version** : 2.0.0 — fusion NoHands + OSA, avec vérification de mise à jour GitHub.
+La vérification se relance automat

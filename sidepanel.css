@@ -304,22 +304,26 @@ input[type="file"]::file-selector-button {
 .out-item .new-col-input { flex: 1; min-width: 90px; }
 .out-item-csshint { margin: 6px 0 0; }
 .out-item-notfound,
+.out-item-found,
 .out-item-regex {
   margin-top: 8px; padding-top: 8px;
   border-top: 1px dashed var(--border);
   display: flex; flex-direction: column; gap: 6px;
 }
 .out-item-notfound .checkbox-row,
+.out-item-found .checkbox-row,
 .out-item-regex > .checkbox-row {
   display: flex; align-items: center; gap: 8px;
   font-size: 12px; color: var(--text-dim); cursor: pointer;
   margin: 0; padding: 0;
 }
 .out-item-notfound .checkbox-row input[type="checkbox"],
+.out-item-found .checkbox-row input[type="checkbox"],
 .out-item-regex .checkbox-row input[type="checkbox"] {
   width: auto; margin: 0; cursor: pointer; flex: none;
 }
 .out-item-notfound .notfound-msg { width: 100%; }
+.out-item-found .found-msg { width: 100%; }
 
 /* ---------- Formatage regex du résultat ---------- */
 .regex-body { display: flex; flex-direction: column; gap: 6px; }
@@ -503,80 +507,72 @@ input[type="file"]::file-selector-button {
 .scn-step:not([data-type="click"]) .scn-only-click { display: none; }
 .scn-step:not([data-type="wait"]) .scn-only-wait { display: none; }
 .scn-step:not([data-type="cond"]) .scn-only-cond { display: none; }
+.scn-step:not([data-type="pdfcheck"]) .scn-only-pdfcheck { display: none; }
+.scn-step:not([data-type="pdfwrite"]) .scn-only-pdfwrite { display: none; }
+.scn-step:not([data-type="pdfcheck"]):not([data-type="pdfwrite"]) .scn-only-pdf { display: none; }
 
-/* ---------- Saisie multi-onglets ---------- */
-.btn.sm { padding: 4px 10px; font-size: 11.5px; }
-.mt-tabs-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
-.mt-tab-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  background: var(--panel, #1d1d27);
-  border: 1px solid #2d2d3a;
-  border-radius: 8px;
-  font-size: 12px;
+/* ---------- Toolbox PDF (bêta) ---------- */
+.beta-badge {
+  position: absolute; top: 3px; right: 5px;
+  font-size: 9px; font-weight: 700;
+  color: var(--warn);
+  line-height: 1;
 }
-.mt-tab-label { flex: 1; }
-
-/* ---------- Toast ---------- */
-.status-message {
-  position: fixed; bottom: 14px; left: 12px; right: 12px;
-  background: var(--bg-softer);
+.tab-btn[data-tab="toolbox"] .done-dot { right: auto; left: 6px; }
+.beta-note {
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 11.5px; color: var(--text-dim);
+  margin: 0 0 4px;
+}
+.beta-note strong { color: var(--warn); }
+.tb-docs { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.tb-doc {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px;
+  background: var(--bg-soft);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 10px 12px;
-  font-size: 12.5px; font-weight: 600;
-  opacity: 0; transform: translateY(8px);
-  transition: opacity 0.2s, transform 0.2s;
-  pointer-events: none;
-  z-index: 200;
-  text-align: center;
+  cursor: pointer;
+  font-size: 12px;
 }
-.status-message.show { opacity: 1; transform: translateY(0); }
-.status-message.success { color: var(--ok); border-color: rgba(74, 222, 128, 0.4); }
-.status-message.error { color: var(--err); border-color: rgba(248, 113, 113, 0.4); }
-.status-message.info { color: var(--text); }
-
-/* ---------- Mises à jour ---------- */
-.btn.sm { padding: 5px 9px; font-size: 11.5px; }
-
-.update-banner {
-  margin: 8px 12px 0;
-  padding: 9px 11px;
-  background: var(--accent-soft);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
+.tb-doc:hover { background: var(--bg-softer); }
+.tb-doc.active { border-color: var(--accent); background: var(--accent-soft); }
+.tb-doc .tb-doc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.tb-doc .tb-doc-meta { color: var(--text-dim); font-size: 11px; flex: none; }
+.tb-doc .tb-doc-err { color: var(--err); font-size: 11px; }
+.tb-fields { margin-top: 8px; }
+.tb-field {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
 }
-.update-banner-row {
-  display: flex; align-items: center; gap: 8px;
+.tb-field:last-child { border-bottom: none; }
+.tb-field-check { flex: none; align-self: center; }
+.tb-field-label { flex: none; width: 128px; color: var(--text-dim); font-size: 11.5px; }
+.tb-field-vals { flex: 1; display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.tb-val {
+  background: var(--bg-softer);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 7px;
+  cursor: pointer;
+  word-break: break-all;
 }
-.update-banner-row > .icon { color: var(--accent); flex: 0 0 auto; }
-.update-banner-text { flex: 1; min-width: 0; line-height: 1.25; }
-.update-banner-text strong { display: block; font-size: 12.5px; }
-.update-banner-text span { color: var(--text-dim); font-size: 11px; }
-.update-banner .btn.icon-only { padding: 5px; }
-.update-notes {
+.tb-val:hover { border-color: var(--accent); color: #fff; }
+.tb-pattern-item {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.tb-pattern-item input { flex: 1; min-width: 90px; }
+.tb-text {
   margin: 8px 0 0;
   padding: 8px 10px;
-  max-height: 200px; overflow: auto;
-  background: var(--bg); border: 1px solid var(--border);
+  max-height: 260px; overflow: auto;
+  background: var(--bg-soft); border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  font-size: 11.5px; line-height: 1.5;
-  white-space: pre-wrap; word-break: break-word;
-  font-family: inherit;
-}
-
-.upd-versions { margin: 6px 0 12px; }
-.upd-versions .field-row { justify-content: space-between; gap: 8px; }
-.upd-versions .field-row span { color: var(--text-dim); }
-.check-inline { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-.upd-status { min-height: 16px; margin-top: 8px; }
-.upd-status.ok  { color: var(--ok); }
-.upd-status.err { color: var(--err); }
-
-/* ---------- Scrollbars ---------- */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #44445a; }
+  font-size: 11px; line-height: 1.5;
+  white-space: pre-wrap; word
