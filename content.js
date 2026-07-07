@@ -39,7 +39,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse(result);
   } else if (request.action === 'copyInputName') {
     if (lastContextMenuTarget) {
-      const inputName = lastContextMenuTarget.getAttribute('name');
+      // On privilégie le name ; à défaut on récupère l'id (beaucoup de
+      // formulaires n'ont pas d'attribut name sur leurs champs).
+      const inputName = lastContextMenuTarget.getAttribute('name') || lastContextMenuTarget.id;
       if (inputName) {
         navigator.clipboard.writeText(inputName).then(() => {
           showCopyNotification(inputName);
@@ -169,6 +171,71 @@ function startFillObserver() {
 }
 
 /**
+ * Résout un champ de formulaire à partir d'un identifiant fourni par
+ * l'utilisateur. Supporte name, id ET classe. Cherche successivement
+ * (le premier trouvé gagne) :
+ *   1. attribut name exact
+ *   2. attribut id exact (getElementById puis [id="…"])
+ *   3. sélecteur CSS brut si l'utilisateur en tape un (ex: "#monId",
+ *      ".maClasse", "input[data-x=y]")
+ *   4. nom de classe brut (ex: "form-control")
+ *   5. repli : name OU id se terminant par l'identifiant (utile pour les
+ *      ID/name dynamiques type ASP.NET « ctl00$...$txtNom »).
+ * Quand plusieurs éléments correspondent (classe), on privilégie le
+ * premier champ réellement remplissable (input / select / textarea).
+ * @param {string} identifier
+ * @returns {Element|null}
+ */
+function findFormInput(identifier) {
+  if (!identifier) return null;
+  const key = String(identifier).trim();
+  if (!key) return null;
+
+  const FILLABLE = 'input, select, textarea';
+  // Parmi une liste de correspondances, renvoie d'abord un champ remplissable.
+  const pickBest = (list) => {
+    if (!list || !list.length) return null;
+    for (const el of list) {
+      if (el.matches && el.matches(FILLABLE)) return el;
+      // ou un conteneur qui enveloppe un champ remplissable
+      const inner = el.querySelector && el.querySelector(FILLABLE);
+      if (inner) return inner;
+    }
+    return list[0];
+  };
+
+  const esc = CSS.escape(key);
+
+  // 1. name exact
+  let el = document.querySelector(`[name="${esc}"]`);
+  if (el) return el;
+
+  // 2. id exact
+  el = document.getElementById(key) || document.querySelector(`[id="${esc}"]`);
+  if (el) return el;
+
+  // 3. sélecteur CSS brut (l'utilisateur a tapé #id, .classe, [attr]…)
+  if (/[#.\[\]>\s,]/.test(key)) {
+    try {
+      const found = pickBest(document.querySelectorAll(key));
+      if (found) return found;
+    } catch (_) { /* sélecteur invalide : on ignore */ }
+  }
+
+  // 4. nom de classe brut (sans le point)
+  try {
+    const found = pickBest(document.querySelectorAll(`.${esc}`));
+    if (found) return found;
+  } catch (_) { /* classe invalide : on ignore */ }
+
+  // 5. repli : name/id se terminant par l'identifiant
+  el = document.querySelector(`[name$="${esc}"], [id$="${esc}"]`);
+  if (el) return el;
+
+  return null;
+}
+
+/**
  * Remplit les champs du formulaire à partir des données et du mapping
  * @param {Object} data - Données de la ligne (nomColonne -> valeur)
  * @param {Object} mapping - nomColonne -> nom(s) d'input
@@ -190,9 +257,9 @@ function fillFormFields(data, mapping) {
       if (!inputName || inputName.trim() === '') return;
 
       try {
-        const input = document.querySelector(`[name="${CSS.escape(inputName)}"]`);
+        const input = findFormInput(inputName);
         if (!input) {
-          errors.push(`Input non trouvé: ${inputName}`);
+          errors.push(`Input non trouvé (name/id/classe): ${inputName}`);
           return;
         }
         const success = fillInputByType(input, value);
@@ -228,9 +295,9 @@ function fillCustomFields(customFields) {
   for (const [inputName, value] of Object.entries(customFields)) {
     if (!inputName || inputName.trim() === '') continue;
     try {
-      const input = document.querySelector(`[name="${CSS.escape(inputName)}"]`);
+      const input = findFormInput(inputName);
       if (!input) {
-        errors.push(`Input non trouvé: ${inputName}`);
+        errors.push(`Input non trouvé (name/id/classe): ${inputName}`);
         continue;
       }
       const success = fillInputByType(input, value);
@@ -385,84 +452,4 @@ function trySplitAcrossNumberedInputs(firstInput, stripped) {
     const candidateName = makeName(n);
     const el = document.querySelector(`[name="${CSS.escape(candidateName)}"]`);
     if (!el) break;
-    inputs.push(el);
-  }
-
-  if (inputs.length < 2) return 0;
-
-  let offset = 0;
-  let filledCount = 0;
-  for (const inp of inputs) {
-    if (offset >= stripped.length) break;
-    const len = inp.maxLength > 0 ? inp.maxLength : (stripped.length - offset);
-    const chunk = stripped.slice(offset, offset + len);
-    inp.value = chunk;
-    triggerInputEvents(inp);
-    offset += len;
-    filledCount++;
-  }
-
-  return filledCount;
-}
-
-/**
- * Déclenche input+change pour que les frameworks détectent la modification.
- * NOTE : pas de 'blur' volontairement — sur les pages ASP.NET WebForms, le blur
- * de certains champs déclenche __doPostBack et ouvre des popups indésirables.
- */
-function triggerInputEvents(element) {
-  element.dispatchEvent(new Event('input', { bubbles: true }));
-  element.dispatchEvent(new Event('change', { bubbles: true }));
-}
-
-function triggerChangeEvent(element) {
-  element.dispatchEvent(new Event('change', { bubbles: true }));
-}
-
-/**
- * Convertit une date DD/MM/YYYY (ou D/M/YYYY) en YYYY-MM-DD
- */
-function convertDateFormat(dateStr) {
-  const match1 = dateStr.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (match1) {
-    const [, day, month, year] = match1;
-    return `${year}-${month}-${day}`;
-  }
-  const match2 = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (match2) {
-    const [, day, month, year] = match2;
-    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-  }
-  if (/^(\d{4})-(\d{2})-(\d{2})$/.test(dateStr)) return dateStr;
-  return dateStr;
-}
-
-/**
- * Notification visuelle temporaire (copie du nom d'input)
- */
-function showCopyNotification(inputName) {
-  const notification = document.createElement('div');
-  notification.textContent = `✓ Copié: ${inputName}`;
-  notification.style.cssText = `
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    background: rgba(24, 24, 27, 0.92);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    color: #4ade80;
-    padding: 12px 20px;
-    border-radius: 12px;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-size: 14px;
-    font-weight: 600;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.06);
-    z-index: 999999;
-  `;
-  document.body.appendChild(notification);
-  setTimeout(() => notification.remove(), 2000);
-}
-
-console.log('NoHands OSA: content script chargé');
-
-} // Fin de la garde d'injection
+    inputs.push

@@ -953,7 +953,7 @@ function addMappingInput(container, value) {
 
   const input = document.createElement("input");
   input.type = "text";
-  input.placeholder = "attribut name (ex: body:x:tabc:x:txtNom)";
+  input.placeholder = "name ou id (ex: body:x:tabc:x:txtNom)";
   input.value = value;
 
   const pickBtn = document.createElement("button");
@@ -964,11 +964,13 @@ function addMappingInput(container, value) {
   pickBtn.addEventListener("click", async () => {
     const picked = await pickTargetOnActiveTab();
     if (!picked) return;
-    if (picked.name) {
-      input.value = picked.name;
-      showStatus(`✓ name récupéré : ${picked.name}`, "success");
+    const identifier = picked.name || picked.id;
+    if (identifier) {
+      input.value = identifier;
+      const kind = picked.name ? "name" : "id";
+      showStatus(`✓ ${kind} récupéré : ${identifier}`, "success");
     } else {
-      showStatus("Cet élément n'a pas d'attribut name — mapping impossible sur ce champ.", "error");
+      showStatus("Cet élément n'a ni name ni id — impossible de le cibler.", "error");
     }
   });
 
@@ -1112,11 +1114,25 @@ function renderCustomFields() {
     const row = document.createElement("div");
     row.className = "custom-field-row";
     row.innerHTML = `
-      <input type="text" class="custom-field-name" placeholder="nom de l'input" value="${escapeAttr(item.name)}" />
-      <input type="text" class="custom-field-value" placeholder="valeur" value="${escapeAttr(item.value)}" />
+      <input type="text" class="custom-field-name" placeholder="name, id ou classe" value="${escapeAttr(item.name)}" />
+      <button class="btn pick icon-only custom-field-pick" type="button" title="Cliquer sur le champ du site pour récupérer son name/id"><svg class="icon"><use href="#icon-target"/></svg></button>
+      <input type="text" class="custom-field-value" placeholder="valeur (ex : MG{N° MG})" title="Valeur dynamique : {Nom de colonne} ou {A} est remplacé par la valeur de la ligne active. Ex : MG{N° MG}" value="${escapeAttr(item.value)}" />
       <button class="remove-btn" type="button" title="Supprimer"><svg class="icon icon-sm"><use href="#icon-close"/></svg></button>
     `;
     row.querySelectorAll("input").forEach((inp) => inp.addEventListener("blur", saveCustomFields));
+    row.querySelector(".custom-field-pick").addEventListener("click", async () => {
+      const picked = await pickTargetOnActiveTab();
+      if (!picked) return;
+      const identifier = picked.name || picked.id;
+      if (identifier) {
+        row.querySelector(".custom-field-name").value = identifier;
+        saveCustomFields();
+        const kind = picked.name ? "name" : "id";
+        showStatus(`✓ ${kind} récupéré : ${identifier}`, "success");
+      } else {
+        showStatus("Cet élément n'a ni name ni id — saisis une classe manuellement.", "error");
+      }
+    });
     row.querySelector(".remove-btn").addEventListener("click", () => {
       row.remove();
       saveCustomFields();
@@ -1250,8 +1266,9 @@ async function sendFillToAllTabs(message) {
 function buildFillPayload(rowIdx) {
   const data = {};
   const mapping = {};
-  if (rowIdx !== null && rowIdx !== undefined && state.rows.length) {
-    const row = state.rows[rowIdx] || [];
+  const activeRow = (rowIdx !== null && rowIdx !== undefined && state.rows.length) ? (state.rows[rowIdx] || []) : null;
+  if (activeRow) {
+    const row = activeRow;
     const colByName = {};
     getColumns().forEach((c) => { colByName[c.name] = c; });
     for (const [colName, inputNames] of Object.entries(state.mapping)) {
@@ -1262,7 +1279,7 @@ function buildFillPayload(rowIdx) {
     }
   }
   const customFields = {};
-  state.customFields.forEach(({ name, value }) => { if (name) customFields[name] = value; });
+  state.customFields.forEach(({ name, value }) => { if (name) customFields[name] = resolveRowTemplate(value, activeRow); });
   return { data, mapping, customFields };
 }
 
@@ -1647,7 +1664,8 @@ function pickElementOnPageInjected() {
       const target = e.target;
       const result = {
         selector: computeSelector(target),
-        name: target.getAttribute ? (target.getAttribute("name") || null) : null
+        name: target.getAttribute ? (target.getAttribute("name") || null) : null,
+        id: target.id || null
       };
       cleanup();
       resolve(result);
@@ -1683,7 +1701,7 @@ function addConditionRow(col = "", op = "equals", val = "") {
   div.innerHTML = `
     <select class="col-select" data-colselect="plain"></select>
     <select class="op-select">${opOptions}</select>
-    <input type="text" class="val-input" placeholder="valeur" value="${escapeAttr(val)}" />
+    <input type="text" class="val-input" placeholder="valeur (ex : MG{N° MG})" title="Valeur dynamique : {Nom de colonne} ou {A} est remplacé par la valeur de la ligne. Ex : MG{N° MG}" value="${escapeAttr(val)}" />
     <button class="remove-btn" title="Supprimer" type="button"><svg class="icon icon-sm"><use href="#icon-close"/></svg></button>
   `;
   fillColumnSelect(div.querySelector(".col-select"), col);
@@ -1727,7 +1745,7 @@ function rowMatchesSkipCondition(row, conditions) {
   for (const c of conditions) {
     const idx = colIndexByName(c.col);
     const cell = getCellByIndex(row, idx);
-    if (cellMatches(cell, c.op, c.val)) return true; // une condition qui matche => ligne ignorée
+    if (cellMatches(cell, c.op, resolveRowTemplate(c.val, row))) return true; // une condition qui matche => ligne ignorée
   }
   return false;
 }
@@ -2138,6 +2156,21 @@ function buildNavUrl(template, row) {
     return encodeURIComponent(v);
   });
   return { url, missing, values };
+}
+
+// Résout les variables {Nom de colonne} (ou {A}) d'une chaîne avec les valeurs
+// de la ligne active. Sert à rendre dynamiques les valeurs de condition et les
+// champs personnalisés (ex : « MG{N° MG} » → « MG » + valeur de la colonne).
+// Contrairement à buildNavUrl, la valeur n'est PAS encodée pour l'URL, et une
+// variable introuvable est laissée telle quelle pour rester visible.
+function resolveRowTemplate(str, row) {
+  if (str === null || str === undefined) return str;
+  if (!row) return String(str);
+  return String(str).replace(/\{([^{}]+)\}/g, (whole, name) => {
+    const idx = colIndexByName(name.trim());
+    if (idx < 0) return whole;
+    return getCellByIndex(row, idx);
+  });
 }
 
 // Navigue l'onglet vers l'URL. Si waitForLoad, attend la fin du chargement
@@ -2623,13 +2656,13 @@ function addScenarioStep(step = {}) {
       <div class="scn-row scn-only-cond scn-cond-excel-wrap">
         <select class="scn-cond-col" data-colselect="plain"></select>
         <select class="scn-cond-op">${excelOpOptions}</select>
-        <input type="text" class="scn-cond-val" placeholder="valeur" value="${escapeAttr(step.condVal || "")}" />
+        <input type="text" class="scn-cond-val" placeholder="valeur (ex : MG{N° MG})" title="Valeur dynamique : {Nom de colonne} ou {A} est remplacé par la valeur de la ligne active. Ex : MG{N° MG}" value="${escapeAttr(step.condVal || "")}" />
       </div>
       <div class="scn-row scn-only-cond scn-cond-page-wrap">
         <input type="text" class="scn-cond-selector" placeholder="sélecteur CSS" value="${escapeAttr(step.condSelector || "")}" />
         <button class="btn pick icon-only scn-pick-cond" title="Choisir sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
         <select class="scn-cond-pageop">${pageOpOptions}</select>
-        <input type="text" class="scn-cond-pageval" placeholder="texte" value="${escapeAttr(step.condPageVal || "")}" />
+        <input type="text" class="scn-cond-pageval" placeholder="texte (ex : MG{N° MG})" title="Valeur dynamique : {Nom de colonne} ou {A} est remplacé par la valeur de la ligne active." value="${escapeAttr(step.condPageVal || "")}" />
       </div>
       <div class="scn-row scn-only-cond">
         <label>alors</label>
@@ -2642,6 +2675,7 @@ function addScenarioStep(step = {}) {
           <label>étape(s)</label>
         </span>
       </div>
+      <p class="hint scn-only-cond">Valeur dynamique : <code>{Nom de colonne}</code> (ou <code>{A}</code>) est remplacé par la valeur de la ligne active. Ex : <code>MG{N° MG}</code>.</p>
     </div>
   `;
 
@@ -2976,20 +3010,22 @@ async function execScenarioStep(step, rowIdx, tabId) {
       }
       case "cond": {
         let match;
+        const condRow = (rowIdx !== null && rowIdx !== undefined) ? (state.rows[rowIdx] || []) : null;
         if (step.condSource === "page") {
           if (!step.condSelector) return { ok: false, error: "sélecteur manquant" };
+          const pageVal = resolveRowTemplate(step.condPageVal, condRow);
           const [{ result }] = await chrome.scripting.executeScript({
             target: { tabId },
             func: scnCheckInjected,
-            args: [{ selector: step.condSelector, op: step.condPageOp, value: step.condPageVal }]
+            args: [{ selector: step.condSelector, op: step.condPageOp, value: pageVal }]
           });
           if (!result || !result.ok) return { ok: false, error: result ? result.error : "pas de réponse de la page" };
           match = result.match;
         } else {
-          if (rowIdx === null || rowIdx === undefined) return { ok: false, error: "aucune ligne active pour la condition Excel" };
+          if (condRow === null) return { ok: false, error: "aucune ligne active pour la condition Excel" };
           const idx = colIndexByName(step.condCol);
           if (idx < 0) return { ok: false, error: `colonne introuvable (${step.condCol})` };
-          match = cellMatches(getCellByIndex(state.rows[rowIdx] || [], idx), step.condOp, step.condVal);
+          match = cellMatches(getCellByIndex(condRow, idx), step.condOp, resolveRowTemplate(step.condVal, condRow));
         }
         if (!match) return { ok: true, info: "condition non remplie → on continue" };
         if (step.condAction === "stop") return { ok: true, stop: true, info: "condition remplie → arrêt du scénario" };
@@ -3026,8 +3062,11 @@ async function runScenarioForRow(rowIdx, tabId, steps, prefix = "") {
 }
 
 function scenarioNeedsRow(steps) {
+  // Une étape "fill" ne nécessite une ligne que si elle s'appuie sur un
+  // mapping colonnes → inputs ; avec uniquement des champs personnalisés
+  // (valeurs fixes), elle fonctionne sans donnée Excel chargée.
   return steps.some((s) =>
-    s.type === "fill" ||
+    (s.type === "fill" && Object.keys(state.mapping).length > 0) ||
     (s.type === "cond" && s.condSource === "excel") ||
     (s.type === "goto" && /\{[^{}]+\}/.test(s.gotoUrl || ""))
   );
@@ -3473,80 +3512,4 @@ async function init() {
   ]);
 
   // Règles de valeurs (seed avec la civilité au premier lancement).
-  if (Array.isArray(stored.valueRules)) {
-    state.valueRules = stored.valueRules;
-  } else {
-    state.valueRules = JSON.parse(JSON.stringify(DEFAULT_VALUE_RULES));
-    persistValueRules();
-  }
-
-  // Modèles (seed au premier lancement)
-  if (Array.isArray(stored.models) && stored.models.length) {
-    models = stored.models;
-  } else {
-    models = JSON.parse(JSON.stringify(DEFAULT_MODELS));
-    persistModels();
-  }
-
-  allMappings = stored.allMappings || {};
-  profiles = stored.profiles || {};
-
-  // Migration de l'ancienne config OSA -> profil "OSA (importé)"
-  if (stored.savedConfig && !stored.migratedOsaLegacy) {
-    profiles["OSA (importé)"] = migrateLegacyOsaConfig(stored.savedConfig);
-    persistProfiles();
-    chrome.storage.local.set({ migratedOsaLegacy: true });
-  }
-
-  // Champs personnalisés
-  if (Array.isArray(stored.customFields)) state.customFields = stored.customFields;
-  renderCustomFields();
-
-  // Session précédente (données + réglages)
-  if (stored.session && Array.isArray(stored.session.rows) && stored.session.rows.length) {
-    state.rows = stored.session.rows;
-    state.sheetName = stored.session.sheetName || null;
-    state.headerMode = stored.session.headerMode || "auto";
-    state.modelName = stored.session.modelName || "";
-    state.selectedRowIdx = stored.session.selectedRowIdx ?? null;
-    state.originalFileName = stored.session.originalFileName || "resultat.xlsx";
-    $("headerModeSelect").value = state.headerMode;
-    $("outputNameInput").value = state.originalFileName;
-    setLoadedInfo(`Session restaurée (« ${state.sheetName || "données"} »)`);
-  }
-
-  renderModelSelect();
-
-  // Profil actif
-  renderProfileSelect(stored.activeProfileName || "");
-  if (stored.activeProfileName && profiles[stored.activeProfileName]) {
-    applyProfileConfig(profiles[stored.activeProfileName]);
-  } else {
-    renderColumns();
-    updateMappingInfo();
-  }
-
-  // Dernier état de travail auto-sauvegardé : reflète les options exactes
-  // laissées à la fermeture précédente (prioritaire sur les valeurs du profil).
-  if (stored.workingConfig) {
-    applyProfileConfig(stored.workingConfig);
-  }
-
-  // Lignes par défaut dans l'onglet Extraction si vide
-  if (!$("searchFieldsList").children.length) addSearchFieldRow();
-  if (!$("outputsList").children.length) addOutputRow();
-
-  // Onglet actif restauré
-  if (stored.lastTab) showTab(stored.lastTab);
-
-  updateFillButtonState();
-  updateDoneMarkers();
-  updateValueRulesInfo();
-
-  // À partir d'ici, toute modification est sauvegardée automatiquement.
-  workingReady = true;
-}
-
-init();
-
-// (fin du fichier)
+  if (Array.isArray(stored.valueRules)
