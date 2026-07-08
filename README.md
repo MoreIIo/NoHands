@@ -88,7 +88,14 @@ Analyse locale de **PDF** (pdf.js embarqué, rien n'est envoyé sur internet) :
    En boucle, le bon document est retrouvé par son **nom de fichier**
    (ex. `{N° DPE}`).
 
-Limite : PDF scannés (images) non gérés — pas d'OCR.
+**OCR (bêta)** : bouton « Lancer l'OCR » sous la liste des documents — reconnaît
+le texte des **pages scannées et des images** (Tesseract embarqué, 100 % local,
+~5-20 s par page). Deux modes : *pages sans texte (auto)* pour les PDF scannés,
+ou *toutes les pages* pour lire par ex. l'**étiquette énergie** d'un DPE (conso
+`kWh/m²/an`, émissions `kgCO₂/m²/an`), qui est une image même dans les PDF
+texte. Les champs sont re-détectés après l'OCR (motifs tolérants aux erreurs de
+reconnaissance) et le texte OCR s'ajoute au texte extrait (sections
+« — OCR page N — »).
 
 ## Profils
 
@@ -152,9 +159,12 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── lib/xlsx.full.min.js  SheetJS (lecture/écriture Excel)
 ├── lib/pdf.min.js     pdf.js (Mozilla) — analyse PDF de la Toolbox
 ├── lib/pdf.worker.min.js  Worker pdf.js
+├── lib/ocr/           Tesseract.js (OCR local) : lib, worker, cœur wasm, langue fra
 ├── icons/             Icônes de l'extension
 └── test.html          Page de test locale des deux modes
 ```
 
-**Version** : 2.1.0 — onglet **Toolbox (bêta)** : analyse de PDF (n° ADEME, SIRET,
+**Version** : 2.2.0 — Toolbox : **OCR local** (Tesseract) pour PDF scannés et
+images (étiquette énergie DPE : conso kWh/m²/an, émissions kgCO₂/m²/an).
+2.1.0 — onglet **Toolbox (bêta)** : analyse de PDF (n° ADEME, SIRET,
 noms, dates…), vérification/report des données dans le scénario de saisie.

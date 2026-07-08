@@ -3551,7 +3551,20 @@ const TB_BUILTIN_PATTERNS = [
   { key: "email", label: "Emails", re: "\\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})\\b" },
   { key: "tel", label: "Téléphones", re: "\\b(0[1-9](?:[ .]?\\d{2}){4})\\b" },
   { key: "cpville", label: "CP + Ville", re: "\\b(\\d{5} ?[A-ZÀ-Ü][A-ZÀ-Üa-zà-ü' -]{2,})" },
-  { key: "surface", label: "Surfaces (m²)", re: "\\b(\\d+(?:[.,]\\d+)?) ?m²" }
+  { key: "surface", label: "Surfaces (m²)", re: "\\b(\\d+(?:[.,]\\d+)?) ?m²" },
+  // Étiquette énergie DPE — motifs tolérants aux erreurs d'OCR (² → ?/*/2,
+  // kWh → kWiv/kWhimt…, valeurs « 325 |10* » au-dessus des unités).
+  { key: "dpe_conso", label: "Conso énergie (kWh/m²/an)", re: [
+    "\\b(\\d{1,4})\\s*[kK][WwVv]\\S{0,6}/an",
+    { re: "\\b(\\d{2,4})\\s*[|Il!1]\\s*\\d{1,3}\\s*\\*", group: 1 },
+    { re: "\\b(\\d{1,4})\\s*[|Il!]\\s*\\d{1,4}\\s*\\*?\\s*\\n\\s*[kK][WwVv]", group: 1 }
+  ] },
+  { key: "dpe_emission", label: "Émissions (kgCO₂/m²/an)", re: [
+    "\\b(\\d{1,4})\\s*[kK][gq]\\s?[CG]O\\S{0,2}\\s*/\\s*m\\S{0,3}\\s*/?\\s*an",
+    { re: "\\b\\d{2,4}\\s*[|Il!1]\\s*(\\d{1,3})\\s*\\*", group: 1 },
+    { re: "\\b\\d{1,4}\\s*[|Il!]\\s*(\\d{1,4})\\s*\\*?\\s*\\n\\s*[kK][WwVv]", group: 1 }
+  ] },
+  { key: "dpe_co2_total", label: "CO₂ émis (kg/an)", re: ["[ée]met\\s*(\\d[\\d ]{0,6})\\s*kg\\s*de\\s*CO"] }
 ];
 
 // Libellés intégrés : cherche « Libellé : valeur » ligne par ligne.
@@ -3611,7 +3624,18 @@ async function tbExtractTextFromPdf(arrayBuffer) {
     pageTexts.push(lines.join("\n"));
   }
   try { doc.destroy(); } catch (_) {}
-  return { text: pageTexts.join("\n\n"), pages: pageTexts.length };
+  return {
+    text: pageTexts.join("\n\n"),
+    pages: pageTexts.length,
+    pageTextLens: pageTexts.map((t) => t.length) // sert au mode OCR « auto »
+  };
+}
+
+// Texte complet d'un document : couche texte + résultat d'OCR éventuel.
+function tbDocFullText(d) {
+  if (!d) return "";
+  if (!d.ocrText) return d.text || "";
+  return (d.text ? d.text + "\n\n" : "") + d.ocrText;
 }
 
 /* ---------- Détection des champs ---------- */
@@ -3652,16 +3676,19 @@ function tbExtractFields(text) {
         }
       }
     } else {
-      let re = null;
-      try { re = new RegExp(def.value, "g"); } catch (_) {}
-      if (re) {
+      // def.value : regex unique, ou liste de variantes ("…" ou {re, group}).
+      const variants = (Array.isArray(def.value) ? def.value : [def.value])
+        .map((v) => (typeof v === "string" ? { re: v, group: 1 } : v));
+      for (const va of variants) {
+        let re = null;
+        try { re = new RegExp(va.re, "g"); } catch (_) {}
+        if (!re) { values.push("(regex invalide)"); continue; }
         let m, guard = 0;
         while ((m = re.exec(text)) && guard++ < 500) {
-          values.push((m[1] !== undefined ? m[1] : m[0]).trim());
+          const g = va.group || 1;
+          values.push(((m[g] !== undefined ? m[g] : m[0]) || "").trim());
           if (m.index === re.lastIndex) re.lastIndex++;
         }
-      } else {
-        values = ["(regex invalide)"];
       }
     }
     values = [...new Set(values)].slice(0, 50);
@@ -3677,17 +3704,19 @@ $("tbFileInput").addEventListener("change", async (e) => {
   e.target.value = ""; // permet de recharger le même fichier
   if (!files.length) return;
   for (const file of files) {
-    const entry = { id: "d" + tbDocSeq++, name: file.name, size: file.size, pages: 0, text: "", fields: [], error: "", loading: true };
+    const entry = { id: "d" + tbDocSeq++, name: file.name, size: file.size, pages: 0, text: "", fields: [], error: "", loading: true, bytes: null, pageTextLens: null, ocrText: "", ocrPages: null };
     tbState.docs.push(entry);
     tbState.activeDocId = entry.id;
     tbRenderDocs();
     try {
       const buf = await file.arrayBuffer();
-      const { text, pages } = await tbExtractTextFromPdf(buf);
+      entry.bytes = new Uint8Array(buf); // conservé pour l'OCR (rendu des pages)
+      const { text, pages, pageTextLens } = await tbExtractTextFromPdf(entry.bytes.slice());
       entry.text = text;
       entry.pages = pages;
+      entry.pageTextLens = pageTextLens;
       entry.fields = tbExtractFields(text);
-      if (!text.trim()) entry.error = "aucun texte trouvé (PDF scanné/image ? l'OCR n'est pas géré)";
+      if (!text.trim()) entry.error = "aucun texte trouvé (PDF scanné/image) — lance l'OCR ci-dessous";
     } catch (err) {
       entry.error = err && err.message ? err.message : String(err);
     }
@@ -3719,7 +3748,7 @@ function tbRenderDocs() {
       <span class="tb-doc-name" title="${escapeAttr(d.name)}">${escapeHtml(d.name)}</span>
       ${d.loading ? '<span class="tb-doc-meta">analyse…</span>'
         : d.error ? `<span class="tb-doc-err" title="${escapeAttr(d.error)}">⚠ erreur</span>`
-        : `<span class="tb-doc-meta">${d.pages} p. · ${Math.round(d.size / 1024)} Ko</span>`}
+        : `<span class="tb-doc-meta">${d.pages} p. · ${Math.round(d.size / 1024)} Ko${d.ocrText ? " · OCR ✓" : ""}</span>`}
       <button class="remove-btn" title="Retirer" type="button"><svg class="icon icon-sm"><use href="#icon-close"/></svg></button>
     `;
     div.addEventListener("click", () => {
@@ -3753,8 +3782,8 @@ function tbRenderFields() {
     wrap.innerHTML = '<p class="hint">Charge un PDF pour voir les champs détectés.</p>';
     return;
   }
-  if (doc.error && !doc.text.trim()) {
-    wrap.innerHTML = `<p class="hint">⚠ ${escapeHtml(doc.error)}</p>`;
+  if (doc.error && !tbDocFullText(doc).trim()) {
+    wrap.innerHTML = `<p class="hint">⚠ ${escapeHtml(doc.error)} — essaie le bouton « Lancer l'OCR ».</p>`;
     return;
   }
   const filter = tbNorm($("tbFieldFilter").value.trim());
@@ -3832,28 +3861,29 @@ $("tbSendRowBtn").addEventListener("click", () => {
 function tbRenderText() {
   const doc = tbActiveDoc();
   const view = $("tbTextView");
-  if (!doc || doc.loading || !doc.text) {
+  const full = tbDocFullText(doc);
+  if (!doc || doc.loading || !full) {
     view.innerHTML = '<span class="hint">Charge un PDF pour voir son texte.</span>';
     $("tbTextSearchInfo").textContent = "";
     return;
   }
   const q = $("tbTextSearch").value;
   if (!q.trim()) {
-    view.textContent = doc.text;
+    view.textContent = full;
     $("tbTextSearchInfo").textContent = "";
     return;
   }
-  const normText = tbNorm(doc.text);
+  const normText = tbNorm(full);
   const needle = tbNorm(q);
   let html = "", pos = 0, count = 0;
   let i = normText.indexOf(needle);
   while (i !== -1 && count < 500) {
-    html += escapeHtml(doc.text.slice(pos, i)) + "<mark>" + escapeHtml(doc.text.slice(i, i + needle.length)) + "</mark>";
+    html += escapeHtml(full.slice(pos, i)) + "<mark>" + escapeHtml(full.slice(i, i + needle.length)) + "</mark>";
     pos = i + needle.length;
     count++;
     i = normText.indexOf(needle, pos);
   }
-  html += escapeHtml(doc.text.slice(pos));
+  html += escapeHtml(full.slice(pos));
   view.innerHTML = html;
   $("tbTextSearchInfo").textContent = count ? `${count} occurrence(s)` : "aucune occurrence";
   const first = view.querySelector("mark");
@@ -3864,10 +3894,110 @@ $("tbTextSearch").addEventListener("input", tbRenderText);
 
 $("tbCopyTextBtn").addEventListener("click", async () => {
   const doc = tbActiveDoc();
-  if (!doc || !doc.text) { showStatus("Aucun texte à copier.", "error"); return; }
-  try { await navigator.clipboard.writeText(doc.text); showStatus("Texte du PDF copié.", "success"); }
+  const full = tbDocFullText(doc);
+  if (!full) { showStatus("Aucun texte à copier.", "error"); return; }
+  try { await navigator.clipboard.writeText(full); showStatus("Texte du PDF copié.", "success"); }
   catch (_) { showStatus("Copie impossible.", "error"); }
 });
+
+/* ---------- OCR (bêta) — pages scannées / images ---------- */
+// Tesseract.js embarqué (lib/ocr/, 100 % local). Les pages sont rendues en
+// image par pdf.js puis reconnues ; le texte OCR s'ajoute à la couche texte
+// et les champs sont re-détectés (utile pour l'étiquette énergie des DPE).
+
+let tbOcrWorker = null;
+let tbOcrRunning = false;
+let tbOcrStopRequested = false;
+const TB_OCR_HINT_DEFAULT = $("tbOcrStatus") ? $("tbOcrStatus").textContent : "";
+
+function tbSetOcrStatus(msg) {
+  $("tbOcrStatus").textContent = msg || TB_OCR_HINT_DEFAULT;
+}
+
+async function tbGetOcrWorker() {
+  if (tbOcrWorker) return tbOcrWorker;
+  if (!window.Tesseract) throw new Error("Tesseract non chargé (fichiers lib/ocr/ manquants)");
+  tbOcrWorker = await Tesseract.createWorker("fra", 1, {
+    workerPath: chrome.runtime.getURL("lib/ocr/worker.min.js"),
+    corePath: chrome.runtime.getURL("lib/ocr/core"),
+    langPath: chrome.runtime.getURL("lib/ocr/lang"),
+    workerBlobURL: false,   // requis en extension MV3 (pas de worker blob:)
+    cacheMethod: "none"
+  });
+  return tbOcrWorker;
+}
+
+async function tbRunOcrOnActiveDoc() {
+  if (tbOcrRunning) { tbOcrStopRequested = true; tbSetOcrStatus("Arrêt demandé…"); return; }
+  const doc = tbActiveDoc();
+  if (!doc || doc.loading) { showStatus("Charge et sélectionne d'abord un PDF.", "error"); return; }
+  if (!doc.bytes) { showStatus("Données du PDF indisponibles — recharge le fichier.", "error"); return; }
+
+  tbOcrRunning = true;
+  tbOcrStopRequested = false;
+  const btn = $("tbOcrBtn");
+  btn.innerHTML = '<svg class="icon icon-sm"><use href="#icon-stop"/></svg> Arrêter l\'OCR';
+  const mode = $("tbOcrMode").value;
+  let pdf = null;
+  let done = 0;
+  try {
+    tbSetOcrStatus("Initialisation de l'OCR (première fois : quelques secondes)…");
+    const worker = await tbGetOcrWorker();
+    pdf = await pdfjsLib.getDocument({ data: doc.bytes.slice(), useSystemFonts: true }).promise;
+
+    // Pages cibles : celles (quasi) sans texte, ou toutes si demandé.
+    const targets = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const len = doc.pageTextLens ? (doc.pageTextLens[p - 1] || 0) : 0;
+      if (mode === "all" || len < 60) targets.push(p);
+    }
+    if (!targets.length) {
+      tbSetOcrStatus("Toutes les pages contiennent déjà du texte — choisis « toutes les pages » pour forcer l'OCR (ex. étiquette énergie en image).");
+      return;
+    }
+
+    const parts = doc.ocrPages || {};
+    for (const p of targets) {
+      if (tbOcrStopRequested) break;
+      tbSetOcrStatus(`OCR : page ${p} — ${done + 1}/${targets.length} (~5-20 s/page)…`);
+      const page = await pdf.getPage(p);
+      let vp = page.getViewport({ scale: 1 });
+      const scale = Math.min(3, Math.max(1.5, 1700 / vp.width));
+      vp = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.ceil(vp.width);
+      canvas.height = Math.ceil(vp.height);
+      await page.render({ canvasContext: canvas.getContext("2d", { willReadFrequently: true }), viewport: vp }).promise;
+      const { data } = await worker.recognize(canvas);
+      parts[p] = (data.text || "").trim();
+      canvas.width = canvas.height = 0; // libère la mémoire
+      done++;
+    }
+
+    doc.ocrPages = parts;
+    doc.ocrText = Object.keys(parts).map(Number).sort((a, b) => a - b)
+      .map((p) => `— OCR page ${p} —\n${parts[p]}`).join("\n\n");
+    if (doc.error && doc.ocrText.trim()) doc.error = ""; // le PDF scanné a maintenant du texte
+    doc.fields = tbExtractFields(tbDocFullText(doc));
+    tbRenderDocs();
+    tbRenderActiveDoc();
+    updateDoneMarkers();
+    tbSetOcrStatus(tbOcrStopRequested
+      ? `OCR interrompu : ${done}/${targets.length} page(s) traitée(s).`
+      : `OCR terminé : ${done} page(s). Champs re-détectés.`);
+  } catch (e) {
+    tbSetOcrStatus("Erreur OCR : " + (e && e.message ? e.message : e));
+    try { if (tbOcrWorker) tbOcrWorker.terminate(); } catch (_) {}
+    tbOcrWorker = null; // retentera une initialisation propre la prochaine fois
+  } finally {
+    try { if (pdf) pdf.destroy(); } catch (_) {}
+    tbOcrRunning = false;
+    tbOcrStopRequested = false;
+    btn.innerHTML = '<svg class="icon icon-sm"><use href="#icon-search"/></svg> Lancer l\'OCR';
+  }
+}
+
+$("tbOcrBtn").addEventListener("click", tbRunOcrOnActiveDoc);
 
 /* ---------- Motifs personnalisés ---------- */
 
@@ -3876,7 +4006,9 @@ function tbPersistPatterns() {
 }
 
 function tbReextractAll() {
-  tbState.docs.forEach((d) => { if (!d.loading && d.text) d.fields = tbExtractFields(d.text); });
+  tbState.docs.forEach((d) => {
+    if (!d.loading && tbDocFullText(d)) d.fields = tbExtractFields(tbDocFullText(d));
+  });
   tbRenderFields();
   tbRefreshFieldSelects();
 }
@@ -3962,7 +4094,10 @@ function tbFieldLabel(key) {
 
 // Valeurs d'un champ pour un document.
 function tbFieldValues(doc, key) {
-  if (key === "__text") return doc.text ? [doc.text] : [];
+  if (key === "__text") {
+    const full = tbDocFullText(doc);
+    return full ? [full] : [];
+  }
   const f = (doc.fields || []).find((x) => x.key === key);
   return f ? f.values : [];
 }
@@ -3984,7 +4119,7 @@ function tbFieldMatches(values, op, expected) {
 
 // Sélectionne le document visé par une étape : actif, ou retrouvé par nom.
 function tbGetDocForStep(step, row) {
-  const ready = tbState.docs.filter((d) => !d.error || d.text.trim()).filter((d) => !d.loading);
+  const ready = tbState.docs.filter((d) => !d.error || tbDocFullText(d).trim()).filter((d) => !d.loading);
   if (!ready.length) return { error: "aucun PDF chargé dans la Toolbox" };
   if (step.pdfDocMode === "match") {
     const needle = tbNorm(resolveRowTemplate(step.pdfDocMatch || "", row)).trim();
