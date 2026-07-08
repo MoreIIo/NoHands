@@ -25,8 +25,56 @@ const state = {
   mapping: {},             // nomColonne -> [nomsInput]
   customFields: [],        // [{name, value}]
   valueRules: [],          // [{from:[synonymes], to:"valeur cible"}] — conversion avant saisie
-  targetTabId: null        // onglet du formulaire mémorisé (dernier 🎯) — indép. de l'onglet affiché
+  targetTabId: null,       // onglet du formulaire mémorisé (dernier 🎯) — indép. de l'onglet affiché
+  originalArrayBuffer: null, // octets bruts du .xlsx d'origine (pour export fidèle via ExcelJS)
+  hasOriginalFile: false    // true si les données viennent d'un fichier .xlsx (mise en forme dispo)
 };
+
+/* ---------- Stockage du fichier d'origine (IndexedDB) ----------
+   Les octets du .xlsx sont conservés hors de chrome.storage (trop petit / non binaire)
+   afin de pouvoir réécrire le fichier en gardant toute la mise en forme, même après
+   réouverture du panneau ou pour de gros fichiers. */
+const IDB_NAME = "osa-files", IDB_STORE = "original", IDB_KEY = "current";
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore(IDB_STORE); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSaveOriginal(buf) {
+  const db = await idbOpen();
+  try {
+    await new Promise((res, rej) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put(buf, IDB_KEY);
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+    });
+  } finally { db.close(); }
+}
+async function idbLoadOriginal() {
+  const db = await idbOpen();
+  try {
+    return await new Promise((res, rej) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const r = tx.objectStore(IDB_STORE).get(IDB_KEY);
+      r.onsuccess = () => res(r.result || null);
+      r.onerror = () => rej(r.error);
+    });
+  } finally { db.close(); }
+}
+async function idbClearOriginal() {
+  try {
+    const db = await idbOpen();
+    await new Promise((res) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).delete(IDB_KEY);
+      tx.oncomplete = res; tx.onerror = res;
+    });
+    db.close();
+  } catch (e) { /* ignoré */ }
+}
 
 let models = [];           // [{name, columns: []}]
 let allMappings = {};      // clé de colonnes -> mapping
@@ -449,7 +497,8 @@ function persistSession() {
       headerMode: state.headerMode,
       modelName: state.modelName,
       selectedRowIdx: state.selectedRowIdx,
-      originalFileName: state.originalFileName
+      originalFileName: state.originalFileName,
+      hasOriginalFile: state.hasOriginalFile
     };
     const size = JSON.stringify(session).length;
     if (size > 4_000_000) {
@@ -506,9 +555,18 @@ $("fileInput").addEventListener("change", async (e) => {
     if (/\.csv$/i.test(file.name)) {
       const text = await file.text();
       state.workbook = XLSX.read(text, { type: "string" });
+      state.originalArrayBuffer = null;   // CSV : pas de mise en forme d'origine
+      state.hasOriginalFile = false;
+      idbClearOriginal();
     } else {
       const buf = await file.arrayBuffer();
-      state.workbook = XLSX.read(buf, { type: "array" });
+      // On conserve les octets bruts du fichier pour l'export fidèle via ExcelJS
+      // (SheetJS ne relit pas les styles). buf est copié car il sera relu plusieurs fois.
+      state.originalArrayBuffer = buf.slice(0);
+      state.hasOriginalFile = true;
+      // Persistance hors session pour survivre à la réouverture du panneau.
+      idbSaveOriginal(state.originalArrayBuffer).catch(() => {});
+      state.workbook = XLSX.read(buf, { type: "array", cellStyles: true, cellNF: true, sheetStubs: true });
     }
     const sheetSelect = $("sheetSelect");
     sheetSelect.innerHTML = "";
@@ -555,6 +613,9 @@ $("usePasteBtn").addEventListener("click", () => {
   const text = $("pasteArea").value;
   if (!text.trim()) { showStatus("Colle d'abord un tableau.", "error"); return; }
   state.workbook = null;
+  state.originalArrayBuffer = null;
+  state.hasOriginalFile = false;
+  idbClearOriginal();
   state.sheetName = "Tableau collé";
   state.originalFileName = "resultat.xlsx";
   state.rows = parseDelimitedText(text);
@@ -589,6 +650,9 @@ function applyJsonText(text) {
     const data = JSON.parse(text);
     state.rows = jsonToRows(data);
     state.workbook = null;
+    state.originalArrayBuffer = null;
+    state.hasOriginalFile = false;
+    idbClearOriginal();
     state.sheetName = "JSON";
     state.originalFileName = "resultat.xlsx";
     $("sheetRow").style.display = "none";
@@ -3938,14 +4002,88 @@ function tbGetDocForStep(step, row) {
 /* ---------- Export ---------- */
 
 function getOrBuildWorkbook() {
-  const ws = XLSX.utils.aoa_to_sheet(state.rows);
-  if (state.workbook && state.sheetName) {
-    state.workbook.Sheets[state.sheetName] = ws;
+  // Cas 1 : fichier d'origine chargé → on met à jour UNIQUEMENT les valeurs
+  // dans la feuille existante, en conservant toute la mise en forme
+  // (styles .s, formats de nombre .z, largeurs de colonnes !cols,
+  //  hauteurs de lignes !rows, fusions !merges).
+  if (state.workbook && state.sheetName && state.workbook.Sheets[state.sheetName]) {
+    patchSheetValues(state.workbook.Sheets[state.sheetName], state.rows);
     return state.workbook;
   }
+  // Cas 2 : données collées / JSON → aucune mise en forme d'origine à préserver.
+  const ws = XLSX.utils.aoa_to_sheet(state.rows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, (state.sheetName || "Feuil1").slice(0, 31));
   return wb;
+}
+
+// Écrit les valeurs de `rows` (tableau 2D) dans la feuille `ws` sans détruire
+// le style existant de chaque cellule. Une cellule inchangée n'est pas touchée
+// du tout (valeur, type, format et style d'origine préservés à l'identique).
+function patchSheetValues(ws, rows) {
+  const nRows = rows.length;
+  let nCols = 0;
+  for (const r of rows) if (r && r.length > nCols) nCols = r.length;
+
+  for (let R = 0; R < nRows; R++) {
+    const row = rows[R] || [];
+    for (let C = 0; C < nCols; C++) {
+      const addr = XLSX.utils.encode_cell({ r: R, c: C });
+      let v = row[C];
+      if (v === undefined || v === null) v = "";
+      v = String(v);
+      const cell = ws[addr];
+
+      if (cell) {
+        // Valeur affichée actuelle de la cellule d'origine.
+        const cur = cell.w != null ? cell.w : (cell.v != null ? String(cell.v) : "");
+        if (v === cur) continue; // inchangée → on ne touche à rien
+
+        const style = cell.s;                 // on garde le style visuel
+        const wasNumeric = cell.t === "n";
+        const numFmt = cell.z;                 // format de nombre éventuel
+        delete cell.w;                          // le texte formaté n'est plus valide
+
+        // Si la cellule était numérique et que la nouvelle valeur est un nombre,
+        // on réécrit un nombre en conservant son format ; sinon on écrit du texte.
+        const num = wasNumeric ? parseLocaleNumber(v) : null;
+        if (num !== null && isFinite(num)) {
+          cell.t = "n";
+          cell.v = num;
+          if (numFmt != null) cell.z = numFmt;
+        } else {
+          cell.t = "s";
+          cell.v = v;
+          delete cell.z;
+        }
+        if (style !== undefined) cell.s = style;
+      } else if (v !== "") {
+        // Nouvelle cellule (ligne/colonne ajoutée) : pas de style d'origine.
+        ws[addr] = { t: "s", v: v };
+      }
+    }
+  }
+
+  // Étendre la plage utilisée si des lignes/colonnes ont été ajoutées.
+  if (nRows > 0 && nCols > 0) {
+    const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
+    range.s.r = 0; range.s.c = 0;
+    if (nRows - 1 > range.e.r) range.e.r = nRows - 1;
+    if (nCols - 1 > range.e.c) range.e.c = nCols - 1;
+    ws["!ref"] = XLSX.utils.encode_range(range);
+  }
+}
+
+// Convertit une valeur texte éventuellement localisée ("1 234,56") en nombre,
+// ou renvoie null si ce n'est pas un nombre.
+function parseLocaleNumber(v) {
+  const s = String(v).trim();
+  if (s === "") return null;
+  // Retire les espaces (normaux et insécables) ; virgule décimale → point.
+  const cleaned = s.replace(/[   \t]/g, "").replace(",", ".");
+  if (!/^-?\d*\.?\d+(e-?\d+)?$/i.test(cleaned)) return null;
+  const n = Number(cleaned);
+  return isNaN(n) ? null : n;
 }
 
 function rowsToJson(allRows) {
@@ -3976,12 +4114,80 @@ $("outputNameInput").addEventListener("change", () => {
   persistSession();
 });
 
-$("downloadBtn").addEventListener("click", () => {
+$("downloadBtn").addEventListener("click", async () => {
   if (!state.rows.length) { showStatus("Aucune donnée chargée.", "error"); return; }
-  XLSX.writeFile(getOrBuildWorkbook(), currentOutputName());
-  hasDownloaded = true;
-  updateDoneMarkers();
+  try {
+    // Si les octets d'origine ne sont plus en mémoire (réouverture du panneau),
+    // tenter de les recharger depuis IndexedDB.
+    if (!state.originalArrayBuffer && state.hasOriginalFile) {
+      try { state.originalArrayBuffer = await idbLoadOriginal(); } catch (e) { /* ignoré */ }
+    }
+    // Fichier .xlsx d'origine disponible → export fidèle via ExcelJS (conserve
+    // couleurs, polices, tailles, bordures, formats, largeurs, fusions).
+    if (state.originalArrayBuffer && typeof ExcelJS !== "undefined") {
+      await exportWithFormatting();
+    } else {
+      // Prévenir clairement si on s'apprête à perdre la mise en forme d'un fichier.
+      if (state.hasOriginalFile) {
+        showStatus("Impossible de retrouver le fichier d'origine : recharge-le dans l'onglet Données pour conserver la mise en forme. Export sans styles pour l'instant.", "info");
+      }
+      XLSX.writeFile(getOrBuildWorkbook(), currentOutputName());
+    }
+    hasDownloaded = true;
+    updateDoneMarkers();
+  } catch (err) {
+    showStatus("Erreur lors de l'export : " + err.message, "error");
+  }
 });
+
+// Recharge le fichier d'origine avec ExcelJS, met à jour UNIQUEMENT les valeurs
+// modifiées (le style de chaque cellule est conservé automatiquement), puis
+// télécharge le résultat.
+async function exportWithFormatting() {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(state.originalArrayBuffer.slice(0));
+  let ws = state.sheetName ? wb.getWorksheet(state.sheetName) : null;
+  if (!ws) ws = wb.worksheets[0];
+  if (!ws) throw new Error("Feuille introuvable dans le fichier.");
+
+  const rows = state.rows;
+  let nCols = 0;
+  for (const r of rows) if (r && r.length > nCols) nCols = r.length;
+
+  for (let R = 0; R < rows.length; R++) {
+    const row = rows[R] || [];
+    for (let C = 0; C < nCols; C++) {
+      const cell = ws.getCell(R + 1, C + 1);
+      let v = row[C];
+      if (v === undefined || v === null) v = "";
+      v = String(v);
+
+      // Valeur affichée actuelle de la cellule d'origine.
+      const curText = cell.text != null ? String(cell.text) : "";
+      if (v === curText) continue; // inchangée → on ne touche à rien (style + valeur préservés)
+
+      // La valeur a changé : ExcelJS conserve le style (cell.style) quand on
+      // réaffecte cell.value. On garde le type numérique si c'en était un.
+      const wasNumber = typeof cell.value === "number";
+      const num = wasNumber ? parseLocaleNumber(v) : null;
+      cell.value = (num !== null && isFinite(num)) ? num : v;
+    }
+  }
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = currentOutputName();
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  showStatus("Fichier Excel exporté (mise en forme conservée).", "success");
+}
 
 $("downloadJsonBtn").addEventListener("click", () => {
   if (!state.rows.length) { showStatus("Aucune donnée chargée.", "error"); return; }
@@ -4319,6 +4525,10 @@ async function init() {
     state.modelName = stored.session.modelName || "";
     state.selectedRowIdx = stored.session.selectedRowIdx ?? null;
     state.originalFileName = stored.session.originalFileName || "resultat.xlsx";
+    state.hasOriginalFile = !!stored.session.hasOriginalFile;
+    if (state.hasOriginalFile) {
+      try { state.originalArrayBuffer = await idbLoadOriginal(); } catch (e) { state.originalArrayBuffer = null; }
+    }
     $("headerModeSelect").value = state.headerMode;
     $("outputNameInput").value = state.originalFileName;
     setLoadedInfo(`Session restaurée (« ${state.sheetName || "données"} »)`);
