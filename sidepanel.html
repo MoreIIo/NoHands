@@ -411,4 +411,71 @@
         <button class="btn" id="cancelMappingBtn" type="button">Annuler</button>
         <button class="btn primary" id="saveMappingBtn" type="button"><svg class="icon icon-sm"><use href="#icon-save"/></svg> Sauvegarder</button>
       </div>
-    
+    </div>
+  </div>
+
+  <!-- ================= MODAL : RÈGLES DE VALEURS ================= -->
+  <div class="modal-overlay" id="valueRulesModal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Règles de valeurs</h3>
+        <button class="btn icon-only" id="closeValueRulesBtn" type="button"><svg class="icon"><use href="#icon-close"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <p class="hint">Chaque règle convertit une ou plusieurs valeurs sources (séparées par des virgules) en une valeur cible. La comparaison ignore la casse et les accents. La première règle qui correspond l'emporte. La valeur cible doit correspondre à une option du champ (ex. « Mme », « M. », « Oui »).</p>
+        <div id="valueRulesList"></div>
+        <button class="btn" id="addValueRuleBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter une règle</button>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="cancelValueRulesBtn" type="button">Annuler</button>
+        <button class="btn primary" id="saveValueRulesBtn" type="button"><svg class="icon icon-sm"><use href="#icon-save"/></svg> Sauvegarder</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= MODAL : MISES À JOUR ================= -->
+  <div class="modal-overlay" id="updateModal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Mises à jour</h3>
+        <button class="btn icon-only" id="closeUpdateBtn" type="button"><svg class="icon"><use href="#icon-close"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <p class="hint">Compare la version installée à celle publiée sur le dépôt GitHub
+          <a id="updRepoLink" href="#" target="_blank" rel="noopener">MoreIIo/NoHands</a> (privé).</p>
+
+        <div class="upd-versions">
+          <div class="field-row"><span>Version installée :</span><strong id="updLocalVer">—</strong></div>
+          <div class="field-row"><span>Dernière version&nbsp;:</span><strong id="updRemoteVer">—</strong></div>
+        </div>
+
+        <label for="updTokenInput">Token GitHub (lecture seule)</label>
+        <input type="password" id="updTokenInput" placeholder="github_pat_… ou ghp_…" autocomplete="off" />
+        <p class="hint">Le dépôt étant privé, un token est requis pour lire la version publiée.
+          Créez un <em>fine-grained token</em> limité au dépôt <code>MoreIIo/NoHands</code>
+          avec la permission <code>Contents : Read-only</code>. Il est stocké uniquement
+          dans ce navigateur (<code>chrome.storage.local</code>), jamais dans le code ni
+          envoyé ailleurs qu'à <code>api.github.com</code>.</p>
+
+        <div class="field-row">
+          <label class="check-inline"><input type="checkbox" id="updAutoCheck" checked> Vérifier automatiquement à l'ouverture</label>
+        </div>
+
+        <div id="updStatus" class="hint upd-status"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="updSaveTokenBtn" type="button"><svg class="icon icon-sm"><use href="#icon-save"/></svg> Enregistrer le token</button>
+        <button class="btn primary" id="updCheckNowBtn" type="button"><svg class="icon icon-sm"><use href="#icon-loop"/></svg> Vérifier maintenant</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast de statut -->
+  <div id="statusMessage" class="status-message"></div>
+
+  <script src="lib/xlsx.full.min.js"></script>
+  <script src="lib/pdf.min.js"></script>
+  <script src="sidepanel.js"></script>
+  <script src="update-check.js"></script>
+</body>
+</html>

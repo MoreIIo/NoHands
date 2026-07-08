@@ -3387,4 +3387,839 @@ async function tbExtractTextFromPdf(arrayBuffer) {
     const rows = new Map();
     for (const it of tc.items) {
       if (!it.str) continue;
-      const key = Math.round(it.transform[5] / 2) * 2; // tolérance verticale ~2p
+      const key = Math.round(it.transform[5] / 2) * 2; // tolérance verticale ~2pt
+      if (!rows.has(key)) rows.set(key, []);
+      rows.get(key).push({ x: it.transform[4], str: it.str, w: it.width || 0, h: it.height || 0 });
+    }
+    const lines = [...rows.entries()]
+      .sort((a, b) => b[0] - a[0]) // haut → bas
+      .map(([, items]) => {
+        items.sort((a, b) => a.x - b.x);
+        let line = "", endX = null, h = 0;
+        for (const it of items) {
+          if (endX !== null) {
+            const ref = Math.max(h, it.h, 6);
+            if (it.x - endX > ref * 0.12) line += " "; // écart → espace
+          }
+          line += it.str;
+          endX = it.x + it.w;
+          h = Math.max(h, it.h);
+        }
+        return line.trim();
+      })
+      .filter(Boolean);
+    pageTexts.push(lines.join("\n"));
+  }
+  try { doc.destroy(); } catch (_) {}
+  return { text: pageTexts.join("\n\n"), pages: pageTexts.length };
+}
+
+/* ---------- Détection des champs ---------- */
+
+function tbAllFieldDefs() {
+  const defs = [];
+  TB_BUILTIN_LABELS.forEach((l) => defs.push({ key: l.key, label: l.label, kind: "label", value: l.label }));
+  TB_BUILTIN_PATTERNS.forEach((p) => defs.push({ key: p.key, label: p.label, kind: "regex", value: p.re }));
+  tbState.patterns.forEach((p, i) => {
+    if ((p.name || "").trim() && (p.value || "").trim()) {
+      defs.push({ key: "custom:" + p.name.trim(), label: p.name.trim(), kind: p.kind === "regex" ? "regex" : "label", value: p.value.trim(), custom: true });
+    }
+  });
+  return defs;
+}
+
+function tbExtractFields(text) {
+  const lines = text.split("\n");
+  const normLines = lines.map(tbNorm);
+  const fields = [];
+
+  for (const def of tbAllFieldDefs()) {
+    let values = [];
+    if (def.kind === "label") {
+      const reVal = tbLabelRegex(def.value, true);
+      const reEnd = tbLabelRegex(def.value, false);
+      for (let i = 0; i < lines.length; i++) {
+        let m = normLines[i].match(reVal);
+        if (m) {
+          // normalisation à longueur constante → les index correspondent à la ligne d'origine
+          const start = m.index + m[0].length - m[2].length;
+          const v = lines[i].slice(start).trim();
+          if (v && !/^[-—.]+$/.test(v)) values.push(v);
+        } else if (reEnd.test(normLines[i])) {
+          // libellé en fin de ligne → la valeur est sur la ligne suivante
+          const next = (lines[i + 1] || "").trim();
+          if (next) values.push(next);
+        }
+      }
+    } else {
+      let re = null;
+      try { re = new RegExp(def.value, "g"); } catch (_) {}
+      if (re) {
+        let m, guard = 0;
+        while ((m = re.exec(text)) && guard++ < 500) {
+          values.push((m[1] !== undefined ? m[1] : m[0]).trim());
+          if (m.index === re.lastIndex) re.lastIndex++;
+        }
+      } else {
+        values = ["(regex invalide)"];
+      }
+    }
+    values = [...new Set(values)].slice(0, 50);
+    fields.push({ key: def.key, label: def.label, values });
+  }
+  return fields;
+}
+
+/* ---------- Chargement des documents ---------- */
+
+$("tbFileInput").addEventListener("change", async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = ""; // permet de recharger le même fichier
+  if (!files.length) return;
+  for (const file of files) {
+    const entry = { id: "d" + tbDocSeq++, name: file.name, size: file.size, pages: 0, text: "", fields: [], error: "", loading: true };
+    tbState.docs.push(entry);
+    tbState.activeDocId = entry.id;
+    tbRenderDocs();
+    try {
+      const buf = await file.arrayBuffer();
+      const { text, pages } = await tbExtractTextFromPdf(buf);
+      entry.text = text;
+      entry.pages = pages;
+      entry.fields = tbExtractFields(text);
+      if (!text.trim()) entry.error = "aucun texte trouvé (PDF scanné/image ? l'OCR n'est pas géré)";
+    } catch (err) {
+      entry.error = err && err.message ? err.message : String(err);
+    }
+    entry.loading = false;
+    tbRenderDocs();
+    tbRenderActiveDoc();
+  }
+  updateDoneMarkers();
+  const okCount = tbState.docs.filter((d) => !d.error && !d.loading).length;
+  showStatus(`${okCount} PDF analysé(s).`, "success");
+});
+
+function tbActiveDoc() {
+  return tbState.docs.find((d) => d.id === tbState.activeDocId) || null;
+}
+
+function tbRenderDocs() {
+  const wrap = $("tbDocsList");
+  wrap.innerHTML = "";
+  if (!tbState.docs.length) {
+    wrap.innerHTML = '<p class="hint">Aucun document chargé.</p>';
+    return;
+  }
+  tbState.docs.forEach((d) => {
+    const div = document.createElement("div");
+    div.className = "tb-doc" + (d.id === tbState.activeDocId ? " active" : "");
+    div.innerHTML = `
+      <svg class="icon icon-sm"><use href="#icon-file"/></svg>
+      <span class="tb-doc-name" title="${escapeAttr(d.name)}">${escapeHtml(d.name)}</span>
+      ${d.loading ? '<span class="tb-doc-meta">analyse…</span>'
+        : d.error ? `<span class="tb-doc-err" title="${escapeAttr(d.error)}">⚠ erreur</span>`
+        : `<span class="tb-doc-meta">${d.pages} p. · ${Math.round(d.size / 1024)} Ko</span>`}
+      <button class="remove-btn" title="Retirer" type="button"><svg class="icon icon-sm"><use href="#icon-close"/></svg></button>
+    `;
+    div.addEventListener("click", () => {
+      tbState.activeDocId = d.id;
+      tbRenderDocs();
+      tbRenderActiveDoc();
+    });
+    div.querySelector(".remove-btn").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      tbState.docs = tbState.docs.filter((x) => x.id !== d.id);
+      if (tbState.activeDocId === d.id) tbState.activeDocId = tbState.docs.length ? tbState.docs[tbState.docs.length - 1].id : null;
+      tbRenderDocs();
+      tbRenderActiveDoc();
+      updateDoneMarkers();
+    });
+    wrap.appendChild(div);
+  });
+}
+
+/* ---------- Rendu des champs + texte ---------- */
+
+function tbRenderActiveDoc() {
+  tbRenderFields();
+  tbRenderText();
+}
+
+function tbRenderFields() {
+  const wrap = $("tbFieldsWrap");
+  const doc = tbActiveDoc();
+  if (!doc || doc.loading) {
+    wrap.innerHTML = '<p class="hint">Charge un PDF pour voir les champs détectés.</p>';
+    return;
+  }
+  if (doc.error && !doc.text.trim()) {
+    wrap.innerHTML = `<p class="hint">⚠ ${escapeHtml(doc.error)}</p>`;
+    return;
+  }
+  const filter = tbNorm($("tbFieldFilter").value.trim());
+  const shown = doc.fields.filter((f) =>
+    f.values.length &&
+    (!filter || tbNorm(f.label).includes(filter) || f.values.some((v) => tbNorm(v).includes(filter)))
+  );
+  if (!shown.length) {
+    wrap.innerHTML = '<p class="hint">Aucun champ détecté' + (filter ? " pour ce filtre" : "") + ".</p>";
+    return;
+  }
+  wrap.innerHTML = "";
+  shown.forEach((f) => {
+    const div = document.createElement("div");
+    div.className = "tb-field";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "tb-field-check";
+    cb.title = "Inclure dans « Vers la ligne active »";
+    cb.checked = tbState.sendKeys.has(f.key);
+    cb.addEventListener("change", () => {
+      if (cb.checked) tbState.sendKeys.add(f.key); else tbState.sendKeys.delete(f.key);
+    });
+    const lab = document.createElement("span");
+    lab.className = "tb-field-label";
+    lab.textContent = f.label;
+    lab.title = f.label;
+    const vals = document.createElement("span");
+    vals.className = "tb-field-vals";
+    f.values.slice(0, 20).forEach((v) => {
+      const chip = document.createElement("span");
+      chip.className = "tb-val";
+      chip.textContent = v.length > 80 ? v.slice(0, 80) + "…" : v;
+      chip.title = "Cliquer pour copier : " + v;
+      chip.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(v); showStatus("Valeur copiée.", "success"); }
+        catch (_) { showStatus("Copie impossible.", "error"); }
+      });
+      vals.appendChild(chip);
+    });
+    if (f.values.length > 20) {
+      const more = document.createElement("span");
+      more.className = "hint";
+      more.textContent = `+${f.values.length - 20}`;
+      vals.appendChild(more);
+    }
+    div.append(cb, lab, vals);
+    wrap.appendChild(div);
+  });
+}
+
+$("tbFieldFilter").addEventListener("input", tbRenderFields);
+
+// Écrit les champs cochés dans la ligne active (colonne du même nom, créée si absente).
+$("tbSendRowBtn").addEventListener("click", () => {
+  const doc = tbActiveDoc();
+  if (!doc || !doc.fields.length) { showStatus("Charge d'abord un PDF.", "error"); return; }
+  if (!state.rows.length || state.selectedRowIdx === null) {
+    showStatus("Sélectionne d'abord une ligne active (onglet Saisie).", "error");
+    return;
+  }
+  const picked = doc.fields.filter((f) => tbState.sendKeys.has(f.key) && f.values.length);
+  if (!picked.length) { showStatus("Coche au moins un champ (case à gauche).", "error"); return; }
+  const createdCols = {};
+  const row = state.rows[state.selectedRowIdx] = state.rows[state.selectedRowIdx] || [];
+  picked.forEach((f) => {
+    const idx = resolveOutputTarget(f.label, createdCols);
+    setCellByIndex(row, idx, f.values.join(" | "));
+  });
+  persistSession();
+  renderColumns();
+  showStatus(`${picked.length} champ(s) écrit(s) dans la ligne L${state.selectedRowIdx + 1}.`, "success");
+});
+
+function tbRenderText() {
+  const doc = tbActiveDoc();
+  const view = $("tbTextView");
+  if (!doc || doc.loading || !doc.text) {
+    view.innerHTML = '<span class="hint">Charge un PDF pour voir son texte.</span>';
+    $("tbTextSearchInfo").textContent = "";
+    return;
+  }
+  const q = $("tbTextSearch").value;
+  if (!q.trim()) {
+    view.textContent = doc.text;
+    $("tbTextSearchInfo").textContent = "";
+    return;
+  }
+  const normText = tbNorm(doc.text);
+  const needle = tbNorm(q);
+  let html = "", pos = 0, count = 0;
+  let i = normText.indexOf(needle);
+  while (i !== -1 && count < 500) {
+    html += escapeHtml(doc.text.slice(pos, i)) + "<mark>" + escapeHtml(doc.text.slice(i, i + needle.length)) + "</mark>";
+    pos = i + needle.length;
+    count++;
+    i = normText.indexOf(needle, pos);
+  }
+  html += escapeHtml(doc.text.slice(pos));
+  view.innerHTML = html;
+  $("tbTextSearchInfo").textContent = count ? `${count} occurrence(s)` : "aucune occurrence";
+  const first = view.querySelector("mark");
+  if (first) first.scrollIntoView({ block: "nearest" });
+}
+
+$("tbTextSearch").addEventListener("input", tbRenderText);
+
+$("tbCopyTextBtn").addEventListener("click", async () => {
+  const doc = tbActiveDoc();
+  if (!doc || !doc.text) { showStatus("Aucun texte à copier.", "error"); return; }
+  try { await navigator.clipboard.writeText(doc.text); showStatus("Texte du PDF copié.", "success"); }
+  catch (_) { showStatus("Copie impossible.", "error"); }
+});
+
+/* ---------- Motifs personnalisés ---------- */
+
+function tbPersistPatterns() {
+  chrome.storage.local.set({ tbPatterns: tbState.patterns });
+}
+
+function tbReextractAll() {
+  tbState.docs.forEach((d) => { if (!d.loading && d.text) d.fields = tbExtractFields(d.text); });
+  tbRenderFields();
+  tbRefreshFieldSelects();
+}
+
+function tbRenderPatterns() {
+  const wrap = $("tbPatternsList");
+  wrap.innerHTML = "";
+  tbState.patterns.forEach((p, i) => {
+    const div = document.createElement("div");
+    div.className = "tb-pattern-item";
+    div.innerHTML = `
+      <input type="text" class="tb-pat-name" placeholder="nom du champ" value="${escapeAttr(p.name || "")}" />
+      <select class="tb-pat-kind">
+        <option value="label">Libellé :</option>
+        <option value="regex">Regex</option>
+      </select>
+      <input type="text" class="tb-pat-value" placeholder="ex : Référence cadastrale — ou — \\bMG\\d{7}\\b" value="${escapeAttr(p.value || "")}" />
+      <button class="remove-btn" title="Supprimer" type="button"><svg class="icon icon-sm"><use href="#icon-close"/></svg></button>
+    `;
+    div.querySelector(".tb-pat-kind").value = p.kind === "regex" ? "regex" : "label";
+    const save = () => {
+      tbState.patterns[i] = {
+        name: div.querySelector(".tb-pat-name").value,
+        kind: div.querySelector(".tb-pat-kind").value,
+        value: div.querySelector(".tb-pat-value").value
+      };
+      tbPersistPatterns();
+      tbReextractAll();
+    };
+    div.querySelectorAll("input, select").forEach((el) => el.addEventListener("change", save));
+    div.querySelector(".remove-btn").addEventListener("click", () => {
+      tbState.patterns.splice(i, 1);
+      tbPersistPatterns();
+      tbRenderPatterns();
+      tbReextractAll();
+    });
+    wrap.appendChild(div);
+  });
+}
+
+$("tbAddPatternBtn").addEventListener("click", () => {
+  tbState.patterns.push({ name: "", kind: "label", value: "" });
+  tbRenderPatterns();
+  $("tbPatternsList").querySelector(".tb-pattern-item:last-child .tb-pat-name").focus();
+});
+
+/* ---------- Intégration au scénario ---------- */
+
+// Remplit un <select> avec les champs PDF connus (+ texte complet).
+function tbFillFieldSelect(sel, current) {
+  sel.innerHTML = "";
+  const defs = tbAllFieldDefs();
+  defs.forEach((d) => {
+    const opt = document.createElement("option");
+    opt.value = d.key;
+    opt.textContent = d.label + (d.custom ? " (perso)" : "");
+    sel.appendChild(opt);
+  });
+  const optText = document.createElement("option");
+  optText.value = "__text";
+  optText.textContent = "Texte complet du PDF";
+  sel.appendChild(optText);
+  if (current) {
+    if (![...sel.options].some((o) => o.value === current)) {
+      const opt = document.createElement("option");
+      opt.value = current;
+      opt.textContent = "⚠ " + current;
+      sel.appendChild(opt);
+    }
+    sel.value = current;
+  }
+}
+
+function tbRefreshFieldSelects() {
+  document.querySelectorAll(".scn-pdf-field").forEach((sel) => tbFillFieldSelect(sel, sel.value));
+}
+
+function tbFieldLabel(key) {
+  if (key === "__text") return "texte complet";
+  const def = tbAllFieldDefs().find((d) => d.key === key);
+  return def ? def.label : (key || "?");
+}
+
+// Valeurs d'un champ pour un document.
+function tbFieldValues(doc, key) {
+  if (key === "__text") return doc.text ? [doc.text] : [];
+  const f = (doc.fields || []).find((x) => x.key === key);
+  return f ? f.values : [];
+}
+
+// Test d'un champ multi-valeurs : equals/contains = au moins une valeur
+// correspond ; not_* = aucune ; empty / not_empty sur l'ensemble.
+function tbFieldMatches(values, op, expected) {
+  const nonEmpty = values.filter((v) => String(v).trim() !== "");
+  switch (op) {
+    case "empty": return nonEmpty.length === 0;
+    case "not_empty": return nonEmpty.length > 0;
+    case "equals": return nonEmpty.some((v) => cellMatches(v, "equals", expected));
+    case "contains": return nonEmpty.some((v) => cellMatches(v, "contains", expected));
+    case "not_equals": return !nonEmpty.some((v) => cellMatches(v, "equals", expected));
+    case "not_contains": return !nonEmpty.some((v) => cellMatches(v, "contains", expected));
+  }
+  return false;
+}
+
+// Sélectionne le document visé par une étape : actif, ou retrouvé par nom.
+function tbGetDocForStep(step, row) {
+  const ready = tbState.docs.filter((d) => !d.error || d.text.trim()).filter((d) => !d.loading);
+  if (!ready.length) return { error: "aucun PDF chargé dans la Toolbox" };
+  if (step.pdfDocMode === "match") {
+    const needle = tbNorm(resolveRowTemplate(step.pdfDocMatch || "", row)).trim();
+    if (!needle) return { error: "valeur vide pour retrouver le PDF par son nom" };
+    const hits = ready.filter((d) => tbNorm(d.name).includes(needle));
+    if (!hits.length) return { error: `aucun PDF dont le nom contient « ${needle} »` };
+    return { doc: hits[0], warn: hits.length > 1 ? `${hits.length} PDF correspondent — « ${hits[0].name} » utilisé` : "" };
+  }
+  const active = ready.find((d) => d.id === tbState.activeDocId) || ready[0];
+  return { doc: active };
+}
+
+/* ================== 6. EXPORT / PROFILS / ONGLETS / INIT ================== */
+
+/* ---------- Export ---------- */
+
+function getOrBuildWorkbook() {
+  const ws = XLSX.utils.aoa_to_sheet(state.rows);
+  if (state.workbook && state.sheetName) {
+    state.workbook.Sheets[state.sheetName] = ws;
+    return state.workbook;
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, (state.sheetName || "Feuil1").slice(0, 31));
+  return wb;
+}
+
+function rowsToJson(allRows) {
+  if (!allRows.length) return [];
+  const cols = getColumns();
+  const start = dataStartIdx();
+  return allRows.slice(start).map((r) => {
+    const obj = {};
+    cols.forEach((c) => { obj[c.name] = r[c.index] !== undefined ? r[c.index] : ""; });
+    return obj;
+  });
+}
+
+// Nom du fichier de sortie : modifiable par l'utilisateur dans l'onglet Export.
+function sanitizeFileName(name) {
+  return (name || "").trim().replace(/[\\/:*?"<>|]/g, "_");
+}
+
+function currentOutputName() {
+  let name = sanitizeFileName($("outputNameInput").value) || state.originalFileName || "resultat.xlsx";
+  if (!/\.xlsx$/i.test(name)) name += ".xlsx";
+  return name;
+}
+
+$("outputNameInput").addEventListener("change", () => {
+  state.originalFileName = currentOutputName();
+  $("outputNameInput").value = state.originalFileName;
+  persistSession();
+});
+
+$("downloadBtn").addEventListener("click", () => {
+  if (!state.rows.length) { showStatus("Aucune donnée chargée.", "error"); return; }
+  XLSX.writeFile(getOrBuildWorkbook(), currentOutputName());
+  hasDownloaded = true;
+  updateDoneMarkers();
+});
+
+$("downloadJsonBtn").addEventListener("click", () => {
+  if (!state.rows.length) { showStatus("Aucune donnée chargée.", "error"); return; }
+  const data = rowsToJson(state.rows);
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = currentOutputName().replace(/\.xlsx$/i, "") + ".json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  hasDownloaded = true;
+  updateDoneMarkers();
+  showStatus("Export JSON téléchargé.", "success");
+});
+
+/* ---------- Profils (configurations nommées) ---------- */
+
+function buildProfileConfig() {
+  return {
+    headerMode: state.headerMode,
+    modelName: state.modelName,
+    mapping: state.mapping,
+    customFields: getCustomFieldsFromDOM().filter((f) => f.name || f.value),
+    valueRules: state.valueRules,
+    extraction: {
+      conditions: getConditions(),
+      searchFields: Array.from($("searchFieldsList").querySelectorAll(".search-field-item")).map((el) => ({
+        selector: el.querySelector(".selector-input").value.trim(),
+        col: el.querySelector(".col-select").value
+      })),
+      navEnabled: $("navEnabled").checked,
+      navUrlTemplate: $("navUrlTemplate").value,
+      navWaitLoad: $("navWaitLoad").checked,
+      navWaitTimeout: $("navWaitTimeout").value,
+      navExtraWaitMs: $("navExtraWaitMs").value,
+      submitMode: document.querySelector('input[name="submitMode"]:checked').value,
+      submitSelector: $("submitSelector").value,
+      waitMs: $("waitMs").value,
+      rowDelayMs: $("rowDelayMs").value,
+      startRow: $("startRow").value,
+      endRow: $("endRow").value,
+      outputs: getOutputs()
+    },
+    scenario: {
+      steps: getScenarioSteps(),
+      startRow: $("scnStartRow").value,
+      endRow: $("scnEndRow").value,
+      rowDelayMs: $("scnRowDelayMs").value
+    }
+  };
+}
+
+function applyProfileConfig(cfg) {
+  if (!cfg) return;
+  state.headerMode = cfg.headerMode || "auto";
+  $("headerModeSelect").value = state.headerMode;
+  state.modelName = cfg.modelName || "";
+  renderModelSelect();
+
+  if (cfg.mapping && Object.keys(cfg.mapping).length) {
+    state.mapping = cfg.mapping;
+    if (state.rows.length) {
+      allMappings[mappingKey()] = cfg.mapping;
+      chrome.storage.local.set({ allMappings });
+    }
+  }
+
+  state.customFields = Array.isArray(cfg.customFields) ? cfg.customFields : [];
+  renderCustomFields();
+
+  if (Array.isArray(cfg.valueRules)) {
+    state.valueRules = cfg.valueRules;
+    persistValueRules();
+    updateValueRulesInfo();
+  }
+
+  const ex = cfg.extraction || {};
+  $("conditionsList").innerHTML = "";
+  (ex.conditions || []).forEach((c) => addConditionRow(c.col, c.op, c.val));
+  $("searchFieldsList").innerHTML = "";
+  (ex.searchFields || []).forEach((f) => addSearchFieldRow(f.selector, f.col));
+  $("outputsList").innerHTML = "";
+  (ex.outputs || []).forEach((o) => addOutputRow(o.newCol ? { ...o, col: "__other__", newCol: o.newCol || o.col } : o));
+  $("navEnabled").checked = !!ex.navEnabled;
+  $("navUrlTemplate").value = ex.navUrlTemplate || "";
+  $("navWaitLoad").checked = ex.navWaitLoad !== false;
+  $("navWaitTimeout").value = ex.navWaitTimeout || 15000;
+  $("navExtraWaitMs").value = ex.navExtraWaitMs || 0;
+  $("navOptions").style.display = ex.navEnabled ? "block" : "none";
+  const submitMode = ex.submitMode || "enter";
+  document.querySelector(`input[name="submitMode"][value="${submitMode}"]`).checked = true;
+  $("submitSelectorRow").style.display = submitMode === "click" ? "flex" : "none";
+  $("submitSelector").value = ex.submitSelector || "";
+  $("waitMs").value = ex.waitMs || 1200;
+  $("rowDelayMs").value = ex.rowDelayMs || 300;
+  $("startRow").value = ex.startRow || (dataStartIdx() + 1);
+  $("endRow").value = ex.endRow || "";
+
+  const sc = cfg.scenario || {};
+  $("scenarioSteps").innerHTML = "";
+  (sc.steps || []).forEach((s) => addScenarioStep(s));
+  $("scnStartRow").value = sc.startRow || 2;
+  $("scnEndRow").value = sc.endRow || "";
+  $("scnRowDelayMs").value = sc.rowDelayMs || 500;
+
+  renderColumns();
+  updateMappingInfo();
+  updateFillButtonState();
+}
+
+function persistProfiles() { chrome.storage.local.set({ profiles }); }
+
+/* ---------- Sauvegarde automatique des options de travail ----------
+   Mémorise en continu tous les réglages (Saisie + Extraction) pour les
+   restaurer à la réouverture du panneau, sans avoir à enregistrer un profil. */
+let workingConfigTimer = null;
+function persistWorkingConfig() {
+  if (!workingReady) return;            // on n'écrit pas pendant l'initialisation
+  clearTimeout(workingConfigTimer);
+  workingConfigTimer = setTimeout(() => {
+    try {
+      chrome.storage.local.set({ workingConfig: buildProfileConfig() });
+    } catch (e) { /* ignoré */ }
+  }, 400);
+}
+
+// Toute modification d'un champ de réglage déclenche la sauvegarde auto.
+["input", "change"].forEach((evt) => {
+  document.addEventListener(evt, (e) => {
+    const t = e.target;
+    if (!t) return;
+    if (t.type === "file" || t.id === "profileSelect") return; // gérés à part
+    persistWorkingConfig();
+  });
+});
+
+function renderProfileSelect(selected) {
+  const sel = $("profileSelect");
+  sel.innerHTML = '<option value="">— aucun profil —</option>';
+  Object.keys(profiles).sort().forEach((name) => {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  });
+  sel.value = selected || "";
+}
+
+$("profileSelect").addEventListener("change", () => {
+  const name = $("profileSelect").value;
+  chrome.storage.local.set({ activeProfileName: name });
+  if (name && profiles[name]) {
+    applyProfileConfig(profiles[name]);
+    showStatus(`Profil « ${name} » chargé.`, "success");
+  }
+});
+
+$("saveProfileBtn").addEventListener("click", () => {
+  const name = $("profileSelect").value;
+  if (!name) { showStatus("Choisis un profil, ou crée-en un avec +.", "error"); return; }
+  profiles[name] = buildProfileConfig();
+  persistProfiles();
+  showStatus(`Profil « ${name} » sauvegardé.`, "success");
+});
+
+$("newProfileBtn").addEventListener("click", () => {
+  $("newProfileRow").hidden = false;
+  $("newProfileName").focus();
+});
+$("cancelNewProfileBtn").addEventListener("click", () => {
+  $("newProfileRow").hidden = true;
+  $("newProfileName").value = "";
+});
+$("confirmNewProfileBtn").addEventListener("click", () => {
+  const name = $("newProfileName").value.trim();
+  if (!name) { showStatus("Donne un nom au profil.", "error"); return; }
+  profiles[name] = buildProfileConfig();
+  persistProfiles();
+  renderProfileSelect(name);
+  chrome.storage.local.set({ activeProfileName: name });
+  $("newProfileRow").hidden = true;
+  $("newProfileName").value = "";
+  showStatus(`Profil « ${name} » créé.`, "success");
+});
+$("newProfileName").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("confirmNewProfileBtn").click();
+});
+
+$("deleteProfileBtn").addEventListener("click", () => {
+  const name = $("profileSelect").value;
+  if (!name) { showStatus("Aucun profil sélectionné.", "error"); return; }
+  delete profiles[name];
+  persistProfiles();
+  renderProfileSelect("");
+  chrome.storage.local.set({ activeProfileName: "" });
+  showStatus(`Profil « ${name} » supprimé.`, "success");
+});
+
+/* ---------- Onglets principaux ---------- */
+
+function showTab(tabName) {
+  document.querySelectorAll(".panel[data-tab]").forEach((p) => {
+    p.hidden = p.getAttribute("data-tab") !== tabName;
+  });
+  document.querySelectorAll(".tab-btn[data-tab]").forEach((b) => {
+    b.classList.toggle("active", b.getAttribute("data-tab") === tabName);
+  });
+  updateDoneMarkers();
+  if (tabName === "extraction") updateExtractEstimate();
+  if (tabName === "saisie") updateScenarioEstimate();
+  if (workingReady) chrome.storage.local.set({ lastTab: tabName });
+}
+
+document.querySelectorAll(".tab-btn[data-tab]").forEach((btn) => {
+  btn.addEventListener("click", () => showTab(btn.getAttribute("data-tab")));
+});
+
+// Recalcule l'estimation d'extraction dès qu'un paramètre de temps / de plage change.
+["waitMs", "rowDelayMs", "navExtraWaitMs", "navEnabled", "startRow", "endRow"].forEach((id) => {
+  const el = $(id);
+  if (el) el.addEventListener("input", updateExtractEstimate);
+});
+// Idem pour le scénario de saisie (plage de la boucle et pause).
+["scnStartRow", "scnEndRow", "scnRowDelayMs"].forEach((id) => {
+  const el = $(id);
+  if (el) el.addEventListener("input", updateScenarioEstimate);
+});
+
+function updateDoneMarkers() {
+  const done = {
+    donnees: state.rows.length > 0,
+    saisie: state.selectedRowIdx !== null && Object.keys(state.mapping).length > 0,
+    extraction: hasStartedRun && !isRunning,
+    export: hasDownloaded,
+    toolbox: tbState.docs.some((d) => !d.loading && !d.error)
+  };
+  document.querySelectorAll(".tab-btn[data-tab]").forEach((btn) => {
+    btn.classList.toggle("done", Boolean(done[btn.getAttribute("data-tab")]));
+  });
+}
+
+/* ---------- Migration de l'ancienne config OSA ---------- */
+
+function migrateLegacyOsaConfig(savedConfig) {
+  // Convertit l'ancienne config OSA (colonnes en lettres) en profil.
+  const legacyModelCols = [];
+  (savedConfig.mappings || []).forEach((m) => {
+    const idx = letterToIndex(m.col);
+    if (idx >= 0) {
+      while (legacyModelCols.length <= idx) legacyModelCols.push("");
+      legacyModelCols[idx] = m.label;
+    }
+  });
+  const searchFields = savedConfig.searchFields
+    || (savedConfig.searchSelector ? [{ selector: savedConfig.searchSelector, col: savedConfig.searchCol }] : []);
+  return {
+    headerMode: "auto",
+    modelName: "",
+    mapping: {},
+    customFields: [],
+    extraction: {
+      conditions: (savedConfig.conditions || []).map((c) => ({ col: (c.col || "").toUpperCase(), op: c.op, val: c.val })),
+      searchFields: searchFields.map((f) => ({ selector: f.selector, col: (f.col || "").toUpperCase() })),
+      submitMode: savedConfig.submitMode || "enter",
+      submitSelector: savedConfig.submitSelector || "",
+      waitMs: savedConfig.waitMs || 1200,
+      rowDelayMs: savedConfig.rowDelayMs || 300,
+      startRow: savedConfig.startRow || 2,
+      endRow: savedConfig.endRow || "",
+      outputs: (savedConfig.outputs || []).map((o) => ({
+        mode: o.mode || "css",
+        col: (o.col || "").toUpperCase(),
+        selector: o.selector || "",
+        rowSelector: o.rowSelector || "",
+        matchSourceCol: (o.matchSourceCol || "").toUpperCase(),
+        matchType: o.matchType || "contains",
+        matchTdIndex: o.matchTdIndex || 1,
+        extractTdIndex: o.extractTdIndex || 2
+      }))
+    }
+  };
+}
+
+/* ---------- Initialisation ---------- */
+
+async function init() {
+  const stored = await chrome.storage.local.get([
+    "models", "allMappings", "profiles", "activeProfileName",
+    "customFields", "session", "savedConfig", "migratedOsaLegacy",
+    "workingConfig", "lastTab", "valueRules", "tbPatterns"
+  ]);
+
+  // Règles de valeurs (seed avec la civilité au premier lancement).
+  if (Array.isArray(stored.valueRules)) {
+    state.valueRules = stored.valueRules;
+  } else {
+    state.valueRules = JSON.parse(JSON.stringify(DEFAULT_VALUE_RULES));
+    persistValueRules();
+  }
+
+  // Modèles (seed au premier lancement)
+  if (Array.isArray(stored.models) && stored.models.length) {
+    models = stored.models;
+  } else {
+    models = JSON.parse(JSON.stringify(DEFAULT_MODELS));
+    persistModels();
+  }
+
+  allMappings = stored.allMappings || {};
+  profiles = stored.profiles || {};
+
+  // Migration de l'ancienne config OSA -> profil "OSA (importé)"
+  if (stored.savedConfig && !stored.migratedOsaLegacy) {
+    profiles["OSA (importé)"] = migrateLegacyOsaConfig(stored.savedConfig);
+    persistProfiles();
+    chrome.storage.local.set({ migratedOsaLegacy: true });
+  }
+
+  // Champs personnalisés
+  if (Array.isArray(stored.customFields)) state.customFields = stored.customFields;
+  renderCustomFields();
+
+  // Motifs personnalisés de la Toolbox PDF
+  tbState.patterns = Array.isArray(stored.tbPatterns) ? stored.tbPatterns : [];
+  tbRenderPatterns();
+
+  // Session précédente (données + réglages)
+  if (stored.session && Array.isArray(stored.session.rows) && stored.session.rows.length) {
+    state.rows = stored.session.rows;
+    state.sheetName = stored.session.sheetName || null;
+    state.headerMode = stored.session.headerMode || "auto";
+    state.modelName = stored.session.modelName || "";
+    state.selectedRowIdx = stored.session.selectedRowIdx ?? null;
+    state.originalFileName = stored.session.originalFileName || "resultat.xlsx";
+    $("headerModeSelect").value = state.headerMode;
+    $("outputNameInput").value = state.originalFileName;
+    setLoadedInfo(`Session restaurée (« ${state.sheetName || "données"} »)`);
+  }
+
+  renderModelSelect();
+
+  // Profil actif
+  renderProfileSelect(stored.activeProfileName || "");
+  if (stored.activeProfileName && profiles[stored.activeProfileName]) {
+    applyProfileConfig(profiles[stored.activeProfileName]);
+  } else {
+    renderColumns();
+    updateMappingInfo();
+  }
+
+  // Dernier état de travail auto-sauvegardé : reflète les options exactes
+  // laissées à la fermeture précédente (prioritaire sur les valeurs du profil).
+  if (stored.workingConfig) {
+    applyProfileConfig(stored.workingConfig);
+  }
+
+  // Lignes par défaut dans l'onglet Extraction si vide
+  if (!$("searchFieldsList").children.length) addSearchFieldRow();
+  if (!$("outputsList").children.length) addOutputRow();
+
+  // Onglet actif restauré
+  if (stored.lastTab) showTab(stored.lastTab);
+
+  updateFillButtonState();
+  updateDoneMarkers();
+  updateValueRulesInfo();
+
+  // À partir d'ici, toute modification est sauvegardée automatiquement.
+  workingReady = true;
+}
+
+init();
+
+// (fin du fichier)

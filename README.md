@@ -131,4 +131,30 @@ GitHub `MoreIIo/NoHands` et afficher une bannière avec les notes de version.
    `manifest.json` sur la branche `main`. Si une version supérieure existe, une
    bannière « Nouvelle version disponible » s'affiche avec un lien vers GitHub.
 
-La vérification se relance automat
+La vérification se relance automatiquement à l'ouverture du panneau (au plus une
+fois toutes les 3 h ; désactivable via la case à cocher). Les notes proviennent
+de la dernière *release* si elle existe, sinon des derniers messages de commit.
+
+> L'extension étant chargée « non empaquetée », la mise à jour reste **manuelle** :
+> récupère la nouvelle version sur GitHub puis recharge l'extension dans
+> `chrome://extensions`. La bannière sert d'alerte, pas d'installateur automatique.
+
+## Structure du projet
+
+```
+├── manifest.json      Manifest V3 (side panel, content script, menus)
+├── background.js      Service worker : panneau, menu contextuel, injection
+├── content.js         Moteur de remplissage (mode Saisie)
+├── sidepanel.html     Interface (Données / Saisie / Extraction / Export / Toolbox)
+├── sidepanel.css      Styles
+├── sidepanel.js       Logique complète
+├── update-check.js    Vérification de mise à jour via GitHub
+├── lib/xlsx.full.min.js  SheetJS (lecture/écriture Excel)
+├── lib/pdf.min.js     pdf.js (Mozilla) — analyse PDF de la Toolbox
+├── lib/pdf.worker.min.js  Worker pdf.js
+├── icons/             Icônes de l'extension
+└── test.html          Page de test locale des deux modes
+```
+
+**Version** : 2.1.0 — onglet **Toolbox (bêta)** : analyse de PDF (n° ADEME, SIRET,
+noms, dates…), vérification/report des données dans le scénario de saisie.
