@@ -1798,8 +1798,9 @@ document.querySelectorAll(".btn.pick[data-target]").forEach((btn) => {
 
 /* ---------- Résultats à récupérer (outputs) ---------- */
 
-// o = { mode: "css"|"tableMatch", col, selector, rowSelector, matchSourceCol,
-//       matchType, matchTdIndex, extractTdIndex, newCol }
+// o = { mode: "css"|"tableMatch"|"tableCheck", col, selector, rowSelector, matchSourceCol,
+//       matchType, matchTdIndex, extractTdIndex, newCol,
+//       tcSelector, tcCheck, tcText, tcRegex }
 function addOutputRow(o = {}) {
   const mode = o.mode || "css";
   const div = document.createElement("div");
@@ -1809,6 +1810,7 @@ function addOutputRow(o = {}) {
       <select class="mode-select">
         <option value="css">Info sur la page (sélecteur CSS)</option>
         <option value="tableMatch">Ligne de tableau (par valeur)</option>
+        <option value="tableCheck">Tableau : rempli / contient un texte</option>
       </select>
       <input type="text" class="selector-input" placeholder="sélecteur CSS du résultat" value="${escapeAttr(o.selector || "")}" />
       <button class="btn pick icon-only" data-pick-inline="1" title="Choisir sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
@@ -1841,6 +1843,29 @@ function addOutputRow(o = {}) {
         <input type="number" class="match-td-input" min="1" value="${escapeAttr(o.matchTdIndex || 1)}" />
         <label>cellule à extraire :</label>
         <input type="number" class="extract-td-input" min="1" value="${escapeAttr(o.extractTdIndex || 2)}" />
+      </div>
+    </div>
+    <div class="out-item-tablecheck" ${mode === "tableCheck" ? "" : "hidden"}>
+      <p class="hint">Regarde un tableau de la page : d'abord s'il est <b>rempli</b> (au moins une ligne de données), puis, si tu veux, s'il <b>contient un certain texte</b> (ex : DPE, même écrit test_dpe ou DpeDiga). Utilise les messages « trouvé » / « rien trouvé » plus bas pour choisir ce qui est écrit (ex : OUI / NON).</p>
+      <label class="tm-label">1. Tableau à examiner (sélecteur CSS)</label>
+      <div class="tm-row">
+        <input type="text" class="tc-selector-input" placeholder="ex : .PowerGridClass  ou  #dataTable tbody tr" value="${escapeAttr(o.tcSelector || "")}" style="flex:1;min-width:110px" />
+        <button class="btn pick icon-only" data-pick-tc="1" title="Choisir le tableau sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+      </div>
+      <label class="tm-label">2. Que vérifier ?</label>
+      <div class="tm-row">
+        <select class="tc-check-select">
+          <option value="filled">Seulement : est-il rempli ?</option>
+          <option value="text">Est-il rempli ET contient un texte ?</option>
+        </select>
+      </div>
+      <div class="tc-text-block" ${o.tcCheck === "text" ? "" : "hidden"}>
+        <label class="tm-label">3. Texte(s) à chercher dans le tableau</label>
+        <div class="tm-row">
+          <input type="text" class="tc-text-input" placeholder="ex : dpe   (plusieurs termes séparés par une virgule = OU)" value="${escapeAttr(o.tcText || "")}" style="flex:1;min-width:110px" />
+        </div>
+        <label class="checkbox-row"><input type="checkbox" class="tc-regex-check" ${o.tcRegex ? "checked" : ""} /> Utiliser une expression régulière (regex, insensible à la casse)</label>
+        <p class="hint">Sans regex : recherche « contient », insensible à la casse. « dpe » trouve DPE, test_dpe, DpeDiga… Plusieurs termes séparés par une virgule = au moins un doit être présent. Tu peux aussi utiliser <code>{Nom de colonne}</code> pour chercher une valeur de la ligne.</p>
       </div>
     </div>
     <div class="out-item-notfound">
@@ -1907,19 +1932,39 @@ function addOutputRow(o = {}) {
   fillColumnSelect(div.querySelector(".match-col-select"), o.matchSourceCol || "");
 
   const tablematchDiv = div.querySelector(".out-item-tablematch");
+  const tablecheckDiv = div.querySelector(".out-item-tablecheck");
   const cssHint = div.querySelector(".out-item-csshint");
   const selectorInput = div.querySelector(".selector-input");
   const pickCssBtn = div.querySelector("[data-pick-inline]");
   const modeSelect = div.querySelector(".mode-select");
   const syncMode = () => {
-    const isTable = modeSelect.value === "tableMatch";
-    tablematchDiv.hidden = !isTable;
-    cssHint.style.display = isTable ? "none" : "block";
-    selectorInput.style.display = isTable ? "none" : "block";
-    pickCssBtn.style.display = isTable ? "none" : "";
+    const isMatch = modeSelect.value === "tableMatch";
+    const isCheck = modeSelect.value === "tableCheck";
+    const isCss = !isMatch && !isCheck;
+    tablematchDiv.hidden = !isMatch;
+    tablecheckDiv.hidden = !isCheck;
+    cssHint.style.display = isCss ? "block" : "none";
+    selectorInput.style.display = isCss ? "block" : "none";
+    pickCssBtn.style.display = isCss ? "" : "none";
   };
-  modeSelect.addEventListener("change", syncMode);
+  modeSelect.addEventListener("change", () => { syncMode(); persistWorkingConfig(); });
   syncMode();
+
+  // Mode "tableCheck" : sélecteur du tableau, sous-mode rempli/texte, terme, regex
+  div.querySelector(".tc-check-select").value = o.tcCheck || "filled";
+  const tcCheckSelect = div.querySelector(".tc-check-select");
+  const tcTextBlock = div.querySelector(".tc-text-block");
+  const tcSelInput = div.querySelector(".tc-selector-input");
+  const syncTcMode = () => { tcTextBlock.hidden = tcCheckSelect.value !== "text"; };
+  tcCheckSelect.addEventListener("change", () => { syncTcMode(); persistWorkingConfig(); });
+  syncTcMode();
+  div.querySelector("[data-pick-tc]").addEventListener("click", async () => {
+    const picked = await pickTargetOnActiveTab();
+    if (picked && picked.selector) { tcSelInput.value = picked.selector; persistWorkingConfig(); }
+  });
+  div.querySelectorAll(".tc-selector-input, .tc-text-input, .tc-regex-check").forEach((el) => {
+    el.addEventListener("change", persistWorkingConfig);
+  });
 
   div.querySelector(".remove-btn").addEventListener("click", () => { div.remove(); persistWorkingConfig(); });
   pickCssBtn.addEventListener("click", async () => {
@@ -2031,10 +2076,20 @@ function getOutputs() {
         extractTdIndex: parseInt(el.querySelector(".extract-td-input").value, 10) || 1
       };
     }
+    if (mode === "tableCheck") {
+      return {
+        ...base,
+        tcSelector: el.querySelector(".tc-selector-input").value.trim(),
+        tcCheck: el.querySelector(".tc-check-select").value,
+        tcText: el.querySelector(".tc-text-input").value.trim(),
+        tcRegex: el.querySelector(".tc-regex-check").checked
+      };
+    }
     return { ...base, selector: el.querySelector(".selector-input").value.trim() };
   }).filter((o) => {
     if (!o.col) return false;
     if (o.mode === "tableMatch") return Boolean(o.rowSelector && o.matchSourceCol);
+    if (o.mode === "tableCheck") return Boolean(o.tcSelector && (o.tcCheck !== "text" || o.tcText));
     return Boolean(o.selector);
   });
 }
@@ -2096,6 +2151,62 @@ function performRowActionInjected(config) {
         return { found: false, value: "", reason: "noMatch" };
       }
 
+      // Vérifie si un tableau est rempli, et éventuellement s'il contient un texte.
+      // Robuste : ignore les lignes d'en-tête, gère un sélecteur qui vise le
+      // tableau, le tbody ou directement les lignes.
+      function readTableCheck(out) {
+        let nodes;
+        try { nodes = document.querySelectorAll(out.tcSelector); }
+        catch (e) { return { found: false, filled: false, reason: "badSelector" }; }
+        if (!nodes.length) return { found: false, filled: false, reason: "noNode" };
+
+        // Récupère les lignes candidates (tr) ou, à défaut, les nœuds eux-mêmes.
+        const candidates = [];
+        nodes.forEach((n) => {
+          const tag = n.tagName ? n.tagName.toLowerCase() : "";
+          if (tag === "tr") {
+            candidates.push(n);
+          } else if (n.querySelectorAll) {
+            const trs = n.querySelectorAll("tr");
+            if (trs.length) trs.forEach((tr) => candidates.push(tr));
+            else candidates.push(n);
+          } else {
+            candidates.push(n);
+          }
+        });
+
+        // Ne garde que les lignes de données non vides (on écarte les en-têtes).
+        const meaningful = candidates.filter((n) => {
+          const tag = n.tagName ? n.tagName.toLowerCase() : "";
+          if (tag === "tr") {
+            const cls = (n.className || "").toLowerCase();
+            if (cls.includes("header")) return false;          // ex : PowerGridHeaderClass
+            if (!n.querySelector("td")) return false;           // ligne d'en-têtes (th) seule
+          }
+          return (n.innerText || n.textContent || "").trim() !== "";
+        });
+
+        const filled = meaningful.length > 0;
+        if (out.tcCheck !== "text") return { found: filled, filled };
+
+        // Recherche de texte : le tableau doit d'abord être rempli.
+        if (!filled) return { found: false, filled: false, reason: "empty" };
+        const haystack = meaningful.map((n) => (n.innerText || n.textContent || "")).join("\n");
+        const raw = (out.tcText || "").trim();
+        if (!raw) return { found: false, filled, reason: "noTerm" };
+
+        let matched = false;
+        if (out.tcRegex) {
+          try { matched = new RegExp(raw, "i").test(haystack); }
+          catch (e) { return { found: false, filled, reason: "badRegex" }; }
+        } else {
+          const hay = haystack.toLowerCase();
+          matched = raw.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean)
+            .some((t) => hay.includes(t));
+        }
+        return { found: matched, filled };
+      }
+
       function readResults() {
         const values = [];
         const notFound = [];
@@ -2114,6 +2225,21 @@ function performRowActionInjected(config) {
                   ? 'aucune ligne trouvée pour le sélecteur "' + out.rowSelector + '" (vérifie ce sélecteur ou augmente le délai d\'attente)'
                   : 'aucune ligne où la cellule n°' + out.matchTdIndex + ' correspond à "' + out.matchValue + '"');
               }
+            }
+          } else if (out.mode === "tableCheck") {
+            const r = readTableCheck(out);
+            // Erreurs de configuration : on le signale comme "introuvable".
+            if (r.reason === "badSelector" || r.reason === "badRegex") {
+              values.push(out.notFoundEnabled ? (out.notFoundMsg || "") : "");
+              notFound.push(r.reason === "badRegex"
+                ? 'expression régulière invalide : "' + out.tcText + '"'
+                : 'sélecteur de tableau invalide : "' + out.tcSelector + '"');
+            } else if (r.found) {
+              // Trouvé (rempli, ou rempli + texte présent) : message perso ou "OUI".
+              values.push(out.foundEnabled ? (out.foundMsg || "") : "OUI");
+            } else {
+              // Pas trouvé (vide, ou texte absent) : c'est un résultat normal, pas une erreur.
+              values.push(out.notFoundEnabled ? (out.notFoundMsg || "") : "NON");
             }
           } else {
             const el = document.querySelector(out.selector);
@@ -2426,6 +2552,16 @@ async function runAutomation() {
             matchTdIndex: o.matchTdIndex,
             extractTdIndex: o.extractTdIndex,
             matchValue: getCellByIndex(row, o.matchSourceIdx),
+            notFoundEnabled: o.notFoundEnabled,
+            notFoundMsg: o.notFoundMsg,
+            foundEnabled: o.foundEnabled,
+            foundMsg: o.foundMsg
+          } : o.mode === "tableCheck" ? {
+            mode: "tableCheck",
+            tcSelector: o.tcSelector,
+            tcCheck: o.tcCheck,
+            tcText: resolveRowTemplate(o.tcText, row),
+            tcRegex: o.tcRegex,
             notFoundEnabled: o.notFoundEnabled,
             notFoundMsg: o.notFoundMsg,
             foundEnabled: o.foundEnabled,
