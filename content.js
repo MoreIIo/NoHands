@@ -452,4 +452,84 @@ function trySplitAcrossNumberedInputs(firstInput, stripped) {
     const candidateName = makeName(n);
     const el = document.querySelector(`[name="${CSS.escape(candidateName)}"]`);
     if (!el) break;
-    inputs.push
+    inputs.push(el);
+  }
+
+  if (inputs.length < 2) return 0;
+
+  let offset = 0;
+  let filledCount = 0;
+  for (const inp of inputs) {
+    if (offset >= stripped.length) break;
+    const len = inp.maxLength > 0 ? inp.maxLength : (stripped.length - offset);
+    const chunk = stripped.slice(offset, offset + len);
+    inp.value = chunk;
+    triggerInputEvents(inp);
+    offset += len;
+    filledCount++;
+  }
+
+  return filledCount;
+}
+
+/**
+ * Déclenche input+change pour que les frameworks détectent la modification.
+ * NOTE : pas de 'blur' volontairement — sur les pages ASP.NET WebForms, le blur
+ * de certains champs déclenche __doPostBack et ouvre des popups indésirables.
+ */
+function triggerInputEvents(element) {
+  element.dispatchEvent(new Event('input', { bubbles: true }));
+  element.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function triggerChangeEvent(element) {
+  element.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+/**
+ * Convertit une date DD/MM/YYYY (ou D/M/YYYY) en YYYY-MM-DD
+ */
+function convertDateFormat(dateStr) {
+  const match1 = dateStr.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (match1) {
+    const [, day, month, year] = match1;
+    return `${year}-${month}-${day}`;
+  }
+  const match2 = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (match2) {
+    const [, day, month, year] = match2;
+    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+  }
+  if (/^(\d{4})-(\d{2})-(\d{2})$/.test(dateStr)) return dateStr;
+  return dateStr;
+}
+
+/**
+ * Notification visuelle temporaire (copie du nom d'input)
+ */
+function showCopyNotification(inputName) {
+  const notification = document.createElement('div');
+  notification.textContent = `✓ Copié: ${inputName}`;
+  notification.style.cssText = `
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: rgba(24, 24, 27, 0.92);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    color: #4ade80;
+    padding: 12px 20px;
+    border-radius: 12px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    z-index: 999999;
+  `;
+  document.body.appendChild(notification);
+  setTimeout(() => notification.remove(), 2000);
+}
+
+console.log('NoHands OSA: content script chargé');
+
+} // Fin de la garde d'injection
