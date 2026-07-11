@@ -62,6 +62,18 @@ deux modes :
    personnalisés (ex. `ac:body_x_city_x_Migrated_txtCP_x_CP`). L'option
    choisie apparaît dans le retour de remplissage ; si aucune suggestion
    n'apparaît, la valeur tapée reste et un avertissement est signalé.
+7. **Formulaires « en cascade » (WebForms / `__doPostBack`)** : les menus dont
+   le changement recharge la page (ex. Pays) sont détectés : l'extension
+   attend la fin du rechargement partiel avant de passer au champ suivant.
+   Les listes peuplées par le serveur (ex. Numéro de voie, vide au départ)
+   sont attendues jusqu'à 8 s. Pour les champs texte qui doivent déclencher
+   un rechargement à la sortie (ex. code postal → `initCacheresultCall`,
+   voie), préfixe l'input par `pb:` dans le mapping
+   (ex. `pb:body_x_txtVoie_x_Voie`) : blur ciblé puis attente du
+   rechargement. Un champ déjà à la bonne valeur n'est jamais re-rempli
+   (évite les boucles de postback). L'ordre de remplissage suit l'ordre des
+   colonnes : place Pays avant Code postal, Code postal avant Voie, etc.
+   Les marqueurs se cumulent (`pb:ac:monChamp`).
 
 ## 3. Onglet Extraction (ex-OSA)
 

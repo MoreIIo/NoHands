@@ -287,14 +287,21 @@ const OSA_AC = {
   SETTLE_MS: 400     // délai après clic (setDataFieldValue remplit les champs liés)
 };
 
-// Sépare un identifiant de mapping de son éventuel marqueur « ac: »
-// (force le traitement autocomplétion si la détection auto échoue).
+// Sépare un identifiant de mapping de ses éventuels marqueurs (cumulables) :
+//   « ac:nom » force le traitement autocomplétion (si la détection auto échoue) ;
+//   « pb:nom » force un postback après remplissage : blur ciblé + attente du
+//   rechargement partiel ASP.NET (champs « en cascade », ex. code postal, voie).
 function parseInputIdentifier(raw) {
-  const trimmed = String(raw).trim();
-  if (/^ac:/i.test(trimmed)) {
-    return { name: trimmed.slice(3).trim(), forceAutocomplete: true };
+  let name = String(raw).trim();
+  let forceAutocomplete = false;
+  let forcePostback = false;
+  let m;
+  while ((m = name.match(/^(ac|pb):/i)) !== null) {
+    if (m[1].toLowerCase() === 'ac') forceAutocomplete = true;
+    else forcePostback = true;
+    name = name.slice(m[0].length).trim();
   }
-  return { name: trimmed, forceAutocomplete: false };
+  return { name, forceAutocomplete, forcePostback };
 }
 
 // Détection automatique d'un champ à autocomplétion :
@@ -444,7 +451,232 @@ async function fillAutocompleteField(input, value, rowContext) {
   // Laisse setDataFieldValue remplir les champs liés (ex. la ville)
   await osaSleep(OSA_AC.SETTLE_MS);
 
-  return { success: true, detail: option.text.trim() };
+  return { success: true, detail: 'suggestion : ' + option.text.trim() };
+}
+
+/* ====================================================================
+ * Formulaires « en cascade » (ASP.NET WebForms / __doPostBack)
+ * --------------------------------------------------------------------
+ * Sur ces pages, certains champs reconstruisent la suite du formulaire
+ * côté serveur : un select Pays déclenche __doPostBack au changement, un
+ * code postal ou une voie déclenchent un appel serveur au blur
+ * (initCacheresultCall…), et des listes comme « Numéro » restent vides
+ * tant que le serveur ne les a pas peuplées.
+ * Réponses apportées ici :
+ *   1. idempotence : une valeur déjà en place n'est jamais re-remplie
+ *      (sinon chaque re-remplissage relancerait les postbacks en boucle) ;
+ *   2. selects auto-postback (__doPostBack dans onchange) : après le
+ *      changement, on attend la fin du rechargement partiel (quiescence
+ *      DOM) avant le champ suivant ;
+ *   3. selects en cascade vides : on attend que les options apparaissent ;
+ *   4. marqueur « pb: » : après remplissage, déclenche blur+focusout puis
+ *      attend le rechargement (blur ciblé uniquement — un blur global
+ *      ouvre des popups sur certaines pages WebForms).
+ * L'ordre de remplissage suit l'ordre des colonnes du mapping : placer
+ * Pays avant Code postal, Code postal avant Voie, etc.
+ * ==================================================================== */
+
+const OSA_PB = {
+  QUIET_MS: 800,           // durée sans mutation DOM = page « posée »
+  TIMEOUT_MS: 10000,       // attente max d'un rechargement partiel
+  SELECT_RETRY_MS: 300,    // intervalle de re-vérification d'un select vide
+  SELECT_TIMEOUT_MS: 8000  // attente max des options d'un select en cascade
+};
+
+// Attend que le DOM se stabilise (aucune mutation de structure pendant
+// QUIET_MS). Sert à laisser un __doPostBack / UpdatePanel se terminer.
+// Ne regarde que childList (les animations d'attributs ne comptent pas).
+function waitForDomSettle(quietMs = OSA_PB.QUIET_MS, timeoutMs = OSA_PB.TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    let quietTimer = null;
+    let hardTimer = null;
+    let done = false;
+    const obs = new MutationObserver(() => arm());
+    const finish = () => {
+      if (done) return;
+      done = true;
+      obs.disconnect();
+      clearTimeout(quietTimer);
+      clearTimeout(hardTimer);
+      resolve();
+    };
+    const arm = () => {
+      clearTimeout(quietTimer);
+      quietTimer = setTimeout(finish, quietMs);
+    };
+    obs.observe(document.documentElement, { childList: true, subtree: true });
+    hardTimer = setTimeout(finish, timeoutMs);
+    arm(); // si aucun postback ne part, on ressort après quietMs
+  });
+}
+
+// Le changement de ce select déclenche-t-il un postback ASP.NET ?
+function selectTriggersPostback(el) {
+  if (!el || !el.getAttribute) return false;
+  const code = el.getAttribute('onchange') || '';
+  return code.includes('__doPostBack') || code.includes('WebForm_DoPostBack');
+}
+
+// Sortie de champ ciblée : déclenche les handlers inline onblur
+// (initCacheresultCall…) sans toucher aux autres champs.
+function triggerBlurEvents(element) {
+  element.dispatchEvent(new FocusEvent('blur'));
+  element.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+}
+
+// Cherche l'option d'un select correspondant à une valeur (stratégies
+// successives : valeur exacte, texte exact, insensible à la casse, puis
+// inclusion — en ignorant les options vides, qui matchaient tout avant).
+function findSelectOption(select, value) {
+  const strVal = String(value);
+  const valueLower = strVal.toLowerCase().trim();
+  const opts = Array.from(select.options);
+  let option = opts.find(opt => opt.value === strVal);
+  if (!option) option = opts.find(opt => opt.text === strVal);
+  if (!option) option = opts.find(opt => opt.value.toLowerCase().trim() === valueLower);
+  if (!option) option = opts.find(opt => opt.text.toLowerCase().trim() === valueLower);
+  if (!option) {
+    option = opts.find(opt => {
+      const t = opt.text.toLowerCase().trim();
+      return t !== '' && (t.includes(valueLower) || valueLower.includes(t));
+    });
+  }
+  if (!option) {
+    option = opts.find(opt => {
+      const v = opt.value.toLowerCase().trim();
+      return v !== '' && (v.includes(valueLower) || valueLower.includes(v));
+    });
+  }
+  return option || null;
+}
+
+// La valeur est-elle déjà en place ? (idempotence : évite de re-déclencher
+// change/postback à chaque re-remplissage de l'observer)
+function isAlreadyFilled(input, value) {
+  const tagName = input.tagName.toLowerCase();
+  const type = input.type ? input.type.toLowerCase() : 'text';
+  const strVal = String(value);
+  if (tagName === 'select') {
+    const option = findSelectOption(input, value);
+    return !!option && option.value !== '' && input.value === option.value;
+  }
+  if (tagName === 'input' && type === 'checkbox') {
+    const shouldCheck = ['o', 'oui', 'yes', 'true', '1', 'on', 'checked'].includes(strVal.toLowerCase());
+    return input.checked === shouldCheck;
+  }
+  if (tagName === 'input' && type === 'radio') {
+    const radios = document.querySelectorAll(`[name="${CSS.escape(input.name)}"]`);
+    const target = Array.from(radios).find(r =>
+      r.value === strVal || r.value.toLowerCase() === strVal.toLowerCase()
+    );
+    return !!target && target.checked;
+  }
+  if (tagName === 'input' && type === 'date') {
+    return strVal !== '' && input.value === convertDateFormat(strVal);
+  }
+  if (tagName === 'textarea' || tagName === 'input') {
+    return strVal !== '' && input.value === strVal;
+  }
+  return false;
+}
+
+// Remplit un select en attendant au besoin que ses options apparaissent
+// (listes en cascade peuplées par le postback d'un champ précédent).
+// Re-résout l'élément à chaque essai : le postback a pu le remplacer.
+async function fillSelectWaiting(identifier, value) {
+  const deadline = Date.now() + OSA_PB.SELECT_TIMEOUT_MS;
+  let waited = false;
+  while (true) {
+    const el = findFormInput(identifier);
+    if (el && el.tagName.toLowerCase() === 'select') {
+      const option = findSelectOption(el, value);
+      if (option) {
+        if (el.value === option.value) {
+          return { success: true, element: el, changed: false, detail: 'déjà en place' };
+        }
+        el.value = option.value;
+        triggerChangeEvent(el);
+        return {
+          success: true, element: el, changed: true,
+          detail: waited ? 'option apparue après rechargement' : null
+        };
+      }
+      // Des options réelles existent mais aucune ne correspond : échec
+      // immédiat (comportement historique). On n'attend que si la liste
+      // est vide (select en cascade pas encore peuplé).
+      const realOptions = Array.from(el.options).filter(o => (o.value || o.text.trim()) !== '');
+      if (realOptions.length > 0) {
+        return { success: false, error: `aucune option correspondant à « ${value} » dans ${identifier}` };
+      }
+    }
+    if (Date.now() >= deadline) {
+      return {
+        success: false,
+        error: `select ${identifier} : liste restée vide, option « ${value} » jamais apparue — cascade non déclenchée ? (vérifie l'ordre des colonnes, ou ajoute pb: au champ précédent)`
+      };
+    }
+    waited = true;
+    await osaSleep(OSA_PB.SELECT_RETRY_MS);
+  }
+}
+
+/**
+ * Remplit UN champ (logique commune mapping + champs personnalisés) :
+ * marqueurs ac:/pb:, autocomplétion, idempotence, selects en cascade,
+ * attente des postbacks.
+ * @returns {Promise<{success: boolean, identifier?: string, detail?: string, warning?: string, error?: string}>}
+ */
+async function fillOneField(rawIdentifier, value, rowContext) {
+  const { name: identifier, forceAutocomplete, forcePostback } = parseInputIdentifier(rawIdentifier);
+  const input = findFormInput(identifier);
+  if (!input) {
+    return { success: false, identifier, error: `Input non trouvé (name/id/classe): ${identifier}` };
+  }
+
+  // 1. Champ à autocomplétion asynchrone (suggestions AJAX)
+  if (forceAutocomplete || isAutocompleteInput(input)) {
+    const acResult = await fillAutocompleteField(input, value, rowContext);
+    acResult.identifier = identifier;
+    if (acResult.success && forcePostback) {
+      triggerBlurEvents(findFormInput(identifier) || input);
+      await waitForDomSettle();
+      acResult.detail = (acResult.detail ? acResult.detail + ' — ' : '') + 'rechargement attendu';
+    }
+    return acResult;
+  }
+
+  // 2. Valeur déjà en place : ne rien re-déclencher
+  if (isAlreadyFilled(input, value)) {
+    return { success: true, identifier, detail: 'déjà en place' };
+  }
+
+  // 3. Select : attente des options (cascade) + postback éventuel
+  if (input.tagName.toLowerCase() === 'select') {
+    const res = await fillSelectWaiting(identifier, value);
+    res.identifier = identifier;
+    if (!res.success) return res;
+    const el = res.element || findFormInput(identifier);
+    if (res.changed && (forcePostback || selectTriggersPostback(el))) {
+      await waitForDomSettle();
+      res.detail = (res.detail ? res.detail + ' — ' : '') + 'rechargement attendu';
+    }
+    return res;
+  }
+
+  // 4. Champs classiques
+  const success = fillInputByType(input, value);
+  if (!success) {
+    return { success: false, identifier, error: `Échec pour ${identifier}` };
+  }
+
+  // 5. Marqueur pb: : sortie de champ + attente du rechargement
+  //    (ex. code postal initCacheresultCall, voie onblur)
+  if (forcePostback) {
+    triggerBlurEvents(input);
+    await waitForDomSettle();
+    return { success: true, identifier, detail: 'blur + rechargement attendu' };
+  }
+  return { success: true, identifier };
 }
 
 /**
@@ -470,32 +702,14 @@ async function fillFormFields(data, mapping, rowContext) {
       if (!rawName || rawName.trim() === '') continue;
 
       try {
-        const { name: inputName, forceAutocomplete } = parseInputIdentifier(rawName);
-        const input = findFormInput(inputName);
-        if (!input) {
-          errors.push(`Input non trouvé (name/id/classe): ${inputName}`);
-          continue;
-        }
-
-        // Champ à autocomplétion asynchrone (détection auto ou marqueur « ac: »)
-        if (forceAutocomplete || isAutocompleteInput(input)) {
-          const acResult = await fillAutocompleteField(input, value, rowContext);
-          if (acResult.success) {
-            filledCount++;
-            filled.push(`${columnName} → ${inputName}${acResult.detail ? ` (suggestion : ${acResult.detail})` : ''}`);
-            if (acResult.warning) errors.push(acResult.warning);
-          } else {
-            errors.push(acResult.error || `Échec autocomplétion pour ${columnName} → ${inputName}`);
-          }
-          continue;
-        }
-
-        const success = fillInputByType(input, value);
-        if (success) {
+        const res = await fillOneField(rawName, value, rowContext);
+        const shownName = res.identifier || rawName;
+        if (res.success) {
           filledCount++;
-          filled.push(`${columnName} → ${inputName}`);
+          filled.push(`${columnName} → ${shownName}${res.detail ? ` (${res.detail})` : ''}`);
+          if (res.warning) errors.push(res.warning);
         } else {
-          errors.push(`Échec pour ${columnName} → ${inputName}`);
+          errors.push(res.error || `Échec pour ${columnName} → ${shownName}`);
         }
       } catch (error) {
         errors.push(`Erreur pour ${columnName} → ${rawName}: ${error.message}`);
@@ -524,31 +738,14 @@ async function fillCustomFields(customFields, rowContext) {
   for (const [rawName, value] of Object.entries(customFields)) {
     if (!rawName || rawName.trim() === '') continue;
     try {
-      const { name: inputName, forceAutocomplete } = parseInputIdentifier(rawName);
-      const input = findFormInput(inputName);
-      if (!input) {
-        errors.push(`Input non trouvé (name/id/classe): ${inputName}`);
-        continue;
-      }
-
-      if (forceAutocomplete || isAutocompleteInput(input)) {
-        const acResult = await fillAutocompleteField(input, value, rowContext);
-        if (acResult.success) {
-          filledCount++;
-          filled.push(`custom:${inputName}${acResult.detail ? ` (suggestion : ${acResult.detail})` : ''}`);
-          if (acResult.warning) errors.push(acResult.warning);
-        } else {
-          errors.push(acResult.error || `Échec autocomplétion pour custom → ${inputName}`);
-        }
-        continue;
-      }
-
-      const success = fillInputByType(input, value);
-      if (success) {
+      const res = await fillOneField(rawName, value, rowContext);
+      const shownName = res.identifier || rawName;
+      if (res.success) {
         filledCount++;
-        filled.push(`custom:${inputName}`);
+        filled.push(`custom:${shownName}${res.detail ? ` (${res.detail})` : ''}`);
+        if (res.warning) errors.push(res.warning);
       } else {
-        errors.push(`Échec pour custom → ${inputName}`);
+        errors.push(res.error || `Échec pour custom → ${shownName}`);
       }
     } catch (error) {
       errors.push(`Erreur custom ${rawName}: ${error.message}`);
@@ -587,25 +784,9 @@ function fillInputByType(input, value) {
     return true;
   }
 
-  // Select : plusieurs stratégies de correspondance
+  // Select : correspondance via findSelectOption (stratégies successives)
   if (tagName === 'select') {
-    const valueLower = value.toString().toLowerCase().trim();
-    let option = null;
-
-    option = Array.from(input.options).find(opt => opt.value === value);
-    if (!option) option = Array.from(input.options).find(opt => opt.text === value);
-    if (!option) option = Array.from(input.options).find(opt => opt.value.toLowerCase().trim() === valueLower);
-    if (!option) option = Array.from(input.options).find(opt => opt.text.toLowerCase().trim() === valueLower);
-    if (!option) {
-      option = Array.from(input.options).find(opt =>
-        opt.text.toLowerCase().includes(valueLower) || valueLower.includes(opt.text.toLowerCase())
-      );
-    }
-    if (!option) {
-      option = Array.from(input.options).find(opt =>
-        opt.value.toLowerCase().includes(valueLower) || valueLower.includes(opt.value.toLowerCase())
-      );
-    }
+    const option = findSelectOption(input, value);
 
     if (option) {
       input.value = option.value;
