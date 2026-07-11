@@ -50,6 +50,18 @@ deux modes :
 5. **Remplir le formulaire** : remplit tous les onglets ouverts du même site
    (popups compris). Les contenus chargés dynamiquement (ASP.NET UpdatePanel)
    sont re-remplis automatiquement pendant 30 s.
+6. **Champs à autocomplétion asynchrone** (ex. code postal → ville, comptes
+   bancaires) : détectés automatiquement (handler `searchResult`/`SearchStart`
+   ou conteneur `search:…`). L'extension tape la valeur, attend les
+   suggestions AJAX (polling 200 ms, timeout 8 s — jamais de délai fixe),
+   choisit la bonne option en la comparant aux **autres colonnes de la ligne**
+   (ex. la colonne Ville départage « 70600 - ARGILLIERES » de
+   « 70600 - AUTREY... »), puis la clique pour déclencher `setDataFieldValue`
+   (la ville liée se remplit alors côté site). Si la détection échoue sur un
+   formulaire, préfixe le nom d'input par `ac:` dans le mapping ou les champs
+   personnalisés (ex. `ac:body_x_city_x_Migrated_txtCP_x_CP`). L'option
+   choisie apparaît dans le retour de remplissage ; si aucune suggestion
+   n'apparaît, la valeur tapée reste et un avertissement est signalé.
 
 ## 3. Onglet Extraction (ex-OSA)
 

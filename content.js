@@ -17,6 +17,7 @@ let lastContextMenuTarget = null;
 let lastFillData = null;
 let lastFillMapping = null;
 let lastFillCustomFields = null;
+let lastFillRowContext = null;
 let fillObserver = null;
 
 document.addEventListener('contextmenu', (event) => {
@@ -30,13 +31,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     lastFillData = request.data;
     lastFillMapping = request.mapping;
     lastFillCustomFields = request.customFields || null;
+    lastFillRowContext = request.rowContext || null;
 
-    const result = performFill(request.data, request.mapping, request.customFields);
+    // Stoppe l'observer d'un remplissage précédent pour éviter les
+    // re-remplissages concurrents pendant ce remplissage-ci.
+    if (fillObserver) {
+      fillObserver.disconnect();
+      fillObserver = null;
+    }
 
-    // Observe le contenu chargé dynamiquement (UpdatePanels ASP.NET, etc.)
-    startFillObserver();
-
-    sendResponse(result);
+    // Remplissage asynchrone : les champs à autocomplétion attendent les
+    // suggestions AJAX avant que la réponse ne parte.
+    performFill(request.data, request.mapping, request.customFields, lastFillRowContext)
+      .then((result) => {
+        // Observe le contenu chargé dynamiquement (UpdatePanels ASP.NET, etc.)
+        startFillObserver();
+        sendResponse(result);
+      })
+      .catch((err) => {
+        startFillObserver();
+        sendResponse({ success: false, filledCount: 0, filled: [], errors: [err.message], error: err.message });
+      });
   } else if (request.action === 'copyInputName') {
     if (lastContextMenuTarget) {
       // On privilégie le name ; à défaut on récupère l'id (beaucoup de
@@ -99,12 +114,13 @@ function showRowBadge(label, state) {
 }
 
 /**
- * Remplit avec data+mapping, plus les champs personnalisés éventuels
+ * Remplit avec data+mapping, plus les champs personnalisés éventuels.
+ * Asynchrone : les champs à autocomplétion sont attendus séquentiellement.
  */
-function performFill(data, mapping, customFields) {
-  const result = fillFormFields(data, mapping);
+async function performFill(data, mapping, customFields, rowContext) {
+  const result = await fillFormFields(data, mapping, rowContext);
   if (customFields && typeof customFields === 'object') {
-    const customResult = fillCustomFields(customFields);
+    const customResult = await fillCustomFields(customFields, rowContext);
     result.filledCount += customResult.filledCount;
     if (customResult.filled.length) result.filled.push(...customResult.filled);
     if (customResult.errors && customResult.errors.length) {
@@ -130,12 +146,20 @@ function startFillObserver() {
   let retryCount = 0;
   const maxRetries = 10;
   let debounceTimer = null;
+  let refillRunning = false;
+
+  // Nœuds créés par le mécanisme de suggestions (autocomplétion) : à
+  // ignorer, sinon chaque liste de suggestions relancerait un remplissage.
+  const isSuggestionNode = (node) =>
+    (typeof node.id === 'string' && node.id.startsWith('search:')) ||
+    (node.matches && node.matches('select[name^="searchResultSelect_"]'));
 
   fillObserver = new MutationObserver((mutations) => {
     let hasNewInputs = false;
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
         if (node.nodeType === Node.ELEMENT_NODE) {
+          if (isSuggestionNode(node)) continue;
           if ((node.matches && node.matches('input, select, textarea, form')) ||
               (node.querySelector && node.querySelector('input, select, textarea'))) {
             hasNewInputs = true;
@@ -149,9 +173,15 @@ function startFillObserver() {
     if (hasNewInputs && retryCount < maxRetries) {
       retryCount++;
       clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
+      debounceTimer = setTimeout(async () => {
+        if (refillRunning) return;
+        refillRunning = true;
         console.log(`NoHands OSA: nouveaux champs détectés (essai ${retryCount}/${maxRetries}), re-remplissage...`);
-        performFill(lastFillData, lastFillMapping, lastFillCustomFields);
+        try {
+          await performFill(lastFillData, lastFillMapping, lastFillCustomFields, lastFillRowContext);
+        } finally {
+          refillRunning = false;
+        }
       }, 300);
     }
   });
@@ -235,12 +265,195 @@ function findFormInput(identifier) {
   return null;
 }
 
+/* ====================================================================
+ * Champs à autocomplétion asynchrone (ASP.NET « searchResult »)
+ * --------------------------------------------------------------------
+ * Certains formulaires internes (adresses, comptes bancaires…) ont des
+ * champs dont la frappe déclenche une recherche AJAX debouncée
+ * (searchResult → SearchStart → processTimerAdresse, ~300 ms à 1 s).
+ * Les suggestions arrivent dans <div id="search:ID_DU_CHAMP"> contenant
+ * un <select name="searchResultSelect_ID_DU_CHAMP"> ; cliquer une
+ * <option> appelle setDataFieldValue(...) qui remplit les champs liés
+ * (ex. la ville à partir du code postal).
+ * Stratégie : taper la valeur, attendre les suggestions par polling
+ * (jamais de délai fixe), choisir la meilleure option en s'aidant des
+ * autres colonnes de la ligne, puis la cliquer.
+ * Détection automatique + marqueur manuel « ac: » dans le mapping.
+ * ==================================================================== */
+
+const OSA_AC = {
+  POLL_MS: 200,      // intervalle de vérification des suggestions
+  TIMEOUT_MS: 8000,  // attente max (debounce + AJAX serveur)
+  SETTLE_MS: 400     // délai après clic (setDataFieldValue remplit les champs liés)
+};
+
+// Sépare un identifiant de mapping de son éventuel marqueur « ac: »
+// (force le traitement autocomplétion si la détection auto échoue).
+function parseInputIdentifier(raw) {
+  const trimmed = String(raw).trim();
+  if (/^ac:/i.test(trimmed)) {
+    return { name: trimmed.slice(3).trim(), forceAutocomplete: true };
+  }
+  return { name: trimmed, forceAutocomplete: false };
+}
+
+// Détection automatique d'un champ à autocomplétion :
+// handler inline searchResult/SearchStart, ou conteneur « search:<id> ».
+function isAutocompleteInput(input) {
+  if (!input || input.tagName.toLowerCase() !== 'input') return false;
+  const type = (input.type || 'text').toLowerCase();
+  if (!['text', 'search'].includes(type)) return false;
+  for (const attr of ['onkeyup', 'onkeydown', 'onkeypress']) {
+    const code = input.getAttribute(attr) || '';
+    if (code.includes('searchResult') || code.includes('SearchStart')) return true;
+  }
+  if (input.id && document.getElementById('search:' + input.id)) return true;
+  return false;
+}
+
+function osaSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Normalise pour comparaison : majuscules, sans accents, espaces réduits
+function osaNormalize(s) {
+  return String(s ?? '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase().replace(/\s+/g, ' ').trim();
+}
+
+// Le <select> de suggestions associé à un champ
+function findSuggestionSelect(input) {
+  const id = input.id || '';
+  if (!id) return null;
+  let sel = document.querySelector(`select[name="searchResultSelect_${CSS.escape(id)}"]`);
+  if (!sel) {
+    const container = document.getElementById('search:' + id);
+    if (container) sel = container.querySelector('select');
+  }
+  return sel;
+}
+
+function nonEmptyOptions(sel) {
+  return Array.from(sel.options).filter((o) => (o.text || '').trim() !== '');
+}
+
+function isElementVisible(el) {
+  return !!el && el.getClientRects().length > 0;
+}
+
+// Meilleure option : privilégie celles contenant la valeur tapée, départage
+// avec les autres valeurs de la ligne (ex. colonne Ville pour un CP :
+// « 70600 - ARGILLIERES » gagne si la ligne contient ARGILLIERES).
+function pickBestSuggestion(options, typedValue, rowContext) {
+  const typed = osaNormalize(typedValue);
+  const contextValues = [];
+  if (rowContext && typeof rowContext === 'object') {
+    for (const v of Object.values(rowContext)) {
+      const n = osaNormalize(v);
+      if (n && n.length >= 2 && n !== typed && !contextValues.includes(n)) contextValues.push(n);
+    }
+  }
+  let best = null;
+  let bestScore = -1;
+  for (const opt of options) {
+    const text = osaNormalize(opt.text);
+    if (!text) continue;
+    let score = 0;
+    if (text === typed) score += 4;
+    if (typed && text.includes(typed)) score += 2;
+    for (const cv of contextValues) {
+      if (text.includes(cv)) score += 3;
+    }
+    if (score > bestScore) { bestScore = score; best = opt; }
+  }
+  return best;
+}
+
+// Clique une option comme le ferait l'utilisateur : sélection puis vrais
+// événements souris pour déclencher son handler inline (setDataFieldValue).
+function clickSuggestionOption(option) {
+  option.selected = true;
+  for (const type of ['mousedown', 'mouseup', 'click']) {
+    option.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+  }
+}
+
+/**
+ * Remplit un champ à autocomplétion : tape la valeur, attend les suggestions
+ * AJAX (polling toutes les 200 ms, timeout 8 s), sélectionne la meilleure.
+ * @returns {Promise<{success: boolean, detail?: string, warning?: string, error?: string}>}
+ */
+async function fillAutocompleteField(input, value, rowContext) {
+  const typedValue = String(value).trim();
+  const label = input.id || input.name || '(champ)';
+
+  // Déjà traité avec cette valeur (re-remplissage MutationObserver) :
+  // ne pas rouvrir les suggestions.
+  if (input.dataset.osaAcDone === typedValue && input.value !== '') {
+    return { success: true, detail: 'déjà sélectionné' };
+  }
+
+  // Signature des suggestions déjà affichées, pour détecter les nouvelles
+  const prevSelect = findSuggestionSelect(input);
+  const prevSignature = prevSelect ? nonEmptyOptions(prevSelect).map((o) => o.text).join('|') : '';
+
+  // Frappe simulée : valeur + keyup (déclenche searchResult côté page).
+  // Pas de blur volontairement (risque de __doPostBack, cf. triggerInputEvents).
+  input.value = typedValue;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent('keyup', {
+    bubbles: true, cancelable: true, key: typedValue.slice(-1) || 'Unidentified'
+  }));
+
+  // Attente des suggestions (comportement asynchrone : on ne se fie pas à
+  // un délai fixe, on attend que des <option> non vides apparaissent).
+  const deadline = Date.now() + OSA_AC.TIMEOUT_MS;
+  let options = null;
+  while (Date.now() < deadline) {
+    await osaSleep(OSA_AC.POLL_MS);
+    const sel = findSuggestionSelect(input);
+    if (!sel) continue;
+    const opts = nonEmptyOptions(sel);
+    if (!opts.length) continue;
+    const signature = opts.map((o) => o.text).join('|');
+    // Nouvelles suggestions, ou liste visible (une ancienne liste cachée ne compte pas)
+    if (signature !== prevSignature || isElementVisible(sel)) {
+      options = opts;
+      break;
+    }
+  }
+
+  if (!options) {
+    // Pas de suggestion : la valeur tapée reste, on signale seulement.
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return {
+      success: true,
+      warning: `${label} : aucune suggestion pour « ${typedValue} » (délai dépassé) — champ lié non rempli`
+    };
+  }
+
+  const option = pickBestSuggestion(options, typedValue, rowContext);
+  if (!option) {
+    return { success: false, error: `${label} : suggestions illisibles pour « ${typedValue} »` };
+  }
+
+  clickSuggestionOption(option);
+  input.dataset.osaAcDone = typedValue;
+
+  // Laisse setDataFieldValue remplir les champs liés (ex. la ville)
+  await osaSleep(OSA_AC.SETTLE_MS);
+
+  return { success: true, detail: option.text.trim() };
+}
+
 /**
  * Remplit les champs du formulaire à partir des données et du mapping
  * @param {Object} data - Données de la ligne (nomColonne -> valeur)
  * @param {Object} mapping - nomColonne -> nom(s) d'input
+ * @param {Object|null} rowContext - toutes les colonnes de la ligne (désambiguïsation)
  */
-function fillFormFields(data, mapping) {
+async function fillFormFields(data, mapping, rowContext) {
   let filledCount = 0;
   const errors = [];
   const filled = [];
@@ -253,15 +466,30 @@ function fillFormFields(data, mapping) {
     if (typeof inputNames === 'string') inputNamesArray = [inputNames];
     if (!Array.isArray(inputNamesArray)) continue;
 
-    inputNamesArray.forEach(inputName => {
-      if (!inputName || inputName.trim() === '') return;
+    for (const rawName of inputNamesArray) {
+      if (!rawName || rawName.trim() === '') continue;
 
       try {
+        const { name: inputName, forceAutocomplete } = parseInputIdentifier(rawName);
         const input = findFormInput(inputName);
         if (!input) {
           errors.push(`Input non trouvé (name/id/classe): ${inputName}`);
-          return;
+          continue;
         }
+
+        // Champ à autocomplétion asynchrone (détection auto ou marqueur « ac: »)
+        if (forceAutocomplete || isAutocompleteInput(input)) {
+          const acResult = await fillAutocompleteField(input, value, rowContext);
+          if (acResult.success) {
+            filledCount++;
+            filled.push(`${columnName} → ${inputName}${acResult.detail ? ` (suggestion : ${acResult.detail})` : ''}`);
+            if (acResult.warning) errors.push(acResult.warning);
+          } else {
+            errors.push(acResult.error || `Échec autocomplétion pour ${columnName} → ${inputName}`);
+          }
+          continue;
+        }
+
         const success = fillInputByType(input, value);
         if (success) {
           filledCount++;
@@ -270,9 +498,9 @@ function fillFormFields(data, mapping) {
           errors.push(`Échec pour ${columnName} → ${inputName}`);
         }
       } catch (error) {
-        errors.push(`Erreur pour ${columnName} → ${inputName}: ${error.message}`);
+        errors.push(`Erreur pour ${columnName} → ${rawName}: ${error.message}`);
       }
-    });
+    }
   }
 
   return {
@@ -285,21 +513,36 @@ function fillFormFields(data, mapping) {
 }
 
 /**
- * Remplit des champs personnalisés (nom d'input -> valeur fixe)
+ * Remplit des champs personnalisés (nom d'input -> valeur fixe).
+ * Gère aussi les champs à autocomplétion (auto ou marqueur « ac: »).
  */
-function fillCustomFields(customFields) {
+async function fillCustomFields(customFields, rowContext) {
   let filledCount = 0;
   const errors = [];
   const filled = [];
 
-  for (const [inputName, value] of Object.entries(customFields)) {
-    if (!inputName || inputName.trim() === '') continue;
+  for (const [rawName, value] of Object.entries(customFields)) {
+    if (!rawName || rawName.trim() === '') continue;
     try {
+      const { name: inputName, forceAutocomplete } = parseInputIdentifier(rawName);
       const input = findFormInput(inputName);
       if (!input) {
         errors.push(`Input non trouvé (name/id/classe): ${inputName}`);
         continue;
       }
+
+      if (forceAutocomplete || isAutocompleteInput(input)) {
+        const acResult = await fillAutocompleteField(input, value, rowContext);
+        if (acResult.success) {
+          filledCount++;
+          filled.push(`custom:${inputName}${acResult.detail ? ` (suggestion : ${acResult.detail})` : ''}`);
+          if (acResult.warning) errors.push(acResult.warning);
+        } else {
+          errors.push(acResult.error || `Échec autocomplétion pour custom → ${inputName}`);
+        }
+        continue;
+      }
+
       const success = fillInputByType(input, value);
       if (success) {
         filledCount++;
@@ -308,7 +551,7 @@ function fillCustomFields(customFields) {
         errors.push(`Échec pour custom → ${inputName}`);
       }
     } catch (error) {
-      errors.push(`Erreur custom ${inputName}: ${error.message}`);
+      errors.push(`Erreur custom ${rawName}: ${error.message}`);
     }
   }
 

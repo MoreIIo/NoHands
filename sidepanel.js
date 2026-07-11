@@ -1344,13 +1344,23 @@ function buildFillPayload(rowIdx) {
   }
   const customFields = {};
   state.customFields.forEach(({ name, value }) => { if (name) customFields[name] = resolveRowTemplate(value, activeRow); });
-  return { data, mapping, customFields };
+  // Contexte de ligne complet (toutes les colonnes) : sert au content script
+  // à départager les suggestions des champs à autocomplétion asynchrone
+  // (ex. CP tapé → choisit « 70600 - ARGILLIERES » si la ligne contient la ville).
+  const rowContext = {};
+  if (activeRow) {
+    getColumns().forEach((c) => {
+      const v = applyValueRules(formatValueForColumn(c.name, getCellByIndex(activeRow, c.index)));
+      if (v !== undefined && v !== null && String(v).trim() !== "") rowContext[c.name] = String(v);
+    });
+  }
+  return { data, mapping, customFields, rowContext };
 }
 
 $("fillBtn").addEventListener("click", async () => {
   saveCustomFields();
 
-  const { data, mapping, customFields } = buildFillPayload(state.selectedRowIdx);
+  const { data, mapping, customFields, rowContext } = buildFillPayload(state.selectedRowIdx);
 
   if (!Object.keys(mapping).length && !Object.keys(customFields).length) {
     showStatus("Aucune donnée exploitable : configure le mapping ou des champs personnalisés.", "error");
@@ -1362,7 +1372,8 @@ $("fillBtn").addEventListener("click", async () => {
       action: "fillForm",
       data,
       mapping,
-      customFields: Object.keys(customFields).length ? customFields : undefined
+      customFields: Object.keys(customFields).length ? customFields : undefined,
+      rowContext
     };
     const { totalFilled, totalErrors, tabsReached, tabCount } = await sendFillToAllTabs(message);
 
@@ -1446,12 +1457,13 @@ function renderMtTabs() {
 async function mtFillTab(tabId) {
   const rowIdx = mtState.assignments.get(tabId);
   if (rowIdx === undefined) return null;
-  const { data, mapping, customFields } = buildFillPayload(rowIdx);
+  const { data, mapping, customFields, rowContext } = buildFillPayload(rowIdx);
   const message = {
     action: "fillForm",
     data,
     mapping,
-    customFields: Object.keys(customFields).length ? customFields : undefined
+    customFields: Object.keys(customFields).length ? customFields : undefined,
+    rowContext
   };
   try {
     const response = await sendMessageToTab(tabId, message);
@@ -3251,7 +3263,7 @@ async function execScenarioStep(step, rowIdx, tabId) {
   try {
     switch (step.type) {
       case "fill": {
-        const { data, mapping, customFields } = buildFillPayload(rowIdx);
+        const { data, mapping, customFields, rowContext } = buildFillPayload(rowIdx);
         if (!Object.keys(mapping).length && !Object.keys(customFields).length) {
           return { ok: false, error: "aucun mapping ni champ personnalisé configuré" };
         }
@@ -3259,7 +3271,8 @@ async function execScenarioStep(step, rowIdx, tabId) {
           action: "fillForm",
           data,
           mapping,
-          customFields: Object.keys(customFields).length ? customFields : undefined
+          customFields: Object.keys(customFields).length ? customFields : undefined,
+          rowContext
         });
         return { ok: true, info: `${totalFilled} champ(s) rempli(s)`, warn: totalFilled === 0 };
       }
