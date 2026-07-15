@@ -75,6 +75,20 @@ deux modes :
    colonnes : place Pays avant Code postal, Code postal avant Voie, etc.
    Les marqueurs se cumulent (`pb:ac:monChamp`).
 
+8. **Étape de scénario « SIGEO : saisir une adresse »** : automatise le
+   formulaire d'adresse SIGEO (`popup.aspx/…/address_manage/{id}`) de bout en
+   bout — navigation (ViewState frais), pays, CP (autocomplétion
+   « searchResult » : la suggestion CP+ville est cliquée pour résoudre le
+   **code commune** `Migrated_code`), voie, **n° de voie** (match strict du
+   libellé dans la liste), champs optionnels, contrôles, puis « Enreg. et
+   fermer ». Fallbacks : sélecteur de commune (popup interne ou fenêtre
+   séparée), reprise idempotente après postback. **Simulation (dryRun) activée
+   par défaut** : tout est rempli et contrôlé sans enregistrer — décocher pour
+   écrire réellement. Résultat par ligne (OK / SIMULATION OK / ERREUR + ids
+   résolus) écrit en option dans une colonne du fichier. Codes d'erreur :
+   `AUTH_REQUIRED` (session expirée), `UNRESOLVED_CITY` (CP/ville incohérents),
+   `NUM_VOIE_INTROUVABLE` (libellé absent), `VALIDATION` (refus serveur).
+
 ## 3. Onglet Extraction (ex-OSA)
 
 1. **Conditions** : ignorer certaines lignes (ex : colonne X = "NON").
@@ -188,7 +202,10 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 └── test.html          Page de test locale des deux modes
 ```
 
-**Version** : 2.2.0 — Toolbox : **OCR local** (Tesseract) pour PDF scannés et
+**Version** : 2.5.0 — étape de scénario **SIGEO : saisir une adresse**
+(formulaire address_manage : résolution code commune via autocomplétion ou
+sélecteur, n° de voie par libellé, dryRun, rapport par ligne).
+2.2.0 — Toolbox : **OCR local** (Tesseract) pour PDF scannés et
 images (étiquette énergie DPE : conso kWh/m²/an, émissions kgCO₂/m²/an).
 2.1.0 — onglet **Toolbox (bêta)** : analyse de PDF (n° ADEME, SIRET,
 noms, dates…), vérification/report des données dans le scénario de saisie.

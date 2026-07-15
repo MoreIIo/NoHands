@@ -510,6 +510,7 @@ input[type="file"]::file-selector-button {
 .scn-step:not([data-type="pdfcheck"]) .scn-only-pdfcheck { display: none; }
 .scn-step:not([data-type="pdfwrite"]) .scn-only-pdfwrite { display: none; }
 .scn-step:not([data-type="pdfcheck"]):not([data-type="pdfwrite"]) .scn-only-pdf { display: none; }
+.scn-step:not([data-type="sigeo"]) .scn-only-sigeo { display: none; }
 
 /* ---------- Toolbox PDF (bêta) ---------- */
 .beta-badge {

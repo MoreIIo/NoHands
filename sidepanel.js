@@ -2788,6 +2788,7 @@ function estimateScenarioStepMs(s) {
       return 1200; // attente d'un sélecteur : moyenne estimée
     case "cond": return 250;
     case "pdfcheck": case "pdfwrite": return 50; // local, quasi instantané
+    case "sigeo": return (s.sigeoNav === false ? 300 : 2500) + 4500; // nav + remplissage + résolution ville + postback
   }
   return 300;
 }
@@ -2839,6 +2840,7 @@ function addScenarioStep(step = {}) {
         <option value="cond">Condition (si… alors…)</option>
         <option value="pdfcheck">PDF β : vérifier un champ</option>
         <option value="pdfwrite">PDF β : écrire un champ</option>
+        <option value="sigeo">SIGEO : saisir une adresse</option>
       </select>
       <button class="btn icon-only scn-move-up" title="Monter" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-up"/></svg></button>
       <button class="btn icon-only scn-move-down" title="Descendre" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-down"/></svg></button>
@@ -2951,8 +2953,53 @@ function addScenarioStep(step = {}) {
         <input type="text" class="new-col-input scn-pdf-newcol" placeholder="lettre (C) ou nom de nouvelle colonne" style="display:none" value="${escapeAttr(step.pdfNewCol || "")}" />
       </div>
       <p class="hint scn-only-pdfwrite">Écrit la valeur du champ PDF (valeurs multiples séparées par « | ») dans la colonne, sur la ligne active.</p>
+
+      <p class="hint scn-only-sigeo">Saisit une adresse dans SIGEO (formulaire <code>address_manage</code>) : pays, CP, ville (code commune résolu via le sélecteur de la page), voie, n° de voie, puis « Enreg. et fermer ». <code>{Nom de colonne}</code> (ou <code>{A}</code>) est remplacé par la valeur de la ligne active. Nécessite une session SIGEO déjà connectée dans l'onglet cible.</p>
+      <div class="scn-row scn-only-sigeo">
+        <label>ID adresse :</label>
+        <input type="text" class="scn-sigeo-addressid" placeholder="ex : {ID adresse}" value="${escapeAttr(step.sigeoAddressId ?? "")}" />
+        <label>table :</label>
+        <input type="text" class="scn-sigeo-table" title="Paramètre d'URL « table » de la fiche adresse" value="${escapeAttr(step.sigeoTable ?? "body_x_tabc_x_desc_tab_x_desc_x_address_addressHolder")}" />
+      </div>
+      <div class="scn-row scn-only-sigeo">
+        <label class="checkbox-row" title="Construit l'URL popup.aspx/…/address_manage/{ID} et navigue avant de remplir. Décocher si la fiche adresse est déjà ouverte dans l'onglet cible."><input type="checkbox" class="scn-sigeo-nav" ${step.sigeoNav === false ? "" : "checked"} /> ouvrir la fiche adresse</label>
+        <input type="text" class="scn-sigeo-baseurl" title="Base du site SIGEO" value="${escapeAttr(step.sigeoBaseUrl ?? "http://sigeo.veille.evoriel.net")}" />
+      </div>
+      <div class="scn-row scn-only-sigeo">
+        <label>pays :</label>
+        <input type="text" class="scn-sigeo-pays" title="Code ISO2 minuscule (ex : fr)" style="max-width:70px" value="${escapeAttr(step.sigeoPays ?? "fr")}" />
+        <label>CP :</label>
+        <input type="text" class="scn-sigeo-cp" placeholder="ex : {CP}" value="${escapeAttr(step.sigeoCp ?? "")}" />
+        <label>ville :</label>
+        <input type="text" class="scn-sigeo-ville" placeholder="ex : {Ville}" value="${escapeAttr(step.sigeoVille ?? "")}" />
+      </div>
+      <div class="scn-row scn-only-sigeo">
+        <label>voie :</label>
+        <input type="text" class="scn-sigeo-voie" placeholder="ex : {Voie}" value="${escapeAttr(step.sigeoVoie ?? "")}" />
+        <label>n° voie :</label>
+        <input type="text" class="scn-sigeo-numvoie" placeholder="libellé, ex : {N°}" title="Libellé affiché dans la liste « numéro de voie » (match strict)" value="${escapeAttr(step.sigeoNumVoie ?? "")}" />
+      </div>
+      <div class="scn-row scn-only-sigeo">
+        <label>BP :</label>
+        <input type="text" class="scn-sigeo-bp" placeholder="(optionnel)" value="${escapeAttr(step.sigeoBp ?? "")}" />
+        <label>complément :</label>
+        <input type="text" class="scn-sigeo-complt" placeholder="(optionnel)" value="${escapeAttr(step.sigeoComplt ?? "")}" />
+        <label>compl. nom :</label>
+        <input type="text" class="scn-sigeo-compnom" placeholder="(optionnel)" value="${escapeAttr(step.sigeoCompNom ?? "")}" />
+      </div>
+      <div class="scn-row scn-only-sigeo">
+        <label class="checkbox-row" title="Remplit et contrôle tout, mais ne clique PAS sur « Enreg. et fermer ». Idéal pour valider un lot avant écriture réelle."><input type="checkbox" class="scn-sigeo-dryrun" ${step.sigeoDryRun === false ? "" : "checked"} /> simulation (dryRun) — ne pas enregistrer</label>
+      </div>
+      <div class="scn-row scn-only-sigeo">
+        <label>timeout (ms) :</label>
+        <input type="number" class="scn-sigeo-timeout" min="2000" step="500" value="${escapeAttr(step.sigeoTimeout ?? 15000)}" />
+        <label>résultat → colonne :</label>
+        <input type="text" class="new-col-input scn-sigeo-resultcol" placeholder="ex : Résultat SIGEO (vide = ne pas écrire)" title="Écrit OK / SIMULATION OK / ERREUR + détail dans cette colonne (créée si besoin), sur la ligne active" value="${escapeAttr(step.sigeoResultCol ?? "")}" />
+      </div>
+      <p class="hint scn-only-sigeo">La simulation est activée par défaut : décoche-la pour enregistrer réellement. Le ViewState est géré par le navigateur (aucune requête forgée).</p>
     </div>
   `;
+
 
   // Valeurs initiales des selects
   div.querySelector(".scn-type").value = step.type || "fill";
@@ -3089,7 +3136,22 @@ function getScenarioSteps() {
     pdfMissAction: el.querySelector(".scn-pdf-missaction").value,
     pdfMissSkip: parseInt(el.querySelector(".scn-pdf-skip").value, 10) || 1,
     pdfTargetCol: el.querySelector(".scn-pdf-targetcol").value,
-    pdfNewCol: el.querySelector(".scn-pdf-newcol").value.trim()
+    pdfNewCol: el.querySelector(".scn-pdf-newcol").value.trim(),
+    sigeoAddressId: el.querySelector(".scn-sigeo-addressid").value.trim(),
+    sigeoTable: el.querySelector(".scn-sigeo-table").value.trim(),
+    sigeoBaseUrl: el.querySelector(".scn-sigeo-baseurl").value.trim(),
+    sigeoNav: el.querySelector(".scn-sigeo-nav").checked,
+    sigeoPays: el.querySelector(".scn-sigeo-pays").value.trim(),
+    sigeoCp: el.querySelector(".scn-sigeo-cp").value.trim(),
+    sigeoVille: el.querySelector(".scn-sigeo-ville").value.trim(),
+    sigeoVoie: el.querySelector(".scn-sigeo-voie").value.trim(),
+    sigeoNumVoie: el.querySelector(".scn-sigeo-numvoie").value.trim(),
+    sigeoBp: el.querySelector(".scn-sigeo-bp").value.trim(),
+    sigeoComplt: el.querySelector(".scn-sigeo-complt").value.trim(),
+    sigeoCompNom: el.querySelector(".scn-sigeo-compnom").value.trim(),
+    sigeoDryRun: el.querySelector(".scn-sigeo-dryrun").checked,
+    sigeoTimeout: parseInt(el.querySelector(".scn-sigeo-timeout").value, 10) || 15000,
+    sigeoResultCol: el.querySelector(".scn-sigeo-resultcol").value.trim()
   }));
 }
 
@@ -3233,6 +3295,605 @@ function scnCheckInjected(cfg) {
   return { ok: true, match };
 }
 
+/* ---------- Étape SIGEO : saisie d'adresse (address_manage) ---------- */
+// Automatise le formulaire d'adresse SIGEO (ASP.NET WebForms). Principe :
+// pilotage du DOM dans la page (remplissage + clic « Enreg. et fermer »), jamais
+// de POST forgé — le navigateur gère __VIEWSTATE/__EVENTVALIDATION lui-même.
+// Le point délicat est la résolution des ids internes (code commune
+// « Migrated_code », value du n° de voie) : on privilégie la cascade CP→ville de
+// la page puis son sélecteur de commune (iframe ou fenêtre séparée).
+
+// Noms (attributs name) des champs du formulaire — stables entre postbacks.
+const SIGEO_FIELDS = {
+  pays: "body:x:ddlPays:ddlPays",
+  cp: "body:x:city:x:Migrated_txtCP:x:CP",
+  ville: "body:x:city:x:Migrated_lVille:x:lVille",
+  migratedCode: "body:x:city:x:Migrated_code",
+  cityCountry: "body:x:city:x:country",
+  voie: "body:x:txtVoie:x:Voie",
+  idVoie: "body:x:idVoie",
+  numVoie: "body:x:ddlNum_voie:ddlNum_voie",
+  bp: "body:x:txtBoitePostale:x:Num",
+  complt: "body:x:txtComplt:x:Complt",
+  compNom: "body:x:txtCompNom:x:CompNom",
+  saveBtn: "proxyActionBar:x:_cmdEnd:x:_btn"
+};
+
+// Sonde une frame : formulaire adresse présent ? page de connexion ?
+function sigeoProbeInjected(cfg) {
+  const has = (n) => document.getElementsByName(n).length > 0;
+  const form = has(cfg.paysName) && has(cfg.btnName);
+  const login = !!document.querySelector('input[type="password"]') ||
+    /login|logon|connexion/i.test(location.pathname);
+  return { form, login };
+}
+
+// Cherche (avec attente) la frame qui contient le formulaire adresse.
+// Renvoie { frameId } | { auth: true } | { notFound: true }.
+async function sigeoProbe(tabId, timeoutMs) {
+  const deadline = Date.now() + Math.max(3000, timeoutMs || 15000);
+  let sawLogin = false;
+  while (Date.now() < deadline && !scnStopRequested) {
+    let results = [];
+    try {
+      results = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: sigeoProbeInjected,
+        args: [{ paysName: SIGEO_FIELDS.pays, btnName: SIGEO_FIELDS.saveBtn }]
+      });
+    } catch (_) { /* page en cours de navigation : on réessaie */ }
+    const hit = (results || []).find((r) => r && r.result && r.result.form);
+    if (hit) return { frameId: hit.frameId };
+    if ((results || []).some((r) => r && r.result && r.result.login)) sawLogin = true;
+    await scnSleep(400);
+  }
+  return sawLogin ? { auth: true } : { notFound: true };
+}
+
+// Remplit le formulaire (idempotent : ne touche que ce qui diffère) puis, hors
+// simulation, clique « Enreg. et fermer ». Autonome (sérialisée dans la page).
+async function sigeoFillInjected(cfg) {
+  const F = cfg.fields, V = cfg.values;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const byName = (n, doc = document) => (doc.getElementsByName(n)[0] || null);
+  const log = [];
+
+  // Tous les documents accessibles (frame courante + iframes same-origin),
+  // pour retrouver un éventuel sélecteur de commune ouvert en surimpression.
+  function allDocs() {
+    const docs = [];
+    (function walk(win) {
+      try { if (win.document) docs.push(win.document); } catch (_) { return; }
+      try { for (let i = 0; i < win.frames.length; i++) walk(win.frames[i]); } catch (_) {}
+    })(window);
+    return docs;
+  }
+  function isVisible(el) {
+    if (!el) return false;
+    try {
+      const cs = el.ownerDocument.defaultView.getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden") return false;
+      return el.getClientRects().length > 0;
+    } catch (_) { return false; }
+  }
+  const fire = (el, type) => el.dispatchEvent(new Event(type, { bubbles: true }));
+  function setInput(el, val) {
+    try { el.focus(); } catch (_) {}
+    el.value = val;
+    fire(el, "input");
+    fire(el, "change");
+    try { el.blur(); } catch (_) {}
+  }
+  const norm = (s) => String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toUpperCase().replace(/\s+/g, " ");
+  const optLabel = (sel) => (sel && sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex].text.trim() : "");
+
+  // — Références des champs. Un postback partiel (UpdatePanel) peut remplacer
+  // les nœuds : on re-requête avant chaque lecture/écriture sensible.
+  const el = {};
+  const refreshEls = () => { for (const k of Object.keys(F)) { const n = byName(F[k]); if (n) el[k] = n; } };
+  for (const k of Object.keys(F)) el[k] = byName(F[k]);
+  if (!el.pays || !el.saveBtn) return { found: false };
+
+  const codeOk = () => { refreshEls(); return el.migratedCode && String(el.migratedCode.value || "").trim() !== ""; };
+  const villeOk = () => { refreshEls(); return el.ville && norm(el.ville.value) === norm(V.ville); };
+
+  // — Idempotence : si tout est déjà à la valeur cible, ne pas resoumettre.
+  const optionalsMatch = () =>
+    (!V.bp || norm(el.bp && el.bp.value) === norm(V.bp)) &&
+    (!V.complt || norm(el.complt && el.complt.value) === norm(V.complt)) &&
+    (!V.compNom || norm(el.compNom && el.compNom.value) === norm(V.compNom));
+  const allMatch = () =>
+    norm(el.pays.value) === norm(V.pays) &&
+    norm(el.cp && el.cp.value) === norm(V.cp) &&
+    villeOk() && codeOk() &&
+    norm(el.voie && el.voie.value) === norm(V.voie) &&
+    (el.numVoie ? norm(optLabel(el.numVoie)) === norm(V.numVoie) : false) &&
+    optionalsMatch();
+  if (allMatch()) {
+    return {
+      found: true, status: "already",
+      resolvedIds: { migratedCode: el.migratedCode.value, idVoie: el.idVoie ? el.idVoie.value : "", numVoieValue: el.numVoie.value },
+      log: ["valeurs déjà identiques — pas de resoumission"]
+    };
+  }
+
+  // — 1. Pays (select par value, ISO2 minuscule)
+  if (norm(el.pays.value) !== norm(V.pays)) {
+    const opt = Array.from(el.pays.options).find((o) => norm(o.value) === norm(V.pays));
+    if (!opt) return { found: true, status: "validation_error", errors: [`pays « ${V.pays} » absent de la liste`], log };
+    el.pays.value = opt.value;
+    fire(el.pays, "change");
+    log.push(`pays = ${opt.value}`);
+    await sleep(300); // laisse le JS de la page réagir
+    refreshEls();
+  }
+
+  // — 2/3. Code postal + ville (le champ caché Migrated_code doit être cohérent)
+  let cityVia = "déjà résolu";
+  if (!(villeOk() && codeOk())) {
+    if (!el.cp || !el.ville) return { found: true, status: "validation_error", errors: ["champs CP/ville introuvables"], log };
+    if (norm(el.cp.value) !== norm(V.cp)) {
+      // Frappe façon autocomplétion « searchResult » : valeur + keyup, SANS blur
+      // (un blur risquerait un __doPostBack complet qui tuerait l'injection).
+      try { el.cp.focus(); } catch (_) {}
+      el.cp.value = V.cp;
+      fire(el.cp, "input");
+      el.cp.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: String(V.cp).slice(-1) || "Unidentified" }));
+      log.push(`CP = ${V.cp}`);
+    }
+    // 2a. suggestions d'autocomplétion (mécanisme « searchResult » du site) :
+    // elles arrivent dans select[name="searchResultSelect_{id}"] (ou
+    // #search:{id}) ; cliquer une <option> appelle setDataFieldValue, qui
+    // remplit la ville ET le code commune (Migrated_code) de façon cohérente.
+    const findSuggSelect = () => {
+      refreshEls();
+      const id = (el.cp && el.cp.id) || "";
+      if (!id) return null;
+      let sel = null;
+      try { sel = document.querySelector(`select[name="searchResultSelect_${CSS.escape(id)}"]`); } catch (_) {}
+      if (!sel) {
+        const cont = document.getElementById("search:" + id);
+        if (cont) sel = cont.querySelector("select");
+      }
+      return sel;
+    };
+    let until = Date.now() + 8000;
+    let suggPicked = false;
+    while (Date.now() < until && !(villeOk() && codeOk())) {
+      const sel = findSuggSelect();
+      if (sel && !suggPicked) {
+        const opts = Array.from(sel.options).filter((o) => (o.text || "").trim() !== "");
+        if (opts.length) {
+          const wantV = norm(V.ville), wantCp = String(V.cp).trim();
+          let best = null, bestScore = 0;
+          for (const o of opts) {
+            const t = norm(o.text);
+            let sc = 0;
+            if (t === wantV || t.endsWith("- " + wantV)) sc = 3;
+            else if (t.includes(wantV)) sc = 1;
+            if (wantCp && t.includes(wantCp)) sc += 1;
+            if (sc > bestScore) { bestScore = sc; best = o; }
+          }
+          if (best) {
+            best.selected = true;
+            for (const t of ["mousedown", "mouseup", "click"]) {
+              best.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+            }
+            suggPicked = true;
+            log.push("suggestion choisie : " + best.text.trim());
+            until = Date.now() + 4000; // laisse setDataFieldValue propager ville + code
+          }
+        }
+      }
+      await sleep(200);
+    }
+    if (villeOk() && codeOk()) cityVia = suggPicked ? "autocomplétion CP" : "cascade CP";
+    else if (cfg.forceDirect) {
+      if (!villeOk()) setInput(el.ville, V.ville);
+      cityVia = "saisie directe";
+    } else {
+      // 2b. sélection assistée : bouton du sélecteur de commune (« … »)
+      const looksCity = (node) => {
+        const s = ((node.getAttribute("onclick") || "") + " " + (node.getAttribute("href") || "") + " " +
+          (node.id || "") + " " + (node.title || "") + " " + (node.getAttribute("src") || "")).toLowerCase();
+        return s.includes("city_selector") || s.includes("city") || s.includes("commune");
+      };
+      let btn = Array.from(document.querySelectorAll("[onclick],a[href]"))
+        .find((n) => isVisible(n) && (((n.getAttribute("onclick") || "") + (n.getAttribute("href") || "")).toLowerCase().includes("city_selector")));
+      if (!btn) {
+        for (const ref of [el.ville, el.cp]) {
+          let node = ref;
+          for (let up = 0; up < 4 && node && !btn; up++) {
+            node = node.parentElement;
+            if (!node) break;
+            btn = Array.from(node.querySelectorAll("a,button,input[type=button],input[type=image],img"))
+              .find((n) => isVisible(n) && looksCity(n)) || null;
+          }
+          if (btn) break;
+        }
+      }
+      if (btn) {
+        // instantané avant clic : seules les lignes NOUVELLES seront candidates
+        const pre = new WeakSet();
+        allDocs().forEach((d) => d.querySelectorAll("tr,a").forEach((n) => pre.add(n)));
+        btn.click();
+        log.push("sélecteur de commune ouvert");
+        const wantVille = norm(V.ville), wantCp = String(V.cp).trim();
+        let clicked = false;
+        until = Date.now() + 3500;
+        while (Date.now() < until && !(villeOk() && codeOk()) && !clicked) {
+          for (const d of allDocs()) {
+            let best = null, bestScore = -1;
+            for (const tr of d.querySelectorAll("tr")) {
+              if (pre.has(tr) || !isVisible(tr)) continue;
+              const cells = Array.from(tr.cells || []).map((td) => norm(td.innerText));
+              if (!cells.some((c) => c === wantVille)) continue;
+              const score = 1 + (wantCp && cells.some((c) => c.includes(wantCp)) ? 1 : 0);
+              if (score > bestScore) { best = tr; bestScore = score; }
+            }
+            if (!best) {
+              const link = Array.from(d.querySelectorAll("a"))
+                .find((a) => !pre.has(a) && isVisible(a) && norm(a.innerText) === wantVille);
+              if (link) { link.click(); clicked = true; log.push("commune cliquée (lien)"); break; }
+            } else {
+              const link = best.querySelector("a");
+              (link || best).click();
+              if (!link) { try { best.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); } catch (_) {} }
+              clicked = true;
+              log.push("commune cliquée (ligne" + (bestScore > 1 ? " CP+ville" : "") + ")");
+              break;
+            }
+          }
+          if (!clicked) await sleep(200);
+        }
+        if (clicked) {
+          until = Date.now() + 4000;
+          while (Date.now() < until && !codeOk()) await sleep(150);
+          cityVia = "sélecteur (popup interne)";
+        } else if (!(villeOk() && codeOk())) {
+          // rien d'accessible dans la page : le sélecteur s'est sans doute ouvert
+          // dans une fenêtre séparée — la barre latérale prend le relais.
+          return { found: true, status: "city_popup", log };
+        }
+      } else {
+        if (!villeOk()) setInput(el.ville, V.ville);
+        cityVia = "saisie directe (aucun sélecteur trouvé)";
+      }
+    }
+    if (!codeOk()) {
+      return {
+        found: true, status: "validation_error",
+        errors: [`UNRESOLVED_CITY — code commune (Migrated_code) non résolu pour « ${V.ville} » (${V.cp}) via ${cityVia} : vérifier le couple CP/ville`],
+        log
+      };
+    }
+    if (!villeOk()) setInput(el.ville, V.ville);
+    log.push(`ville = ${el.ville.value} (code ${el.migratedCode.value}, via ${cityVia})`);
+  }
+
+  // — 4. Voie (idVoie laissé tel quel : géré par la page si référentiel)
+  refreshEls();
+  if (el.voie && norm(el.voie.value) !== norm(V.voie)) {
+    setInput(el.voie, V.voie);
+    log.push(`voie = ${V.voie}`);
+    await sleep(300);
+    refreshEls();
+  }
+
+  // — 5. Numéro de voie (select : match strict sur le libellé, value = id interne)
+  if (!el.numVoie) return { found: true, status: "validation_error", errors: ["liste « numéro de voie » introuvable"], log };
+  let numRes = null;
+  const untilNum = Date.now() + 4000; // la liste peut se recharger après la voie
+  while (Date.now() < untilNum && !numRes) {
+    refreshEls();
+    const want = norm(V.numVoie);
+    const opt = Array.from(el.numVoie.options).find((o) => norm(o.text) === want);
+    if (opt) {
+      if (el.numVoie.value !== opt.value) { el.numVoie.value = opt.value; fire(el.numVoie, "change"); }
+      numRes = { value: opt.value, label: opt.text.trim() };
+    } else await sleep(200);
+  }
+  if (!numRes) {
+    const avail = Array.from(el.numVoie.options).map((o) => o.text.trim()).filter(Boolean).slice(0, 12);
+    return {
+      found: true, status: "validation_error",
+      errors: [`NUM_VOIE_INTROUVABLE — libellé « ${V.numVoie} » absent de la liste${avail.length ? " (dispo : " + avail.join(", ") + "…)" : " (liste vide)"}`],
+      log
+    };
+  }
+  log.push(`n° voie = ${numRes.label} (value ${numRes.value})`);
+
+  // — 6. Champs optionnels (renseignés seulement s'ils sont fournis)
+  const optFields = [["bp", V.bp], ["complt", V.complt], ["compNom", V.compNom]];
+  for (const [k, v] of optFields) {
+    if (v && el[k] && norm(el[k].value) !== norm(v)) { setInput(el[k], v); log.push(`${k} = ${v}`); }
+  }
+
+  // — 7. Contrôles avant soumission
+  refreshEls();
+  const errors = [];
+  if (!String(el.pays.value || "").trim()) errors.push("pays vide");
+  if (!String(el.cp.value || "").trim()) errors.push("code postal vide");
+  if (norm(V.pays) === "FR" && !/^\d{5}$/.test(String(el.cp.value).trim())) errors.push(`CP incohérent pour la France : « ${el.cp.value} »`);
+  if (!String(el.ville.value || "").trim()) errors.push("ville vide");
+  if (!String(el.voie.value || "").trim()) errors.push("voie vide");
+  if (!String(el.numVoie.value || "").trim()) errors.push("numéro de voie non sélectionné");
+  // messages de validation déjà affichés ?
+  document.querySelectorAll('[id*="Validator"], [id*="ValidationSummary"], .validation-summary-errors, .field-validation-error').forEach((n) => {
+    if (!isVisible(n)) return;
+    const t = (n.innerText || "").trim();
+    if (t && t.length < 300 && !errors.includes(t)) errors.push(t);
+  });
+  const report = {
+    submittedValues: {
+      pays: el.pays.value, codePostal: el.cp.value, ville: el.ville.value,
+      voie: el.voie.value, numeroVoie: numRes.label,
+      boitePostale: el.bp ? el.bp.value : "", complement: el.complt ? el.complt.value : "",
+      complementNom: el.compNom ? el.compNom.value : ""
+    },
+    resolvedIds: {
+      migratedCode: el.migratedCode ? el.migratedCode.value : "",
+      idVoie: el.idVoie ? el.idVoie.value : "",
+      numVoieValue: numRes.value
+    },
+    cityVia, log
+  };
+  if (errors.length) return { found: true, status: "validation_error", errors, ...report };
+
+  // — 8. Simulation : tout est rempli et contrôlé, on n'enregistre pas.
+  if (cfg.dryRun) return { found: true, status: "dry_run_ok", ...report };
+
+  // — 9. Soumission : clic différé pour laisser le rapport repartir avant le postback.
+  const saveBtn = el.saveBtn;
+  setTimeout(() => { try { saveBtn.click(); } catch (_) {} }, 60);
+  return { found: true, status: "submitted", ...report };
+}
+
+// Dans la fenêtre séparée du sélecteur de commune : clique la bonne ligne.
+function sigeoCityPickInjected(cfg) {
+  return new Promise((resolve) => {
+    const norm = (s) => String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toUpperCase().replace(/\s+/g, " ");
+    const want = norm(cfg.ville), cp = String(cfg.cp || "").trim();
+    const deadline = Date.now() + Math.max(2000, cfg.timeoutMs || 8000);
+    (function poll() {
+      let best = null, bestScore = -1;
+      document.querySelectorAll("tr").forEach((tr) => {
+        const cells = Array.from(tr.cells || []).map((td) => norm(td.innerText));
+        if (!cells.some((c) => c === want)) return;
+        const score = 1 + (cp && cells.some((c) => c.includes(cp)) ? 1 : 0);
+        if (score > bestScore) { best = tr; bestScore = score; }
+      });
+      if (best) {
+        const link = best.querySelector("a");
+        (link || best).click();
+        if (!link) { try { best.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); } catch (_) {} }
+        return resolve({ ok: true });
+      }
+      const link = Array.from(document.querySelectorAll("a")).find((a) => norm(a.innerText) === want);
+      if (link) { link.click(); return resolve({ ok: true }); }
+      if (Date.now() >= deadline) return resolve({ ok: false, error: "commune introuvable dans le sélecteur : " + cfg.ville });
+      setTimeout(poll, 200);
+    })();
+  });
+}
+
+// Après postback : détecte succès / erreurs de validation dans chaque frame.
+function sigeoResultInjected(cfg) {
+  const F = cfg.fields;
+  const byName = (n) => (document.getElementsByName(n)[0] || null);
+  const login = !!document.querySelector('input[type="password"]') || /login|logon|connexion/i.test(location.pathname);
+  const form = !!byName(F.pays) && !!byName(F.saveBtn);
+  function isVisible(el) {
+    if (!el) return false;
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden") return false;
+    return el.getClientRects().length > 0;
+  }
+  const errors = [];
+  document.querySelectorAll('[id*="Validator"], [id*="ValidationSummary"], .validation-summary-errors, .field-validation-error, .error, span, div').forEach((el) => {
+    if (errors.length >= 5 || !isVisible(el) || el.children.length > 2) return;
+    const t = (el.innerText || "").trim();
+    if (!t || t.length > 300) return;
+    const idCls = (el.id + " " + el.className).toLowerCase();
+    let flagged = /valid|error|erreur/.test(idCls);
+    if (!flagged) {
+      const m = getComputedStyle(el).color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)/);
+      flagged = !!m && +m[1] > 150 && +m[2] < 100 && +m[3] < 100; // texte « rouge »
+    }
+    if (flagged && !errors.includes(t)) errors.push(t);
+  });
+  return {
+    login, form, errors,
+    values: form ? {
+      cp: byName(F.cp) ? byName(F.cp).value : "",
+      code: byName(F.migratedCode) ? byName(F.migratedCode).value : ""
+    } : null
+  };
+}
+
+// Attend la fin du postback ; détecte la fermeture de l'onglet (popup fermée).
+async function sigeoWaitPostback(tabId, timeoutMs) {
+  const deadline = Date.now() + Math.max(2000, timeoutMs || 15000);
+  await scnSleep(700); // laisse partir le POST
+  while (Date.now() < deadline && !scnStopRequested) {
+    let t;
+    try { t = await chrome.tabs.get(tabId); }
+    catch (_) { return { closed: true }; }
+    if (t.status === "complete") { await scnSleep(400); return { closed: false }; }
+    await scnSleep(250);
+  }
+  return { closed: false, timedOut: true };
+}
+
+// Le sélecteur de commune s'est ouvert dans une fenêtre séparée : on la
+// retrouve, on clique la commune, on attend la fermeture (propagation opener).
+async function sigeoHandleCityPopup(tabId, vals, timeoutMs) {
+  const deadline = Date.now() + 3000;
+  let popup = null;
+  while (Date.now() < deadline && !popup && !scnStopRequested) {
+    const tabs = await chrome.tabs.query({});
+    popup = tabs.find((t) => t.id !== tabId && /city|commune/i.test(t.url || "")) ||
+      tabs.find((t) => t.id !== tabId && /popup\.aspx/i.test(t.url || "") && !/address_manage/i.test(t.url || ""));
+    if (!popup) await scnSleep(300);
+  }
+  if (!popup) return false;
+  let res = null;
+  try {
+    const r = await chrome.scripting.executeScript({
+      target: { tabId: popup.id },
+      func: sigeoCityPickInjected,
+      args: [{ ville: vals.ville, cp: vals.cp, timeoutMs: Math.min(8000, timeoutMs || 8000) }]
+    });
+    res = r && r[0] && r[0].result;
+  } catch (_) { return false; }
+  if (!res || !res.ok) return false;
+  const closeDeadline = Date.now() + 6000;
+  while (Date.now() < closeDeadline && !scnStopRequested) {
+    try { await chrome.tabs.get(popup.id); } catch (_) { return true; } // fermée
+    await scnSleep(250);
+  }
+  return true; // sélection cliquée ; la reprise vérifiera la propagation
+}
+
+// Écrit le résultat de l'étape dans la colonne configurée (créée si besoin).
+function sigeoWriteResult(step, rowIdx, text) {
+  const ref = (step.sigeoResultCol || "").trim();
+  if (!ref || rowIdx === null || rowIdx === undefined || !state.rows.length) return;
+  const row = state.rows[rowIdx] = state.rows[rowIdx] || [];
+  const existed = colIndexByName(ref) >= 0;
+  const idx = resolveOutputTarget(ref, {});
+  if (idx < 0) return;
+  setCellByIndex(row, idx, text);
+  persistSession();
+  if (existed) { renderPreview(); renderSelectedRowFields(); }
+  else renderColumns();
+}
+
+// Orchestrateur de l'étape « SIGEO : saisir une adresse ».
+async function execSigeoStep(step, rowIdx, tabId) {
+  const t0 = Date.now();
+  const row = (rowIdx !== null && rowIdx !== undefined) ? (state.rows[rowIdx] || []) : null;
+  const rt = (v) => String(resolveRowTemplate(v ?? "", row) ?? "").trim();
+  const timeoutMs = step.sigeoTimeout || 15000;
+  const vals = {
+    addressId: rt(step.sigeoAddressId),
+    table: rt(step.sigeoTable),
+    pays: (rt(step.sigeoPays) || "fr").toLowerCase(),
+    cp: rt(step.sigeoCp),
+    ville: rt(step.sigeoVille),
+    voie: rt(step.sigeoVoie),
+    numVoie: rt(step.sigeoNumVoie),
+    bp: rt(step.sigeoBp),
+    complt: rt(step.sigeoComplt),
+    compNom: rt(step.sigeoCompNom)
+  };
+  const dur = () => ` — ${((Date.now() - t0) / 1000).toFixed(1)} s`;
+  const fail = (msg) => { sigeoWriteResult(step, rowIdx, "ERREUR — " + msg); return { ok: false, error: msg + dur() }; };
+
+  // — Contrôles d'entrée
+  const missing = [];
+  if (step.sigeoNav !== false && !vals.addressId) missing.push("ID adresse");
+  if (step.sigeoNav !== false && !vals.table) missing.push("table");
+  if (!vals.cp) missing.push("code postal");
+  if (!vals.ville) missing.push("ville");
+  if (!vals.voie) missing.push("voie");
+  if (!vals.numVoie) missing.push("n° de voie");
+  if (missing.length) return fail("champ(s) requis vide(s) : " + missing.join(", "));
+  if (vals.pays === "fr" && !/^\d{5}$/.test(vals.cp)) return fail(`CP invalide pour la France : « ${vals.cp} »`);
+
+  // — Navigation vers la fiche adresse (chargement frais → ViewState neuf)
+  if (step.sigeoNav !== false) {
+    const base = (rt(step.sigeoBaseUrl) || "http://sigeo.veille.evoriel.net").replace(/\/+$/, "");
+    const url = `${base}/popup.aspx/fr/sig/address_manage/${encodeURIComponent(vals.addressId)}` +
+      `?table=${encodeURIComponent(vals.table)}&adrTypeId=atype&deletable=true&atypeCode=PRI`;
+    const nav = await navigateTabAndWait(tabId, url, true, timeoutMs);
+    if (!nav.ok) return fail("navigation : " + nav.error);
+  }
+
+  // — Remplissage (avec reprise : popup de commune, frame rechargée…)
+  let rep = null;
+  let forceDirect = false;
+  let popupTried = false;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    if (scnStopRequested) return fail("arrêté par l'utilisateur");
+    const probe = await sigeoProbe(tabId, timeoutMs);
+    if (probe.auth) return fail("AUTH_REQUIRED — page de connexion détectée (session SIGEO expirée ?)");
+    if (probe.notFound) return fail("formulaire adresse introuvable (page inattendue ?)");
+    let results = null;
+    try {
+      results = await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [probe.frameId] },
+        func: sigeoFillInjected,
+        args: [{ fields: SIGEO_FIELDS, values: vals, dryRun: step.sigeoDryRun !== false, forceDirect, timeoutMs }]
+      });
+    } catch (e) {
+      if (attempt === 4) return fail("injection impossible : " + (e.message || e));
+      await scnSleep(800);
+      continue; // la frame a probablement rechargé (autopostback) : on reprend
+    }
+    rep = results && results[0] && results[0].result;
+    if (!rep || !rep.found) { await scnSleep(800); continue; }
+    if (rep.status === "city_popup") {
+      if (popupTried) forceDirect = true; // deuxième ouverture : on n'insiste pas
+      else {
+        popupTried = true;
+        const handled = await sigeoHandleCityPopup(tabId, vals, timeoutMs);
+        if (handled) await scnSleep(400); // propagation des hidden fields via opener
+        else forceDirect = true;          // pas de popup accessible → repli saisie directe
+      }
+      rep = null;
+      continue; // reprise idempotente du remplissage
+    }
+    break;
+  }
+  if (!rep || !rep.found) return fail("le remplissage n'a pas abouti (page instable ?)");
+
+  const ids = rep.resolvedIds || {};
+  const idsTxt = `commune ${ids.migratedCode || "?"}, n° voie value=${ids.numVoieValue || "?"}`;
+
+  // — Issues sans soumission
+  if (rep.status === "validation_error") {
+    return fail("contrôle avant soumission : " + (rep.errors || ["erreur inconnue"]).join(" | "));
+  }
+  if (rep.status === "already") {
+    sigeoWriteResult(step, rowIdx, "OK — déjà à jour (" + idsTxt + ")");
+    return { ok: true, info: "déjà à jour, non resoumis (" + idsTxt + ")" + dur() };
+  }
+  if (rep.status === "dry_run_ok") {
+    sigeoWriteResult(step, rowIdx, "SIMULATION OK — " + idsTxt + " (via " + (rep.cityVia || "?") + ")");
+    return { ok: true, info: `simulation OK (non enregistré) — ${idsTxt}, ville via ${rep.cityVia || "?"}` + dur() };
+  }
+  if (rep.status !== "submitted") return fail("état inattendu : " + rep.status);
+
+  // — Postback : on laisse le navigateur soumettre, puis on lit le résultat.
+  const pb = await sigeoWaitPostback(tabId, timeoutMs);
+  if (pb.closed) {
+    sigeoWriteResult(step, rowIdx, "OK — enregistré (popup fermée) — " + idsTxt);
+    return { ok: true, info: "enregistré — la popup s'est fermée (" + idsTxt + ")" + dur() };
+  }
+  let results = null;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: sigeoResultInjected,
+      args: [{ fields: SIGEO_FIELDS }]
+    });
+  } catch (e) {
+    sigeoWriteResult(step, rowIdx, "INCERTAIN — soumis, résultat illisible");
+    return { ok: true, warn: true, info: "soumis, mais résultat illisible (" + (e.message || e) + ")" + dur() };
+  }
+  const frames = (results || []).map((r) => r && r.result).filter(Boolean);
+  if (frames.some((f) => f.login)) return fail("AUTH_REQUIRED — session perdue pendant l'enregistrement");
+  const errs = [...new Set(frames.flatMap((f) => f.errors || []))];
+  if (errs.length) return fail("VALIDATION — " + errs.join(" | "));
+  const formFrame = frames.find((f) => f.form);
+  sigeoWriteResult(step, rowIdx, "OK — enregistré — " + idsTxt);
+  if (formFrame) {
+    return { ok: true, warn: true, info: "enregistré (aucune erreur détectée, formulaire toujours affiché) — " + idsTxt + dur() };
+  }
+  return { ok: true, info: "enregistré — " + idsTxt + dur() };
+}
+
 /* ---------- Moteur d'exécution ---------- */
 
 function scnTrunc(s, n = 45) {
@@ -3254,6 +3915,8 @@ function scnStepLabel(s) {
       return `PDF : vérifier « ${tbFieldLabel(s.pdfField)} »`;
     case "pdfwrite":
       return `PDF : « ${tbFieldLabel(s.pdfField)} » → ${s.pdfTargetCol === "__other__" ? (s.pdfNewCol || "?") : (s.pdfTargetCol || "?")}`;
+    case "sigeo":
+      return `SIGEO : adresse ${scnTrunc(s.sigeoAddressId || "?", 20)}${s.sigeoDryRun !== false ? " (simulation)" : ""}`;
   }
   return s.type;
 }
@@ -3387,6 +4050,7 @@ async function execScenarioStep(step, rowIdx, tabId) {
           warn: !val
         };
       }
+      case "sigeo": return await execSigeoStep(step, rowIdx, tabId);
     }
     return { ok: false, error: "type d'étape inconnu" };
   } catch (e) {
@@ -3426,7 +4090,10 @@ function scenarioNeedsRow(steps) {
     (s.type === "goto" && /\{[^{}]+\}/.test(s.gotoUrl || "")) ||
     (s.type === "pdfwrite") ||
     (s.type === "pdfcheck" && (/\{[^{}]+\}/.test(s.pdfVal || "") ||
-      (s.pdfDocMode === "match" && /\{[^{}]+\}/.test(s.pdfDocMatch || ""))))
+      (s.pdfDocMode === "match" && /\{[^{}]+\}/.test(s.pdfDocMatch || "")))) ||
+    (s.type === "sigeo" && ([s.sigeoAddressId, s.sigeoTable, s.sigeoPays, s.sigeoCp, s.sigeoVille,
+      s.sigeoVoie, s.sigeoNumVoie, s.sigeoBp, s.sigeoComplt, s.sigeoCompNom]
+      .some((v) => /\{[^{}]+\}/.test(v || "")) || !!s.sigeoResultCol))
   );
 }
 
