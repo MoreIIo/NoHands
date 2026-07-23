@@ -4295,19 +4295,34 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
           if (scnStopRequested) return { ok: true, stop: true, info: `arrêté après ${rounds} lot(s)` };
 
           // Coche la tranche suivante et décoche tout le reste.
-          const sel = await sendMessageToTab(tabId, {
-            action: "batchSelectSlice",
-            config: {
-              scopeSelector: step.batchScope,
-              matchFilter: step.batchFilter,
-              offset,
-              count: size
-            }
-          });
+          // Après le clic « Éditer » du lot précédent, la page fait un
+          // postback (ASP.NET) qui reconstruit le tableau des cases : à cet
+          // instant il est momentanément détaché du DOM et resolveBatchScope
+          // renvoie null. La structure ne change pas — le tableau réapparaît —,
+          // il suffit donc de ré-interroger la page plutôt que d'abandonner.
+          // 1er lot : page déjà chargée, pas d'attente. Lots suivants : on
+          // patiente le temps que le rechargement partiel se termine.
+          const scopeAttempts = rounds === 0 ? 1 : 12; // 12 × 300 ms ≈ 3,6 s
+          let sel = null;
+          for (let attempt = 0; attempt < scopeAttempts; attempt++) {
+            sel = await sendMessageToTab(tabId, {
+              action: "batchSelectSlice",
+              config: {
+                scopeSelector: step.batchScope,
+                matchFilter: step.batchFilter,
+                offset,
+                count: size
+              }
+            });
 
-          if (!sel) return { ok: false, error: "pas de réponse de la page" };
-          if (!sel.success) return { ok: false, error: sel.error || "sélection impossible" };
-          if (sel.scopeFound === false) return { ok: false, error: "tableau des cases introuvable" };
+            if (!sel) return { ok: false, error: "pas de réponse de la page" };
+            if (!sel.success) return { ok: false, error: sel.error || "sélection impossible" };
+            if (sel.scopeFound !== false) break; // tableau retrouvé
+            if (attempt < scopeAttempts - 1) await scnSleep(300);
+          }
+          if (sel.scopeFound === false) {
+            return { ok: false, error: "tableau des cases introuvable après attente du rechargement de la page" };
+          }
 
           if (total === null) {
             total = sel.total;
