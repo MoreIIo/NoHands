@@ -84,6 +84,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       .then((report) => sendResponse({ success: true, ...report }))
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true; // réponse asynchrone
+  } else if (request.action === 'scanDataTable') {
+    // Détection + extraction d'une table de données SIGEO (liste de cases
+    // à cocher) : attend la table (rechargement asynchrone possible), puis
+    // renvoie les lignes { checked, label, hiddenValue } + le diagnostic.
+    scanSigeoDataTable(request.config || {})
+      .then((report) => sendResponse({ success: report.ok, ...report }))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true; // réponse asynchrone
   }
   return true;
 });
@@ -967,6 +975,76 @@ function resolveBatchScope(rawScope) {
   return null;
 }
 
+// Détecte l'écran de blocage « Chargement en cours… » (UpdateProgress
+// ASP.NET) affiché pendant un postback. Renvoie le texte de l'overlay
+// visible, ou '' s'il n'y en a pas.
+//   deep = false : ne teste que les conteneurs classiques (rapide, appelé
+//                  à chaque tranche) ;
+//   deep = true  : balaie aussi div/span/p/td (plus lent, réservé au
+//                  diagnostic quand la sélection a échoué).
+function detectLoadingOverlay(deep) {
+  const re = /chargement\s+en\s+cours/i;
+  const known = document.querySelectorAll(
+    '[id*="Progress" i],[id*="progress"],.modalPopup,.blockUI,.ajax__updateprogress,[class*="chargement" i],[class*="loading" i]'
+  );
+  for (const el of known) {
+    if (isElementVisible(el) && re.test(el.textContent || '')) {
+      return String(el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    }
+  }
+  if (!deep) return '';
+  // Repli : le message peut vivre dans un conteneur quelconque. On ne garde
+  // que les noeuds proches du texte (peu d'enfants) pour éviter de remonter
+  // sur <body>.
+  const tags = document.querySelectorAll('div,span,p,td,th');
+  for (const el of tags) {
+    if (el.children.length > 3) continue;
+    if (re.test(el.textContent || '') && isElementVisible(el)) {
+      return String(el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    }
+  }
+  return '';
+}
+
+// Diagnostic du périmètre quand la tranche n'a pas pu être sélectionnée :
+// dit si l'élément de périmètre existe, s'il est visible, combien de cases
+// il contient, et combien il y en a sur la page entière.
+function batchScopeDiag(rawScope) {
+  const key = String(rawScope ?? '').trim();
+  const d = {
+    scope: key || '(toute la page)',
+    scopeInDom: false,
+    scopeVisible: false,
+    checkboxesInScope: 0,
+    checkboxesOnPage: document.querySelectorAll('input[type="checkbox"]').length,
+    url: location.href,
+    title: document.title
+  };
+  if (!key) {
+    d.scopeInDom = true;
+    d.scopeVisible = true;
+    d.checkboxesInScope = d.checkboxesOnPage;
+    return d;
+  }
+  let el = document.getElementById(key);
+  if (!el && /[#.\[\]>\s,:]/.test(key)) {
+    try { el = document.querySelector(key); } catch (_) { /* sélecteur invalide */ }
+  }
+  if (!el) {
+    try {
+      const esc = CSS.escape(key);
+      el = document.querySelector(`[id$="${esc}"],[name$="${esc}"]`);
+    } catch (_) { /* ignoré */ }
+  }
+  if (el) {
+    d.scopeInDom = true;
+    d.scopeVisible = isElementVisible(el);
+    d.checkboxesInScope = el.querySelectorAll
+      ? el.querySelectorAll('input[type="checkbox"]').length : 0;
+  }
+  return d;
+}
+
 // Le hidden miroir d'une case (hdn + id) ne doit jamais être traité
 // comme une cible à part entière : il est piloté par sa case.
 function isBatchMirrorHidden(el) {
@@ -1142,11 +1220,45 @@ function resolveBatchKey(key) {
  *           remaining, labels }.
  */
 async function runSelectSlice(config) {
-  const { scopeFound, targets } = collectBatchTargets({
+  // La zone de données peut être rechargée en asynchrone (bouton
+  // « Réactualiser la liste des clés de répartition ») : on ATTEND que la
+  // table cible existe et soit peuplée avant de compter quoi que ce soit,
+  // sinon la tranche serait calculée sur un DOM vide et l'étape
+  // « passerait » silencieusement. Le scopeSelector sert d'indice de cible
+  // s'il ressemble à un id simple (pas un sélecteur CSS composé).
+  const waited = await waitForSigeoTable({
+    tableId: /^[\w-]+$/.test(String(config.scopeSelector || '').trim())
+      ? String(config.scopeSelector).trim() : '',
+    minRows: config.minRows,
+    timeoutMs: config.waitTimeoutMs,
+    pollMs: config.pollMs
+  });
+
+  let { scopeFound, targets } = collectBatchTargets({
     scopeSelector: config.scopeSelector,
     matchFilter: config.matchFilter,
     elementType: 'checkbox'
   });
+
+  // Périmètre explicite introuvable (ou sans case) mais table de données
+  // auto-détectée par son id body_x_… : on se replie dessus. Couvre le cas
+  // où le nom de page change (PfeuillePresenceChoixCle → autre écran) alors
+  // que le scénario contient encore l'ancien id complet.
+  let usedScope = String(config.scopeSelector || '').trim() || '(toute la page)';
+  if ((!scopeFound || !targets.length) && waited.table) {
+    const fallback = collectBatchTargets({
+      scopeSelector: waited.table.id,
+      matchFilter: config.matchFilter,
+      elementType: 'checkbox'
+    });
+    if (fallback.scopeFound && fallback.targets.length) {
+      scopeFound = fallback.scopeFound;
+      targets = fallback.targets;
+      usedScope = '#' + waited.table.id + ' (auto-détectée)';
+      console.log(OSA_SCAN_TAG + ' périmètre « ' + (config.scopeSelector || '(vide)') +
+        ' » sans case exploitable — repli sur #' + waited.table.id);
+    }
+  }
 
   const total = targets.length;
   const offset = Math.max(0, parseInt(config.offset, 10) || 0);
@@ -1163,6 +1275,27 @@ async function runSelectSlice(config) {
     remaining: Math.max(0, total - offset),
     labels: []
   };
+
+  // Détection de l'overlay de chargement : recherche rapide à chaque appel,
+  // recherche approfondie seulement si la sélection a échoué (diagnostic).
+  report.overlay = detectLoadingOverlay(!scopeFound || !total) || waited.overlay || '';
+  if (!scopeFound) report.diag = batchScopeDiag(config.scopeSelector);
+
+  // Diagnostic de détection : combien de tables candidates, laquelle est
+  // retenue, sur quel périmètre on a compté, et combien de temps on a
+  // attendu le rechargement. Visible dans la console de la page.
+  report.scan = {
+    candidates: waited.diag ? waited.diag.candidates : 0,
+    pickedId: waited.diag ? waited.diag.pickedId : null,
+    rejected: waited.diag ? waited.diag.rejected : [],
+    scope: usedScope,
+    waitedMs: waited.waitedMs,
+    timedOut: waited.timedOut
+  };
+  console.log(OSA_SCAN_TAG + ' lot : ' + report.scan.candidates + ' table(s) candidate(s), retenue : ' +
+    (report.scan.pickedId ? '#' + report.scan.pickedId : 'aucune') + ', périmètre : ' + usedScope +
+    ', cases : ' + total + ', attente : ' + waited.waitedMs + ' ms' +
+    (waited.timedOut ? ' (TIMEOUT)' : ''));
 
   if (!scopeFound || !total || offset >= total) return report;
 
@@ -1193,6 +1326,287 @@ async function runSelectSlice(config) {
   report.to = offset + report.selected;
   report.remaining = Math.max(0, total - report.to);
   return report;
+}
+
+/* ====================================================================
+ * Détection fiable des tables de données SIGEO / Evoriel
+ * --------------------------------------------------------------------
+ * Ces pages (ASP.NET WebForms « maison », sans jQuery/React) contiennent
+ * ~66 <table> dont la quasi-totalité sont des tables de MISE EN PAGE :
+ * menus masqués (content_ivmenu00_menu_*_table, largeur/hauteur nulles)
+ * et conteneurs à cellule unique. Aucune n'a de <thead>, de <th>, ni de
+ * role="grid" : une détection générique « table avec en-têtes » ne
+ * trouve rien — ou retient une table de layout — et l'étape « passe ».
+ *
+ * La seule signature fiable est l'id serveur, stable et normé :
+ *   body_x_<NomPage>_x_tab<Nom>  (ex : body_x_PfeuillePresenceChoixCle_x_tabCleRepart)
+ *   body_x_<NomPage>_x_f<Nom>
+ * <NomPage> change à chaque écran ; le préfixe body_x_ et le motif
+ * _x_tab / _x_f restent. On détecte donc PAR ID, puis on filtre par
+ * pertinence (visibilité, nombre de cellules, contenu exploitable).
+ *
+ * La zone de données peut être rechargée en asynchrone (bouton
+ * « Réactualiser la liste des clés de répartition ») : au moment du
+ * scan, la table peut être absente ou vide. waitForSigeoTable() attend
+ * donc — MutationObserver + re-test périodique — qu'une table
+ * pertinente d'au moins minRows lignes soit là avant toute lecture.
+ * ==================================================================== */
+
+const OSA_SCAN_TAG = 'NoHands OSA [scan]';
+
+// Motif exact d'un id de table de données : body_x_…_x_tab<Nom> ou _x_f<Nom>.
+// Les sélecteurs CSS servent de filet large ; cette regex resserre (elle
+// écarte p. ex. un id qui contiendrait « tab » par accident).
+const SIGEO_TABLE_ID_RE = /^body_x_.+_x_(?:tab|f)[A-Za-z0-9_]/;
+
+/**
+ * Toutes les tables candidates de la page, ciblées PAR ID — jamais par
+ * <thead>/<th>/role, inexistants sur ces écrans.
+ */
+function findSigeoTableCandidates() {
+  const nodes = document.querySelectorAll(
+    'table[id^="body_x_"][id*="tab"], table[id^="body_x_"][id*="_f"]'
+  );
+  return Array.from(nodes).filter((t) => SIGEO_TABLE_ID_RE.test(t.id));
+}
+
+/**
+ * Juge la pertinence d'une table candidate.
+ * Renvoie { ok, reason, rows, cells, inputs } ; reason explique le rejet
+ * (repris tel quel dans les logs de diagnostic).
+ */
+function assessSigeoTable(table, minRows) {
+  // Menus masqués (content_ivmenu*) et zones repliées : aucune boîte de rendu.
+  if (table.offsetWidth === 0 || table.offsetHeight === 0) {
+    return { ok: false, reason: 'invisible (largeur ou hauteur nulle)' };
+  }
+  const rows = table.rows ? table.rows.length : 0;
+  const cells = table.querySelectorAll('td, th').length;
+  // Pur layout : une seule cellule dans toute la table.
+  if (cells <= 1) {
+    return { ok: false, reason: 'une seule cellule (mise en page)', rows, cells };
+  }
+  // Rien d'exploitable : ni texte ni champ de saisie.
+  const inputs = table.querySelectorAll('input, select, textarea').length;
+  const text = (table.innerText || table.textContent || '').trim();
+  if (!text && !inputs) {
+    return { ok: false, reason: 'ni texte ni champ exploitable', rows, cells };
+  }
+  // Trop peu de lignes : zone probablement en cours de rechargement.
+  if (rows < minRows) {
+    return { ok: false, reason: rows + ' ligne(s) < ' + minRows + ' attendue(s)', rows, cells };
+  }
+  return { ok: true, rows, cells, inputs };
+}
+
+/**
+ * Une passe de détection : renvoie { table, diag }.
+ * config = { tableId?: id exact ou fragment (ex « tabCleRepart »), minRows? }
+ * diag = { candidates, candidateIds, rejected[], kept[], pickedId, pickedWhy }
+ */
+function pickSigeoTable(config) {
+  const mr = parseInt(config.minRows, 10);
+  const minRows = Number.isFinite(mr) && mr > 0 ? mr : 1;
+  const wanted = String(config.tableId || '').trim();
+
+  const candidates = findSigeoTableCandidates();
+  // Un id complet a pu être fourni sans suivre le motif : on l'ajoute au filet.
+  if (wanted) {
+    const el = document.getElementById(wanted);
+    if (el && el.tagName === 'TABLE' && candidates.indexOf(el) === -1) candidates.unshift(el);
+  }
+
+  const diag = {
+    candidates: candidates.length,
+    candidateIds: candidates.map((t) => t.id),
+    rejected: [],
+    kept: [],
+    pickedId: null,
+    pickedWhy: ''
+  };
+
+  const relevant = [];
+  for (const t of candidates) {
+    const a = assessSigeoTable(t, minRows);
+    if (a.ok) {
+      relevant.push({ table: t, rows: a.rows, inputs: a.inputs });
+      diag.kept.push(t.id + ' (' + a.rows + ' lignes, ' + a.inputs + ' champs)');
+    } else {
+      diag.rejected.push(t.id + ' : ' + a.reason);
+    }
+  }
+  if (!relevant.length) return { table: null, diag };
+
+  let pick = null;
+  if (wanted) {
+    pick = relevant.find((r) => r.table.id === wanted)
+        || relevant.find((r) => r.table.id.indexOf(wanted) !== -1);
+    if (pick) diag.pickedWhy = 'correspond à « ' + wanted + ' »';
+  }
+  if (!pick) {
+    // Sans cible nommée (ou introuvable) : la table la plus « dense ».
+    pick = relevant.reduce((best, r) =>
+      (r.rows + r.inputs > best.rows + best.inputs ? r : best));
+    diag.pickedWhy = wanted
+      ? '« ' + wanted + ' » introuvable — repli sur la plus dense'
+      : 'table la plus dense (lignes + champs)';
+  }
+  diag.pickedId = pick.table.id;
+  return { table: pick.table, diag };
+}
+
+/**
+ * Attend qu'une table de données pertinente soit disponible.
+ * MutationObserver pour réagir dès que le DOM bouge, PLUS un re-test
+ * périodique de sécurité : les postbacks partiels ASP.NET remplacent des
+ * sous-arbres entiers et certains changements (display, valeurs) passent
+ * entre les mailles de l'observer. Refuse de conclure tant que l'overlay
+ * « Chargement en cours… » est affiché (la table présente serait
+ * l'ancienne version, sur le point d'être remplacée).
+ * config = { tableId?, minRows?, timeoutMs? (défaut 10000), pollMs? (défaut 300) }
+ * Résout TOUJOURS (jamais de rejet) :
+ *   { table|null, diag, overlay, timedOut, waitedMs }
+ */
+function waitForSigeoTable(config) {
+  const to = parseInt(config.timeoutMs, 10);
+  const timeoutMs = Number.isFinite(to) && to >= 0 ? to : 10000;
+  const pollMs = Math.max(100, parseInt(config.pollMs, 10) || 300);
+  const started = Date.now();
+
+  return new Promise((resolve) => {
+    let observer = null;
+    let pollTimer = null;
+    let killTimer = null;
+    let lastTry = 0;
+    let done = false;
+
+    const finish = (table, diag, overlay, timedOut) => {
+      if (done) return;
+      done = true;
+      if (observer) observer.disconnect();
+      clearInterval(pollTimer);
+      clearTimeout(killTimer);
+      resolve({
+        table,
+        diag,
+        overlay: overlay || '',
+        timedOut: !!timedOut,
+        waitedMs: Date.now() - started
+      });
+    };
+
+    const attempt = (isLast) => {
+      if (done) return true;
+      const overlay = detectLoadingOverlay(false);
+      const { table, diag } = pickSigeoTable(config);
+      if (table && !overlay) { finish(table, diag, '', false); return true; }
+      if (isLast) { finish(table, diag, overlay, true); return true; }
+      return false;
+    };
+
+    if (attempt(timeoutMs === 0)) return; // déjà prêt : aucun délai ajouté
+
+    observer = new MutationObserver(() => {
+      // Anti-rafale : un postback déclenche des salves de mutations.
+      const now = Date.now();
+      if (now - lastTry < 100) return;
+      lastTry = now;
+      attempt(false);
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    pollTimer = setInterval(() => attempt(false), pollMs);
+    killTimer = setTimeout(() => attempt(true), timeoutMs);
+  });
+}
+
+/**
+ * Extraction adaptée au format « liste de cases à cocher » (cf.
+ * tabCleRepart : chaque ligne = une cellule unique contenant
+ * INPUT[checkbox] + LABEL + INPUT[hidden]). Pour chaque ligne : l'état de
+ * la case, le libellé du <label>, et la valeur du hidden associé — c'est
+ * LUI qui est réellement posté au serveur (cf. syncMirrorHidden).
+ * Les lignes sans case (séparateurs éventuels) sont comptées à part.
+ */
+function extractSigeoChecklist(table) {
+  const rows = [];
+  let skipped = 0;
+  Array.from(table.rows || []).forEach((tr, index) => {
+    const cb = tr.querySelector('input[type="checkbox"]');
+    if (!cb) { skipped++; return; }
+
+    // Hidden associé : d'abord le miroir hdn<id> (posté au serveur),
+    // sinon le premier hidden de la même cellule/ligne.
+    let hidden = cb.id ? document.getElementById('hdn' + cb.id) : null;
+    if (!hidden) {
+      const cell = cb.closest('td') || tr;
+      hidden = cell.querySelector('input[type="hidden"]');
+    }
+
+    rows.push({
+      index,                                  // n° de ligne dans la table
+      id: cb.id || cb.name || '',             // clé stable de re-résolution
+      checked: !!cb.checked,
+      label: batchTargetLabel(cb),            // <label for> sinon texte de cellule/ligne
+      hiddenId: hidden ? (hidden.id || hidden.name || '') : '',
+      hiddenValue: hidden ? hidden.value : null
+    });
+  });
+  return { rows, skipped };
+}
+
+/**
+ * Point d'entrée de l'action « scanDataTable » : attend la table de
+ * données, extrait la liste de cases, journalise le diagnostic complet
+ * dans la console de la page.
+ * config = { tableId?, minRows?, timeoutMs?, pollMs? }
+ * Renvoie { ok, tableId, rowCount, rows, skippedRows, waitedMs, overlay, diag }.
+ */
+async function scanSigeoDataTable(config) {
+  const waited = await waitForSigeoTable(config || {});
+  const diag = waited.diag ||
+    { candidates: 0, candidateIds: [], rejected: [], kept: [], pickedId: null, pickedWhy: '' };
+
+  // ---- Logs de diagnostic (console de la page, filtre « OSA ») ----
+  console.log(OSA_SCAN_TAG + ' tables candidates : ' + diag.candidates, diag.candidateIds);
+  diag.rejected.forEach((r) => console.log(OSA_SCAN_TAG + ' rejetée — ' + r));
+  diag.kept.forEach((k) => console.log(OSA_SCAN_TAG + ' pertinente — ' + k));
+  if (waited.table) {
+    console.log(OSA_SCAN_TAG + ' retenue : #' + diag.pickedId + ' (' + diag.pickedWhy +
+      ') après ' + waited.waitedMs + ' ms');
+  } else {
+    console.warn(OSA_SCAN_TAG + ' AUCUNE table retenue après ' + waited.waitedMs + ' ms' +
+      (waited.overlay ? ' — overlay encore affiché : « ' + waited.overlay + ' »' : ''));
+  }
+
+  if (!waited.table) {
+    return {
+      ok: false,
+      error: 'aucune table de données pertinente' +
+        (waited.timedOut ? ' après ' + waited.waitedMs + ' ms d\'attente' : ''),
+      tableId: null,
+      rowCount: 0,
+      rows: [],
+      skippedRows: 0,
+      waitedMs: waited.waitedMs,
+      overlay: waited.overlay,
+      diag
+    };
+  }
+
+  const extracted = extractSigeoChecklist(waited.table);
+  console.log(OSA_SCAN_TAG + ' extraction : ' + extracted.rows.length +
+    ' ligne(s) à case, ' + extracted.skipped + ' sans case');
+
+  return {
+    ok: true,
+    tableId: waited.table.id,
+    rowCount: extracted.rows.length,
+    rows: extracted.rows,
+    skippedRows: extracted.skipped,
+    waitedMs: waited.waitedMs,
+    overlay: waited.overlay,
+    diag
+  };
 }
 
 /**

@@ -4126,6 +4126,29 @@ function watchNextDownload(mode, timeoutMs) {
   return promise;
 }
 
+// Construit un message d'erreur détaillé quand la tranche de cases n'a pas
+// pu être sélectionnée (étape « Éditer par lots »). S'appuie sur les champs
+// de diagnostic renvoyés par le content script (overlay, diag) pour pointer
+// la cause réelle plutôt qu'un « tableau introuvable » opaque.
+function batchScopeErrorMsg(sel) {
+  const parts = ["tableau des cases introuvable après le rechargement de la page"];
+  if (sel && sel.overlay) {
+    parts.push(`l'écran « ${sel.overlay} » est encore affiché — le rechargement n'a pas fini (essayez d'augmenter le nombre de lots max / le délai, ou vérifiez la connexion)`);
+  }
+  const d = sel && sel.diag;
+  if (d) {
+    if (!d.scopeInDom) {
+      parts.push(`le périmètre « ${d.scope} » n'existe pas sur la page (${d.checkboxesOnPage} case(s) à cocher au total) — vérifiez le sélecteur du tableau`);
+    } else if (!d.scopeVisible) {
+      parts.push(`le périmètre « ${d.scope} » existe mais est masqué (page pas encore affichée ?)`);
+    } else if (!d.checkboxesInScope) {
+      parts.push(`le périmètre « ${d.scope} » ne contient aucune case à cocher (${d.checkboxesOnPage} sur la page) — sélecteur trop restrictif ?`);
+    }
+    if (d.title || d.url) parts.push(`page : ${scnTrunc(d.title || d.url, 60)}`);
+  }
+  return parts.join(" — ");
+}
+
 // Exécute une étape. Retourne { ok, error?, info?, warn?, skip?, stop? }.
 // opts.soloTab : le remplissage ne vise que `tabId` (mode multi-onglets),
 // au lieu de tous les onglets du site.
@@ -4263,7 +4286,7 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
       case "sigeo": return await execSigeoStep(step, rowIdx, tabId);
 
       case "batchedit": {
-        if (!step.batchButton) return { ok: false, error: "sélecteur du bouton manquant" };
+        if (!step.batchButton) return { ok: false, error: "sélecteur du bouton « Éditer » manquant — à renseigner dans la configuration de l'étape (champ « bouton à cliquer »)" };
 
         const size = Math.max(1, parseInt(step.batchSize, 10) || 10);
         const waitMs = Math.max(0, parseInt(step.batchWaitMs, 10) || 0);
@@ -4302,9 +4325,16 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
           // il suffit donc de ré-interroger la page plutôt que d'abandonner.
           // 1er lot : page déjà chargée, pas d'attente. Lots suivants : on
           // patiente le temps que le rechargement partiel se termine.
-          const scopeAttempts = rounds === 0 ? 1 : 12; // 12 × 300 ms ≈ 3,6 s
+          // La tranche n'est prête que si le tableau est là ET qu'aucun écran
+          // « Chargement en cours… » ne bloque encore la page : tant que
+          // l'overlay est affiché, le postback n'est pas fini et le décompte
+          // des cases pourrait être partiel (d'où des lots « sautés »).
+          // baseAttempts : budget normal quand rien ne bloque ; maxAttempts :
+          // plafond dur si l'overlay persiste (~12 s).
+          const baseAttempts = rounds === 0 ? 1 : 12; // 12 × 300 ms ≈ 3,6 s
+          const maxAttempts = 40;                      // ≈ 12 s si overlay
           let sel = null;
-          for (let attempt = 0; attempt < scopeAttempts; attempt++) {
+          for (let attempt = 0; ; attempt++) {
             sel = await sendMessageToTab(tabId, {
               action: "batchSelectSlice",
               config: {
@@ -4317,11 +4347,22 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
 
             if (!sel) return { ok: false, error: "pas de réponse de la page" };
             if (!sel.success) return { ok: false, error: sel.error || "sélection impossible" };
-            if (sel.scopeFound !== false) break; // tableau retrouvé
-            if (attempt < scopeAttempts - 1) await scnSleep(300);
+
+            const overlayActive = !!sel.overlay;
+            if (sel.scopeFound !== false && !overlayActive) break; // prêt
+
+            const limit = overlayActive ? maxAttempts : baseAttempts;
+            if (attempt + 1 >= limit) break; // on renonce → message détaillé plus bas
+            if (attempt === 0 || attempt % 4 === 0) {
+              const cause = overlayActive
+                ? `écran « ${sel.overlay} » encore affiché`
+                : "tableau des cases pas encore reconstruit";
+              scnLog(`   lot ${rounds + 1} : ${cause} — nouvelle tentative…`, "skip");
+            }
+            await scnSleep(300);
           }
-          if (sel.scopeFound === false) {
-            return { ok: false, error: "tableau des cases introuvable après attente du rechargement de la page" };
+          if (sel.scopeFound === false || sel.overlay) {
+            return { ok: false, error: batchScopeErrorMsg(sel) };
           }
 
           if (total === null) {
