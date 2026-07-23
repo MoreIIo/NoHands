@@ -89,6 +89,69 @@ deux modes :
    `AUTH_REQUIRED` (session expirée), `UNRESOLVED_CITY` (CP/ville incohérents),
    `NUM_VOIE_INTROUVABLE` (libellé absent), `VALIDATION` (refus serveur).
 
+9. **Étape de scénario « Éditer par lots (cocher N → cliquer) »** : pour les
+   pages qui limitent le nombre d'éléments traitables en une fois. L'étape
+   coche les cases par paquets de N, clique un bouton entre chaque paquet,
+   et recommence jusqu'à épuisement. Cas d'usage : l'édition de feuille de
+   présence SIGEO (`syn_man_edition_feuille_presence`) — 21 clés de
+   répartition, lots de 10 → le bouton « Editer » est cliqué 3 fois, donc
+   3 `feuille.doc` téléchargées.
+
+   Réglages : **tableau** (id ou sélecteur CSS, bouton 🎯 pour le désigner ;
+   vide = toute la page), **bouton à cliquer**, **taille de lot**,
+   **mode d'attente après le clic**, **filtre** optionnel sur le libellé
+   (texte, ou `/regex/i` — pratique pour écarter une clé dont le total est
+   nul), et un garde-fou **lots max**.
+
+   Trois modes d'attente entre les lots : **délai fixe** (prévoir large :
+   génération + téléchargement), **début du téléchargement** (enchaîne dès
+   que le navigateur commence à recevoir le fichier — le plus rapide), ou
+   **fin du téléchargement** (attend que le fichier soit complet — le plus
+   sûr si le serveur est lent). Les deux modes basés sur le téléchargement
+   demandent l'accès aux téléchargements de Chrome : la permission est
+   *optionnelle* et n'est demandée qu'à la sélection du mode, jamais à
+   l'installation. Si aucun fichier n'arrive dans le délai d'abandon
+   (30 s par défaut), le lot est signalé « sans téléchargement » et la
+   boucle continue. En mode multi-onglets, l'attente du téléchargement
+   n'est pas fiable (Chrome ne dit pas quel onglet a déclenché le
+   fichier) : un avertissement est journalisé. Le journal détaille chaque lot
+   (`lot 2 : éléments 11-20 / 21 → clic`), et le bouton « Arrêter » du
+   scénario interrompt la boucle entre deux lots.
+
+   Points techniques : avant chaque clic, l'étape décoche tout puis coche
+   uniquement la tranche voulue — aucun risque de cumul d'un lot sur
+   l'autre. Le découpage suit l'ordre du document, donc il reste stable même
+   si la page se recharge partiellement entre deux lots. Sur ces tables
+   chaque case `id="X"` a un hidden miroir `id="hdnX"` (c'est *lui* qui est
+   posté au serveur) : l'extension passe par le clic natif plutôt que par
+   `checked = true`, resynchronise le miroir en filet de sécurité, et ne
+   reclique jamais une case déjà dans le bon état.
+
+10. **Exécution du scénario en parallèle sur plusieurs onglets** : le bouton
+   « Démarrer sur plusieurs onglets » (section *Exécution du scénario*)
+   répartit les lignes de la plage entre N onglets — N étant le nombre
+   réglé dans *Saisie multi-onglets*, juste au-dessus. Chaque onglet pioche
+   la ligne suivante dans une file commune et déroule le scénario complet
+   dessus, indépendamment des autres : aucune ligne n'est traitée deux
+   fois, et un onglet lent ne bloque pas les autres. Le journal préfixe
+   chaque ligne par l'onglet (`O2 · L7 · Étape 1 — …`) et « Arrêter »
+   interrompt tous les onglets.
+
+   Les onglets déjà ouverts sur le site sont réutilisés ; les manquants
+   sont créés en dupliquant l'onglet du formulaire, et l'exécution attend
+   qu'ils aient fini de charger.
+
+   Différence importante avec le mode simple : le **remplissage est
+   cloisonné** à l'onglet qui traite la ligne (et aux popups qu'il a
+   ouvertes). En mode simple, « Remplir » diffuse à tous les onglets du
+   site, ce qui serait destructeur ici — chaque onglet écraserait la ligne
+   des autres. La ligne active de l'interface ne suit pas la boucle, car
+   plusieurs lignes avancent en même temps.
+
+   À savoir : ce mode ne convient pas aux scénarios dont les étapes
+   partagent un état global, en particulier les étapes **PDF β** qui
+   travaillent sur le document actif de la Toolbox.
+
 ## 3. Onglet Extraction (ex-OSA)
 
 1. **Conditions** : ignorer certaines lignes (ex : colonne X = "NON").

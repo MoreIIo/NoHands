@@ -1262,33 +1262,8 @@ function updateFillButtonState() {
   $("fillBtn").disabled = !((hasRow && hasMapping) || hasCustom);
 }
 
-// Envoie le message de remplissage à tous les onglets de la même origine
-// que l'onglet actif (popups window.open inclus). Hérité de NoHands.
-async function sendFillToAllTabs(message) {
-  // Onglet du formulaire (mémorisé via 🎯), et non l'onglet affiché : le
-  // remplissage fonctionne donc même quand tu es sur une autre page.
-  const targetTabId = await resolveTargetTabId();
-  let targetTab;
-  try {
-    targetTab = await chrome.tabs.get(targetTabId);
-  } catch (_) {
-    state.targetTabId = null;
-    throw new Error("Onglet cible fermé : rouvre le formulaire puis clique 🎯.");
-  }
-
-  const targetUrl = targetTab.url || "";
-  if (targetUrl.startsWith("chrome://") || targetUrl.startsWith("about:") || targetUrl.startsWith("chrome-extension://")) {
-    throw new Error("Page protégée : ouvre d'abord le site cible");
-  }
-
-  const origin = new URL(targetUrl).origin;
-  const allTabs = await chrome.tabs.query({ url: origin + "/*" });
-  const targetTabs = allTabs.filter((t) => {
-    const u = t.url || "";
-    return u.startsWith("http://") || u.startsWith("https://");
-  });
-  // L'onglet mémorisé en tête (popups window.open de même origine inclus).
-  if (!targetTabs.some((t) => t.id === targetTabId)) targetTabs.unshift(targetTab);
+// Envoie le message de remplissage à une liste d'onglets déjà résolue.
+async function sendFillToTabList(targetTabs, message) {
   if (!targetTabs.length) throw new Error("Aucun onglet cible trouvé");
 
   let totalFilled = 0;
@@ -1323,6 +1298,64 @@ async function sendFillToAllTabs(message) {
   }));
 
   return { totalFilled, totalErrors, tabsReached, tabCount: targetTabs.length };
+}
+
+/**
+ * Remplissage cloisonné sur UN onglet (mode scénario multi-onglets).
+ * Chaque onglet traite sa propre ligne : diffuser à tous les onglets du
+ * site écraserait les lignes des autres. On inclut malgré tout les popups
+ * ouvertes PAR cet onglet (window.open), car certains formulaires — SIGEO
+ * notamment — déportent une partie de la saisie dans une popup.
+ */
+async function sendFillToOneTab(tabId, message) {
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch (_) {
+    throw new Error("Onglet de travail fermé pendant l'exécution.");
+  }
+
+  const url = tab.url || "";
+  if (!/^https?:/.test(url)) throw new Error("Page protégée : ouvre d'abord le site cible");
+
+  const origin = new URL(url).origin;
+  const sameOrigin = await chrome.tabs.query({ url: origin + "/*" });
+  const popups = sameOrigin.filter(
+    (t) => t.openerTabId === tabId && /^https?:/.test(t.url || "")
+  );
+
+  return sendFillToTabList([tab, ...popups], message);
+}
+
+// Envoie le message de remplissage à tous les onglets de la même origine
+// que l'onglet actif (popups window.open inclus). Hérité de NoHands.
+async function sendFillToAllTabs(message) {
+  // Onglet du formulaire (mémorisé via 🎯), et non l'onglet affiché : le
+  // remplissage fonctionne donc même quand tu es sur une autre page.
+  const targetTabId = await resolveTargetTabId();
+  let targetTab;
+  try {
+    targetTab = await chrome.tabs.get(targetTabId);
+  } catch (_) {
+    state.targetTabId = null;
+    throw new Error("Onglet cible fermé : rouvre le formulaire puis clique 🎯.");
+  }
+
+  const targetUrl = targetTab.url || "";
+  if (targetUrl.startsWith("chrome://") || targetUrl.startsWith("about:") || targetUrl.startsWith("chrome-extension://")) {
+    throw new Error("Page protégée : ouvre d'abord le site cible");
+  }
+
+  const origin = new URL(targetUrl).origin;
+  const allTabs = await chrome.tabs.query({ url: origin + "/*" });
+  const targetTabs = allTabs.filter((t) => {
+    const u = t.url || "";
+    return u.startsWith("http://") || u.startsWith("https://");
+  });
+  // L'onglet mémorisé en tête (popups window.open de même origine inclus).
+  if (!targetTabs.some((t) => t.id === targetTabId)) targetTabs.unshift(targetTab);
+
+  return sendFillToTabList(targetTabs, message);
 }
 
 // Construit data/mapping/customFields pour une ligne donnée.
@@ -2789,6 +2822,14 @@ function estimateScenarioStepMs(s) {
     case "cond": return 250;
     case "pdfcheck": case "pdfwrite": return 50; // local, quasi instantané
     case "sigeo": return (s.sigeoNav === false ? 300 : 2500) + 4500; // nav + remplissage + résolution ville + postback
+    // Le nombre de lots n'est connu qu'à l'exécution : on table sur 3.
+    case "batchedit": {
+      const dl = s.batchWaitMode === "start" || s.batchWaitMode === "complete";
+      const parLot = dl
+        ? 2500 + (parseInt(s.batchDlSettleMs, 10) || 300)   // génération + détection
+        : (parseInt(s.batchWaitMs, 10) || 3000);
+      return (parLot + 600) * 3;
+    }
   }
   return 300;
 }
@@ -2841,6 +2882,7 @@ function addScenarioStep(step = {}) {
         <option value="pdfcheck">PDF β : vérifier un champ</option>
         <option value="pdfwrite">PDF β : écrire un champ</option>
         <option value="sigeo">SIGEO : saisir une adresse</option>
+        <option value="batchedit">Éditer par lots (cocher N → cliquer)</option>
       </select>
       <button class="btn icon-only scn-move-up" title="Monter" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-up"/></svg></button>
       <button class="btn icon-only scn-move-down" title="Descendre" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-down"/></svg></button>
@@ -2996,6 +3038,45 @@ function addScenarioStep(step = {}) {
         <label>résultat → colonne :</label>
         <input type="text" class="new-col-input scn-sigeo-resultcol" placeholder="ex : Résultat SIGEO (vide = ne pas écrire)" title="Écrit OK / SIMULATION OK / ERREUR + détail dans cette colonne (créée si besoin), sur la ligne active" value="${escapeAttr(step.sigeoResultCol ?? "")}" />
       </div>
+      <p class="hint scn-only-batchedit">Coche les cases par paquets de N, clique un bouton entre chaque paquet, et recommence jusqu'à épuisement. Prévu pour les pages qui limitent le nombre d'éléments traitables en une fois : édition de feuille de présence (22 clés, lots de 10 → 3 fichiers téléchargés).</p>
+      <div class="scn-row scn-only-batchedit">
+        <label>Tableau :</label>
+        <input type="text" class="scn-batch-scope" placeholder="id du tableau ou sélecteur CSS (vide = toute la page)" value="${escapeAttr(step.batchScope || "")}" />
+        <button class="btn pick icon-only scn-pick-batch-scope" title="Choisir le tableau sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+      </div>
+      <div class="scn-row scn-only-batchedit">
+        <label>Bouton à cliquer :</label>
+        <input type="text" class="scn-batch-button" placeholder="sélecteur CSS du bouton (ex : Editer)" value="${escapeAttr(step.batchButton || "")}" />
+        <button class="btn pick icon-only scn-pick-batch-button" title="Choisir le bouton sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+      </div>
+      <div class="scn-row scn-only-batchedit">
+        <label>Taille de lot :</label>
+        <input type="number" class="scn-batch-size" min="1" step="1" value="${escapeAttr(step.batchSize ?? 10)}" />
+        <label>après le clic, attendre :</label>
+        <select class="scn-batch-waitmode">
+          <option value="delay">un délai fixe</option>
+          <option value="start">le début du téléchargement</option>
+          <option value="complete">la fin du téléchargement</option>
+        </select>
+      </div>
+      <div class="scn-row scn-only-batchedit scn-batch-delay-wrap">
+        <label>délai (ms) :</label>
+        <input type="number" class="scn-batch-wait" min="0" step="100" value="${escapeAttr(step.batchWaitMs ?? 3000)}" />
+      </div>
+      <div class="scn-row scn-only-batchedit scn-batch-dl-wrap">
+        <label>abandon après (ms) :</label>
+        <input type="number" class="scn-batch-dltimeout" min="1000" step="500" title="Durée maximale d'attente du téléchargement avant de continuer malgré tout" value="${escapeAttr(step.batchDlTimeoutMs ?? 30000)}" />
+        <label>puis pause (ms) :</label>
+        <input type="number" class="scn-batch-dlsettle" min="0" step="100" title="Petit répit une fois le téléchargement détecté, avant le lot suivant" value="${escapeAttr(step.batchDlSettleMs ?? 300)}" />
+      </div>
+      <div class="scn-row scn-only-batchedit">
+        <label>Filtre :</label>
+        <input type="text" class="scn-batch-filter" placeholder="optionnel : texte du libellé, ou /regex/i" value="${escapeAttr(step.batchFilter || "")}" />
+        <label>lots max :</label>
+        <input type="number" class="scn-batch-max" min="1" step="1" title="Garde-fou : nombre maximum de lots avant arrêt" value="${escapeAttr(step.batchMaxRounds ?? 50)}" />
+      </div>
+      <p class="hint scn-only-batchedit">« Début du téléchargement » enchaîne dès que le navigateur commence à recevoir le fichier ; « fin » attend qu'il soit complet — plus sûr si le serveur est lent. Ces deux modes demandent l'accès aux téléchargements (Chrome l'invite à la sélection). En délai fixe, prévois large : la génération + le téléchargement. Le filtre permet d'exclure certaines lignes (ex. une clé dont le total est nul).</p>
+
       <p class="hint scn-only-sigeo">La simulation est activée par défaut : décoche-la pour enregistrer réellement. Le ViewState est géré par le navigateur (aucune requête forgée).</p>
     </div>
   `;
@@ -3103,6 +3184,33 @@ function addScenarioStep(step = {}) {
   wirePick(".scn-pick-click", ".scn-click-selector");
   wirePick(".scn-pick-wait", ".scn-wait-selector");
   wirePick(".scn-pick-cond", ".scn-cond-selector");
+  wirePick(".scn-pick-batch-scope", ".scn-batch-scope");
+  wirePick(".scn-pick-batch-button", ".scn-batch-button");
+
+  // Mode d'attente après le clic (étape « Éditer par lots »).
+  const bWaitMode = div.querySelector(".scn-batch-waitmode");
+  const bDelayWrap = div.querySelector(".scn-batch-delay-wrap");
+  const bDlWrap = div.querySelector(".scn-batch-dl-wrap");
+  bWaitMode.value = step.batchWaitMode || "delay";
+  const syncBatchWaitUI = () => {
+    const dl = bWaitMode.value !== "delay";
+    bDelayWrap.hidden = dl;
+    bDlWrap.hidden = !dl;
+  };
+  syncBatchWaitUI();
+  bWaitMode.addEventListener("change", async () => {
+    // chrome.permissions.request exige un geste utilisateur : on le fait
+    // ici, dans le handler du change, avant tout autre await.
+    if (bWaitMode.value !== "delay") {
+      const granted = await requestDownloadsPermission();
+      if (!granted) {
+        bWaitMode.value = "delay";
+        showStatus("Accès aux téléchargements refusé : l'étape restera en délai fixe.", "error");
+      }
+    }
+    syncBatchWaitUI();
+    persistWorkingConfig();
+  });
 
   $("scenarioSteps").appendChild(div);
 }
@@ -3151,7 +3259,16 @@ function getScenarioSteps() {
     sigeoCompNom: el.querySelector(".scn-sigeo-compnom").value.trim(),
     sigeoDryRun: el.querySelector(".scn-sigeo-dryrun").checked,
     sigeoTimeout: parseInt(el.querySelector(".scn-sigeo-timeout").value, 10) || 15000,
-    sigeoResultCol: el.querySelector(".scn-sigeo-resultcol").value.trim()
+    sigeoResultCol: el.querySelector(".scn-sigeo-resultcol").value.trim(),
+    batchScope: el.querySelector(".scn-batch-scope").value.trim(),
+    batchButton: el.querySelector(".scn-batch-button").value.trim(),
+    batchSize: parseInt(el.querySelector(".scn-batch-size").value, 10) || 10,
+    batchWaitMode: el.querySelector(".scn-batch-waitmode").value,
+    batchWaitMs: parseInt(el.querySelector(".scn-batch-wait").value, 10) || 0,
+    batchDlTimeoutMs: parseInt(el.querySelector(".scn-batch-dltimeout").value, 10) || 30000,
+    batchDlSettleMs: parseInt(el.querySelector(".scn-batch-dlsettle").value, 10) || 0,
+    batchFilter: el.querySelector(".scn-batch-filter").value.trim(),
+    batchMaxRounds: parseInt(el.querySelector(".scn-batch-max").value, 10) || 50
   }));
 }
 
@@ -3917,12 +4034,102 @@ function scnStepLabel(s) {
       return `PDF : « ${tbFieldLabel(s.pdfField)} » → ${s.pdfTargetCol === "__other__" ? (s.pdfNewCol || "?") : (s.pdfTargetCol || "?")}`;
     case "sigeo":
       return `SIGEO : adresse ${scnTrunc(s.sigeoAddressId || "?", 20)}${s.sigeoDryRun !== false ? " (simulation)" : ""}`;
+    case "batchedit": return `Éditer par lots de ${s.batchSize || 10}`;
   }
   return s.type;
 }
 
+/* ---------- Attente d'un téléchargement (étape « Éditer par lots ») ----------
+   La permission « downloads » est optionnelle (optional_permissions du
+   manifest) : elle n'est demandée que quand l'utilisateur choisit un mode
+   d'attente basé sur le téléchargement — ainsi la mise à jour de
+   l'extension ne réclame aucune nouvelle permission en bloc. Tant qu'elle
+   n'est pas accordée, chrome.downloads est indéfini. */
+
+async function hasDownloadsPermission() {
+  try {
+    if (!chrome.permissions) return false;
+    return await chrome.permissions.contains({ permissions: ["downloads"] });
+  } catch (_) { return false; }
+}
+
+async function requestDownloadsPermission() {
+  try {
+    if (!chrome.permissions) return false;
+    // Renvoie true sans invite si déjà accordée.
+    return await chrome.permissions.request({ permissions: ["downloads"] });
+  } catch (_) { return false; }
+}
+
+/**
+ * Guette le PROCHAIN téléchargement créé par le navigateur.
+ * À armer AVANT le clic qui le déclenche : un fichier peut partir
+ * immédiatement, un écouteur posé après manquerait l'événement.
+ *
+ * mode 'start'    → résout dès la création du téléchargement ;
+ * mode 'complete' → attend en plus que son état passe à « complete »
+ *                   (ou « interrupted », signalé comme échec).
+ *
+ * Renvoie une promesse de { started, completed?, interrupted?, filename }
+ * qui expose .cancel() pour désarmer le guet.
+ */
+function watchNextDownload(mode, timeoutMs) {
+  let cancel = () => {};
+  const promise = new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    let watchedId = null;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      try { chrome.downloads.onCreated.removeListener(onCreated); } catch (_) { /* ignoré */ }
+      try { chrome.downloads.onChanged.removeListener(onChanged); } catch (_) { /* ignoré */ }
+    };
+    const finish = (res) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(res);
+    };
+
+    const baseName = (item) =>
+      String(item.filename || "").split(/[\\/]/).pop() || item.url || "";
+
+    const onChanged = (delta) => {
+      if (delta.id !== watchedId || !delta.state) return;
+      if (delta.state.current === "complete") finish({ started: true, completed: true, filename: lastName });
+      else if (delta.state.current === "interrupted") finish({ started: true, interrupted: true, filename: lastName });
+    };
+
+    let lastName = "";
+    const onCreated = (item) => {
+      lastName = baseName(item);
+      if (mode !== "complete") { finish({ started: true, filename: lastName }); return; }
+      watchedId = item.id;
+      if (item.state === "complete") { finish({ started: true, completed: true, filename: lastName }); return; }
+      try {
+        chrome.downloads.onChanged.addListener(onChanged);
+      } catch (_) {
+        finish({ started: true, filename: lastName }); // repli : au moins démarré
+      }
+    };
+
+    timer = setTimeout(() => finish({ started: false, timedOut: true }), timeoutMs);
+    cancel = () => finish({ started: false, cancelled: true });
+    try {
+      chrome.downloads.onCreated.addListener(onCreated);
+    } catch (_) {
+      finish({ started: false, unavailable: true });
+    }
+  });
+  promise.cancel = () => cancel();
+  return promise;
+}
+
 // Exécute une étape. Retourne { ok, error?, info?, warn?, skip?, stop? }.
-async function execScenarioStep(step, rowIdx, tabId) {
+// opts.soloTab : le remplissage ne vise que `tabId` (mode multi-onglets),
+// au lieu de tous les onglets du site.
+async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
   try {
     switch (step.type) {
       case "fill": {
@@ -3930,13 +4137,16 @@ async function execScenarioStep(step, rowIdx, tabId) {
         if (!Object.keys(mapping).length && !Object.keys(customFields).length) {
           return { ok: false, error: "aucun mapping ni champ personnalisé configuré" };
         }
-        const { totalFilled } = await sendFillToAllTabs({
+        const fillMsg = {
           action: "fillForm",
           data,
           mapping,
           customFields: Object.keys(customFields).length ? customFields : undefined,
           rowContext
-        });
+        };
+        const { totalFilled } = opts.soloTab
+          ? await sendFillToOneTab(tabId, fillMsg)
+          : await sendFillToAllTabs(fillMsg);
         return { ok: true, info: `${totalFilled} champ(s) rempli(s)`, warn: totalFilled === 0 };
       }
       case "goto": {
@@ -4051,6 +4261,117 @@ async function execScenarioStep(step, rowIdx, tabId) {
         };
       }
       case "sigeo": return await execSigeoStep(step, rowIdx, tabId);
+
+      case "batchedit": {
+        if (!step.batchButton) return { ok: false, error: "sélecteur du bouton manquant" };
+
+        const size = Math.max(1, parseInt(step.batchSize, 10) || 10);
+        const waitMs = Math.max(0, parseInt(step.batchWaitMs, 10) || 0);
+        const maxRounds = Math.max(1, parseInt(step.batchMaxRounds, 10) || 50);
+
+        let offset = 0;
+        let rounds = 0;
+        let total = null;
+        let lotsSansDl = 0;
+
+        // Mode d'attente basé sur le téléchargement : la permission peut
+        // avoir été révoquée depuis la configuration de l'étape.
+        let dlMode = (step.batchWaitMode === "start" || step.batchWaitMode === "complete")
+          ? step.batchWaitMode : null;
+        if (dlMode && !(await hasDownloadsPermission())) {
+          dlMode = null;
+          scnLog("   accès aux téléchargements non accordé — repli sur le délai fixe", "skip");
+        }
+        if (dlMode && opts.soloTab) {
+          // chrome.downloads ne dit pas quel onglet a déclenché un fichier :
+          // deux onglets qui guettent en même temps peuvent se voler
+          // l'événement. On prévient, sans bloquer.
+          scnLog("   ⚠ mode multi-onglets : l'attente du téléchargement peut confondre les onglets", "skip");
+        }
+        const dlTimeout = Math.max(1000, parseInt(step.batchDlTimeoutMs, 10) || 30000);
+        const dlSettle = Math.max(0, parseInt(step.batchDlSettleMs, 10) || 0);
+
+        while (rounds < maxRounds) {
+          if (scnStopRequested) return { ok: true, stop: true, info: `arrêté après ${rounds} lot(s)` };
+
+          // Coche la tranche suivante et décoche tout le reste.
+          const sel = await sendMessageToTab(tabId, {
+            action: "batchSelectSlice",
+            config: {
+              scopeSelector: step.batchScope,
+              matchFilter: step.batchFilter,
+              offset,
+              count: size
+            }
+          });
+
+          if (!sel) return { ok: false, error: "pas de réponse de la page" };
+          if (!sel.success) return { ok: false, error: sel.error || "sélection impossible" };
+          if (sel.scopeFound === false) return { ok: false, error: "tableau des cases introuvable" };
+
+          if (total === null) {
+            total = sel.total;
+            if (!total) return { ok: false, error: "aucune case à cocher trouvée dans le périmètre" };
+          }
+          if (!sel.selected) break; // plus rien à traiter
+
+          // Guet armé AVANT le clic : un téléchargement instantané serait
+          // manqué par un écouteur posé après.
+          const dlWatch = dlMode ? watchNextDownload(dlMode, dlTimeout) : null;
+
+          const [{ result: clicked }] = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: scnClickInjected,
+            args: [{ selector: step.batchButton, timeoutMs: 5000 }]
+          });
+          if (!clicked || !clicked.ok) {
+            if (dlWatch) dlWatch.cancel();
+            return {
+              ok: false,
+              error: `lot ${rounds + 1} (éléments ${sel.from}-${sel.to}) : ${(clicked && clicked.error) || "clic impossible"}`
+            };
+          }
+
+          rounds++;
+          offset = sel.to;
+          scnLog(`   lot ${rounds} : éléments ${sel.from}-${sel.to} / ${total} → clic`, "");
+
+          if (dlWatch) {
+            const dl = await dlWatch;
+            const nom = dl.filename ? " — " + dl.filename : "";
+            if (dl.interrupted) {
+              lotsSansDl++;
+              scnLog(`   lot ${rounds} : téléchargement interrompu${nom}`, "err");
+            } else if (dl.started) {
+              scnLog(`   lot ${rounds} : téléchargement ${dl.completed ? "terminé" : "démarré"}${nom}`, "ok");
+            } else {
+              lotsSansDl++;
+              scnLog(`   lot ${rounds} : aucun téléchargement après ${dlTimeout} ms — on continue`, "err");
+            }
+          }
+
+          if (!sel.remaining) break;      // dernier lot : pas d'attente inutile
+          if (dlMode) { if (dlSettle) await scnSleep(dlSettle); }
+          else if (waitMs) await scnSleep(waitMs);
+        }
+
+        if (total === null) return { ok: false, error: "aucune case à cocher trouvée" };
+
+        const reste = Math.max(0, total - offset);
+        const manque = lotsSansDl ? `, ${lotsSansDl} lot(s) sans téléchargement` : "";
+        if (reste) {
+          return {
+            ok: true,
+            warn: true,
+            info: `${rounds} lot(s) — arrêt sur le garde-fou « lots max », ${reste} élément(s) non traité(s)${manque}`
+          };
+        }
+        return {
+          ok: true,
+          warn: lotsSansDl > 0,
+          info: `${rounds} lot(s) de ${size} sur ${total} élément(s)${manque}`
+        };
+      }
     }
     return { ok: false, error: "type d'étape inconnu" };
   } catch (e) {
@@ -4059,12 +4380,12 @@ async function execScenarioStep(step, rowIdx, tabId) {
 }
 
 // Exécute toutes les étapes pour une ligne. prefix = préfixe de log (mode boucle).
-async function runScenarioForRow(rowIdx, tabId, steps, prefix = "") {
+async function runScenarioForRow(rowIdx, tabId, steps, prefix = "", opts = {}) {
   for (let i = 0; i < steps.length; i++) {
     if (scnStopRequested) return { stopped: true };
     const step = steps[i];
     const label = `${prefix}Étape ${i + 1} — ${scnStepLabel(step)}`;
-    const res = await execScenarioStep(step, rowIdx, tabId);
+    const res = await execScenarioStep(step, rowIdx, tabId, opts);
     if (!res.ok) {
       scnLog(`✗ ${label} : ${res.error}`, "err");
       return { ok: false };
@@ -4102,6 +4423,8 @@ function scnBegin() {
   scnStopRequested = false;
   $("runScenarioBtn").disabled = true;
   $("runScenarioLoopBtn").disabled = true;
+  $("runScenarioMultiBtn").disabled = true;
+  $("mtStartBtn").disabled = true;
   $("addStepBtn").disabled = true;
   $("stopScenarioBtn").disabled = false;
   $("scnLog").innerHTML = "";
@@ -4111,6 +4434,8 @@ function scnFinish() {
   scnRunning = false;
   $("runScenarioBtn").disabled = false;
   $("runScenarioLoopBtn").disabled = false;
+  $("runScenarioMultiBtn").disabled = false;
+  if (!mtState.active) $("mtStartBtn").disabled = false;
   $("addStepBtn").disabled = false;
   $("stopScenarioBtn").disabled = true;
   persistSession();
@@ -4189,6 +4514,163 @@ $("runScenarioLoopBtn").addEventListener("click", async () => {
   const scnDurationMs = Date.now() - runStart;
   $("scnProgressTiming").textContent = `Terminé en ${formatDuration(scnDurationMs)}`;
   scnLog(`Boucle terminée en ${formatDuration(scnDurationMs)} : ${okCount} OK, ${errCount} erreur(s), ${skippedCount} ligne(s) vide(s).`, errCount ? "err" : "ok");
+  scnFinish();
+  updateScenarioEstimate();
+});
+
+/* ---------- Exécution du scénario en parallèle sur plusieurs onglets ----------
+   Chaque onglet prend la ligne suivante dans une file commune et déroule
+   tout le scénario dessus, indépendamment des autres. Deux précautions
+   propres à ce mode :
+     - le remplissage est cloisonné (soloTab) : diffusé à tous les onglets
+       du site comme en mode simple, un onglet écraserait la ligne des
+       autres ;
+     - la ligne active de l'interface n'est PAS déplacée : plusieurs
+       onglets avancent en même temps, il n'y a plus de « ligne en cours »
+       unique à afficher. */
+
+// Attend qu'un onglet ait fini de charger (onglets fraîchement dupliqués).
+function waitForTabComplete(tabId, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { chrome.tabs.onUpdated.removeListener(onUpd); } catch (_) { /* ignoré */ }
+      resolve();
+    };
+    const onUpd = (id, info) => { if (id === tabId && info.status === "complete") finish(); };
+    const timer = setTimeout(finish, timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpd);
+    chrome.tabs.get(tabId)
+      .then((t) => { if (t && t.status === "complete") finish(); })
+      .catch(finish);
+  });
+}
+
+// Réunit `wanted` onglets de travail sur le site cible : ceux déjà ouverts
+// d'abord, complétés au besoin par duplication de l'onglet du formulaire.
+async function acquireWorkerTabs(wanted) {
+  const targetTab = await chrome.tabs.get(await resolveTargetTabId());
+  const url = targetTab.url || "";
+  if (!/^https?:/.test(url)) {
+    throw new Error("Page protégée : ouvre d'abord le site cible (ou clique 🎯 sur le formulaire).");
+  }
+  const origin = new URL(url).origin;
+
+  const existing = (await chrome.tabs.query({ url: origin + "/*" }))
+    .filter((t) => /^https?:/.test(t.url || ""));
+  if (!existing.some((t) => t.id === targetTab.id)) existing.unshift(targetTab);
+
+  const tabIds = existing.slice(0, wanted).map((t) => t.id);
+  const created = [];
+  while (tabIds.length < wanted) {
+    const dup = await chrome.tabs.duplicate(targetTab.id);
+    tabIds.push(dup.id);
+    created.push(dup.id);
+  }
+
+  // Un onglet encore en chargement ferait échouer la première étape.
+  await Promise.all(created.map((id) => waitForTabComplete(id)));
+  return { tabIds, origin, created };
+}
+
+$("runScenarioMultiBtn").addEventListener("click", async () => {
+  if (scnRunning) return;
+  if (mtState.active) {
+    showStatus("Arrête d'abord la saisie multi-onglets (remplissage assisté).", "error");
+    return;
+  }
+
+  const steps = getScenarioSteps();
+  if (!steps.length) { showStatus("Ajoute au moins une étape au scénario.", "error"); return; }
+  if (!state.rows.length) { showStatus("Charge d'abord des données (onglet Données).", "error"); return; }
+  saveCustomFields();
+
+  const startRowInput = parseInt($("scnStartRow").value, 10) || (dataStartIdx() + 1);
+  const endRowInput = $("scnEndRow").value.trim();
+  const startIdx = Math.max(0, startRowInput - 1);
+  const endIdx = Math.min(state.rows.length - 1, endRowInput ? parseInt(endRowInput, 10) - 1 : state.rows.length - 1);
+  if (endIdx < startIdx) { showStatus("Plage de lignes invalide.", "error"); return; }
+  const rowDelayMs = parseInt($("scnRowDelayMs").value, 10) || 0;
+
+  const queue = [];
+  for (let i = startIdx; i <= endIdx; i++) queue.push(i);
+  const total = queue.length;
+
+  // Inutile d'ouvrir plus d'onglets que de lignes à traiter.
+  const wanted = Math.min(
+    Math.min(Math.max(parseInt($("mtTabCount").value, 10) || 2, 2), 10),
+    total
+  );
+  if (wanted < 2) {
+    showStatus("Une seule ligne à traiter : utilise « Demarrer le scénario ».", "error");
+    return;
+  }
+
+  let tabIds;
+  try {
+    ({ tabIds } = await acquireWorkerTabs(wanted));
+  } catch (err) {
+    showStatus(err.message, "error");
+    return;
+  }
+
+  scnBegin();
+  let done = 0, okCount = 0, errCount = 0, skippedCount = 0;
+  const runStart = Date.now();
+  scnSetProgress(0, total);
+  $("scnEstimate").textContent = "";
+  scnUpdateTiming(0, total, runStart);
+  scnLog(`— Scénario en parallèle : ${total} ligne(s) réparties sur ${tabIds.length} onglet(s) —`);
+
+  const tick = () => {
+    done++;
+    scnSetProgress(done, total);
+    scnUpdateTiming(done, total, runStart);
+  };
+
+  // Un « worker » par onglet : il pioche dans la file commune jusqu'à
+  // épuisement. La file étant un simple tableau et JS mono-thread, le
+  // shift() ne peut pas servir deux fois la même ligne.
+  const worker = async (tabId, n) => {
+    const tag = `O${n}`;
+    while (!scnStopRequested) {
+      const idx = queue.shift();
+      if (idx === undefined) return;
+
+      const row = state.rows[idx] || [];
+      if (!row.some((v) => String(v ?? "").trim() !== "")) {
+        scnLog(`${tag} · L${idx + 1} : ligne vide, ignorée.`, "skip");
+        skippedCount++;
+        tick();
+        continue;
+      }
+
+      const res = await runScenarioForRow(idx, tabId, steps, `${tag} · L${idx + 1} · `, { soloTab: true });
+      if (res.stopped) return;
+      if (res.ok) okCount++; else errCount++;
+      tick();
+
+      if (rowDelayMs > 0 && !scnStopRequested) await scnSleep(rowDelayMs);
+    }
+  };
+
+  await Promise.all(tabIds.map((id, i) => worker(id, i + 1).catch((err) => {
+    scnLog(`O${i + 1} : onglet interrompu — ${err.message}`, "err");
+    errCount++;
+  })));
+
+  const durMs = Date.now() - runStart;
+  $("scnProgressTiming").textContent = `Terminé en ${formatDuration(durMs)}`;
+  if (scnStopRequested) scnLog("Arrêté par l'utilisateur.", "skip");
+  const reste = queue.length;
+  scnLog(
+    `Parallèle terminé en ${formatDuration(durMs)} : ${okCount} OK, ${errCount} erreur(s), ` +
+    `${skippedCount} ligne(s) vide(s)${reste ? `, ${reste} ligne(s) non traitée(s)` : ""}.`,
+    errCount ? "err" : "ok"
+  );
   scnFinish();
   updateScenarioEstimate();
 });

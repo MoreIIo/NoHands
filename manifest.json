@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NoHands OSA",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Excel <-> formulaires web : remplissage automatique de formulaires (saisie) et récupération de résultats en boucle (extraction), avec colonnes configurables ou détectées automatiquement.",
   "permissions": [
     "sidePanel",
@@ -13,6 +13,7 @@
     "clipboardWrite",
     "contextMenus"
   ],
+  "optional_permissions": ["downloads"],
   "host_permissions": ["<all_urls>"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

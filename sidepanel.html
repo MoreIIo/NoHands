@@ -197,8 +197,17 @@
       <p class="hint">Remplit tous les onglets ouverts du même site (popups inclus).</p>
     </div>
 
+    <h2>Scénario de saisie <span class="h2-note">(automatisation multi-panels)</span></h2>
+    <p class="hint">Enchaîne des étapes pour saisir une ligne complète : remplir les champs mappés, cliquer sur des boutons/onglets du site, attendre qu'un élément s'affiche, ou poser des conditions (donnée Excel ou état de la page).</p>
+    <div id="scenarioSteps" class="scenario-steps"></div>
+    <div class="field-row">
+      <button class="btn" id="addStepBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter une étape</button>
+      <button class="btn" id="clearStepsBtn" type="button"><svg class="icon icon-sm"><use href="#icon-trash"/></svg> Tout effacer</button>
+    </div>
+
     <h2>Saisie multi-onglets <span class="h2-note">(une ligne différente par onglet)</span></h2>
-    <p class="hint">Ouvre plusieurs onglets du site et assigne à chacun une ligne différente, à partir de la ligne active. Un badge dans chaque onglet indique la ligne en cours. Quand tu valides un formulaire (la page se recharge), l'onglet reçoit automatiquement la ligne suivante de la file.</p>
+    <p class="hint">Le nombre d'onglets réglé ici sert aux deux modes : le <strong>remplissage assisté</strong> ci-dessous (bouton « Démarrer »), et l'<strong>exécution du scénario en parallèle</strong> (bouton « Démarrer sur plusieurs onglets », section suivante).</p>
+    <p class="hint">Remplissage assisté : ouvre plusieurs onglets du site et assigne à chacun une ligne différente, à partir de la ligne active. Un badge dans chaque onglet indique la ligne en cours. Quand tu valides un formulaire (la page se recharge), l'onglet reçoit automatiquement la ligne suivante de la file. Les réglages « délai après rechargement » et « ligne suivante automatique » ne concernent que ce mode.</p>
     <div class="field-row">
       <label for="mtTabCount">Onglets</label>
       <input type="number" id="mtTabCount" value="3" min="2" max="10" style="width:64px" />
@@ -215,14 +224,6 @@
     </div>
     <div id="mtTabsList" class="mt-tabs-list"></div>
 
-    <h2>Scénario de saisie <span class="h2-note">(automatisation multi-panels)</span></h2>
-    <p class="hint">Enchaîne des étapes pour saisir une ligne complète : remplir les champs mappés, cliquer sur des boutons/onglets du site, attendre qu'un élément s'affiche, ou poser des conditions (donnée Excel ou état de la page).</p>
-    <div id="scenarioSteps" class="scenario-steps"></div>
-    <div class="field-row">
-      <button class="btn" id="addStepBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter une étape</button>
-      <button class="btn" id="clearStepsBtn" type="button"><svg class="icon icon-sm"><use href="#icon-trash"/></svg> Tout effacer</button>
-    </div>
-
     <h2>Exécution du scénario</h2>
     <div class="field-row run-buttons">
       <button class="btn primary" id="runScenarioBtn" type="button"><svg class="icon"><use href="#icon-play"/></svg>Demarrer le sénario sur de la ligne active</button>
@@ -238,7 +239,9 @@
     </div>
     <div class="field-row run-buttons">
       <button class="btn" id="runScenarioLoopBtn" type="button"><svg class="icon"><use href="#icon-loop"/></svg> Demarrer le scénario</button>
+      <button class="btn" id="runScenarioMultiBtn" type="button"><svg class="icon"><use href="#icon-loop"/></svg> Démarrer sur plusieurs onglets</button>
     </div>
+    <p class="hint">« Sur plusieurs onglets » répartit les lignes de la plage entre les onglets réglés ci-dessus : chaque onglet déroule le scénario complet sur sa propre ligne, en parallèle. Le remplissage est alors cloisonné à l'onglet qui traite la ligne (et à ses popups).</p>
     <p class="estimate" id="scnEstimate"></p>
     <div class="progress"><div class="progress-fill" id="scnProgressFill"></div></div>
     <p class="progress-text" id="scnProgressText">0 / 0</p>

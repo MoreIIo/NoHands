@@ -511,6 +511,7 @@ input[type="file"]::file-selector-button {
 .scn-step:not([data-type="pdfwrite"]) .scn-only-pdfwrite { display: none; }
 .scn-step:not([data-type="pdfcheck"]):not([data-type="pdfwrite"]) .scn-only-pdf { display: none; }
 .scn-step:not([data-type="sigeo"]) .scn-only-sigeo { display: none; }
+.scn-step:not([data-type="batchedit"]) .scn-only-batchedit { display: none; }
 
 /* ---------- Toolbox PDF (bêta) ---------- */
 .beta-badge {

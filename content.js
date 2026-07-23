@@ -78,6 +78,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const badge = document.getElementById('nohands-osa-row-badge');
     if (badge) badge.remove();
     sendResponse({ success: true });
+  } else if (request.action === 'batchSelectSlice') {
+    // Sélection d'une tranche de cases (étape de scénario « éditer par lots »).
+    runSelectSlice(request.config || {})
+      .then((report) => sendResponse({ success: true, ...report }))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true; // réponse asynchrone
   }
   return true;
 });
@@ -908,6 +914,285 @@ function triggerInputEvents(element) {
 
 function triggerChangeEvent(element) {
   element.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+/* ====================================================================
+ * Sélection par lots dans un tableau de cases à cocher
+ * --------------------------------------------------------------------
+ * Certaines pages internes affichent une table de cases à cocher où
+ * chaque case id="X" possède un champ hidden miroir id="hdnX" ; le
+ * onclick natif de la case fait hdnX.value = checked ? '1' : '0'.
+ * C'est ce hidden qui est réellement posté au serveur : régler
+ * input.checked = true ne suffit donc PAS, il faut passer par
+ * input.click() (qui exécute le onclick) ou synchroniser le miroir
+ * à la main.
+ * Sert à l'étape de scénario « éditer par lots » : la page d'édition
+ * de feuille de présence n'accepte qu'un nombre limité de clés à la
+ * fois, on coche donc N clés, on clique le bouton d'édition (qui
+ * télécharge un .doc), puis on recommence avec les N suivantes.
+ * Les éléments sont re-résolus par id à chaque opération : un postback
+ * partiel remplace les noeuds du DOM, et les références gardées
+ * deviendraient des orphelins silencieux.
+ * Cible de référence : syn_man_edition_feuille_presence / tabCleRepart.
+ * ==================================================================== */
+
+// Résout le périmètre de recherche : id de table, sélecteur CSS, name
+// d'un champ, ou rien du tout (= toute la page).
+function resolveBatchScope(rawScope) {
+  const key = String(rawScope ?? '').trim();
+  if (!key) return document;
+
+  const byId = document.getElementById(key);
+  if (byId) return byId;
+
+  if (/[#.\[\]>\s,:]/.test(key)) {
+    try {
+      const found = document.querySelector(key);
+      if (found) return found;
+    } catch (_) { /* sélecteur invalide : on continue */ }
+  }
+
+  // Repli : périmètre désigné par le name d'un champ qu'il contient.
+  try {
+    const input = findFormInput(key);
+    if (input) return input.closest('table') || input.parentElement || input;
+  } catch (_) { /* recherche infructueuse : on continue */ }
+
+  try {
+    const esc = CSS.escape(key);
+    const tail = document.querySelector(`[id$="${esc}"], [name$="${esc}"]`);
+    if (tail) return tail;
+  } catch (_) { /* ignoré */ }
+
+  return null;
+}
+
+// Le hidden miroir d'une case (hdn + id) ne doit jamais être traité
+// comme une cible à part entière : il est piloté par sa case.
+function isBatchMirrorHidden(el) {
+  if (!el || !el.id || !/^hdn/i.test(el.id)) return false;
+  return !!document.getElementById(el.id.replace(/^hdn/i, ''));
+}
+
+// Libellé associé à un élément, pour le filtre texte : <label for>,
+// sinon le texte de la cellule, sinon celui de la ligne du tableau.
+function batchTargetLabel(el) {
+  let txt = '';
+  if (el.id) {
+    try {
+      const lab = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      if (lab) txt = lab.textContent;
+    } catch (_) { /* ignoré */ }
+  }
+  if (!txt.trim()) {
+    const td = el.closest('td');
+    if (td) txt = td.textContent;
+  }
+  if (!txt.trim()) {
+    const tr = el.closest('tr');
+    if (tr) txt = tr.textContent;
+  }
+  return String(txt || '').replace(/\s+/g, ' ').trim();
+}
+
+// Filtre optionnel : « /motif/i » = expression régulière, sinon
+// recherche de texte insensible à la casse et aux accents.
+function makeBatchMatcher(filter) {
+  const raw = String(filter ?? '').trim();
+  if (!raw) return null;
+  const m = raw.match(/^\/(.*)\/([gimsuy]*)$/);
+  if (m) {
+    try {
+      const re = new RegExp(m[1], m[2].replace(/g/g, ''));
+      return (txt) => re.test(txt);
+    } catch (_) { /* regex invalide : repli sur la recherche texte */ }
+  }
+  const needle = osaNormalize(raw);
+  return (txt) => osaNormalize(txt).includes(needle);
+}
+
+/**
+ * Liste ordonnée des éléments à traiter dans le périmètre demandé.
+ * Renvoie { scopeFound, targets }.
+ */
+function collectBatchTargets(config) {
+  const scope = resolveBatchScope(config.scopeSelector);
+  if (!scope) return { scopeFound: false, targets: [] };
+
+  const type = String(config.elementType || 'auto').toLowerCase();
+  const q = (sel) => Array.from(scope.querySelectorAll(sel));
+
+  const checkboxes = () => {
+    const inCells = q('td input[type="checkbox"]');
+    return inCells.length ? inCells : q('input[type="checkbox"]');
+  };
+  const textInputs = () =>
+    q('td input[type="text"], td input[type="hidden"], td textarea')
+      .concat(q('input[type="text"], input[type="hidden"], textarea'))
+      .filter((el, i, arr) => arr.indexOf(el) === i);
+
+  let nodes;
+  if (type === 'checkbox') nodes = checkboxes();
+  else if (type === 'input') nodes = textInputs();
+  else {
+    nodes = checkboxes();
+    if (!nodes.length) nodes = textInputs();
+  }
+
+  const matcher = makeBatchMatcher(config.matchFilter);
+
+  return {
+    scopeFound: true,
+    targets: nodes.filter((el) => {
+      if (el.disabled || el.readOnly) return false;
+      if (isBatchMirrorHidden(el)) return false;
+      // Les champs hidden n'ont pas de boîte : on ne teste la visibilité
+      // que sur les éléments censés être affichés.
+      const t = (el.type || '').toLowerCase();
+      if (t !== 'hidden' && !isElementVisible(el)) return false;
+      if (matcher && !matcher(batchTargetLabel(el))) return false;
+      return true;
+    })
+  };
+}
+
+// Interprète l'état voulu pour une case à cocher (le panneau peut
+// envoyer un booléen, ou une chaîne quand le mode « Valeur… » est actif).
+function toCheckedState(desired) {
+  if (typeof desired === 'boolean') return desired;
+  const s = osaNormalize(desired);
+  return !['', '0', 'FALSE', 'NON', 'NO', 'N', 'DECOCHER'].includes(s);
+}
+
+// Force le hidden miroir hdn+id, au cas où le onclick natif serait
+// absent ou n'aurait pas fait son travail. Sans effet s'il est déjà bon.
+function syncMirrorHidden(checkbox, checked) {
+  if (!checkbox.id) return;
+  const mirror = document.getElementById('hdn' + checkbox.id);
+  if (!mirror) return;
+  const want = checked ? '1' : '0';
+  if (mirror.value !== want) {
+    mirror.value = want;
+    triggerChangeEvent(mirror);
+  }
+}
+
+/**
+ * Applique l'état voulu à UN élément.
+ * Renvoie 'already' (déjà dans l'état voulu, rien fait) ou 'done'.
+ * Idempotent : on ne clique jamais une case déjà dans le bon état,
+ * sinon on l'inverserait.
+ */
+function applyToTarget(el, desiredState) {
+  const type = (el.type || '').toLowerCase();
+
+  if (type === 'checkbox' || type === 'radio') {
+    const want = toCheckedState(desiredState);
+    if (el.checked === want) {
+      syncMirrorHidden(el, want); // le hidden peut être désynchronisé
+      return 'already';
+    }
+    el.click();                   // exécute le onclick natif → met à jour hdnX
+    if (el.checked !== want) {    // repli si un handler a annulé le clic
+      el.checked = want;
+      triggerInputEvents(el);
+    }
+    syncMirrorHidden(el, want);   // filet de sécurité (cases sans onclick)
+    return 'done';
+  }
+
+  const value = desiredState === true ? '1'
+    : desiredState === false ? '0'
+    : String(desiredState ?? '');
+  if (el.value === value) return 'already';
+  el.value = value;
+  triggerInputEvents(el);
+  return 'done';
+}
+
+// Un postback partiel remplace les noeuds : on retient une clé stable
+// plutôt que la référence DOM, et on re-résout à chaque lot.
+function batchKeyOf(el) {
+  if (el.id) return { id: el.id };
+  const name = el.getAttribute && el.getAttribute('name');
+  if (name) return { name };
+  return { el };
+}
+
+function resolveBatchKey(key) {
+  if (key.el) return document.contains(key.el) ? key.el : null;
+  if (key.id) return document.getElementById(key.id);
+  if (key.name) {
+    try { return document.querySelector(`[name="${CSS.escape(key.name)}"]`); }
+    catch (_) { return null; }
+  }
+  return null;
+}
+
+/**
+ * Sélectionne UNE tranche de cases et désélectionne tout le reste.
+ * config = { scopeSelector, matchFilter, offset, count, uncheckOthers }
+ *
+ * L'ordre du document sert de repère : la tranche est
+ * targets[offset … offset+count[. Le décompte est donc stable d'un
+ * appel à l'autre, même si la page se recharge partiellement entre
+ * deux lots (les cases reviennent dans le même ordre).
+ *
+ * Renvoie { scopeFound, total, offset, selected, unchecked, from, to,
+ *           remaining, labels }.
+ */
+async function runSelectSlice(config) {
+  const { scopeFound, targets } = collectBatchTargets({
+    scopeSelector: config.scopeSelector,
+    matchFilter: config.matchFilter,
+    elementType: 'checkbox'
+  });
+
+  const total = targets.length;
+  const offset = Math.max(0, parseInt(config.offset, 10) || 0);
+  const count = Math.max(1, parseInt(config.count, 10) || 10);
+
+  const report = {
+    scopeFound,
+    total,
+    offset,
+    selected: 0,
+    unchecked: 0,
+    from: 0,
+    to: 0,
+    remaining: Math.max(0, total - offset),
+    labels: []
+  };
+
+  if (!scopeFound || !total || offset >= total) return report;
+
+  // On travaille sur des clés stables plutôt que sur les références :
+  // si un handler de la page reconstruit le tableau pendant qu'on
+  // coche, les noeuds d'origine seraient détachés silencieusement.
+  const keys = targets.map(batchKeyOf);
+  const wanted = new Set();
+  for (let i = offset; i < Math.min(offset + count, total); i++) wanted.add(i);
+
+  for (let i = 0; i < keys.length; i++) {
+    const want = wanted.has(i);
+    if (!want && config.uncheckOthers === false) continue;
+
+    const el = resolveBatchKey(keys[i]);
+    if (!el) continue;
+
+    const changed = applyToTarget(el, want) === 'done';
+    if (want) {
+      report.selected++;
+      report.labels.push(batchTargetLabel(el).slice(0, 70));
+    } else if (changed) {
+      report.unchecked++;
+    }
+  }
+
+  report.from = offset + 1;
+  report.to = offset + report.selected;
+  report.remaining = Math.max(0, total - report.to);
+  return report;
 }
 
 /**
