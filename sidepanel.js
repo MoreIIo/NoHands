@@ -5054,6 +5054,16 @@ function buildProfileConfig() {
       startRow: $("scnStartRow").value,
       endRow: $("scnEndRow").value,
       rowDelayMs: $("scnRowDelayMs").value
+    },
+    batchGroup: {
+      scope: $("bgScope").value,
+      state: $("bgState").value,
+      value: $("bgValue").value,
+      elementType: $("bgElementType").value,
+      batchSize: $("bgBatchSize").value,
+      batchDelayMs: $("bgBatchDelayMs").value,
+      filter: $("bgFilter").value,
+      waitSettle: $("bgWaitSettle").checked
     }
   };
 }
@@ -5110,6 +5120,17 @@ function applyProfileConfig(cfg) {
   $("scnStartRow").value = sc.startRow || 2;
   $("scnEndRow").value = sc.endRow || "";
   $("scnRowDelayMs").value = sc.rowDelayMs || 500;
+
+  const bg = cfg.batchGroup || {};
+  $("bgScope").value = bg.scope || "";
+  $("bgState").value = bg.state || "check";
+  $("bgValue").value = bg.value || "";
+  $("bgElementType").value = bg.elementType || "auto";
+  $("bgBatchSize").value = bg.batchSize || 10;
+  $("bgBatchDelayMs").value = bg.batchDelayMs ?? 600;
+  $("bgFilter").value = bg.filter || "";
+  $("bgWaitSettle").checked = bg.waitSettle !== false;
+  bgSyncValueField();
 
   renderColumns();
   updateMappingInfo();
@@ -5380,6 +5401,101 @@ async function init() {
   // À partir d'ici, toute modification est sauvegardée automatiquement.
   workingReady = true;
 }
+
+/* ================== SAISIE GROUPÉE (cases à cocher par lots) ==================
+   Coche/décoche en masse les cases d'un tableau. Le traitement par lots
+   évite de noyer les pages à rechargement partiel (UpdatePanel ASP.NET)
+   sous une rafale de postbacks. */
+
+// Le champ de valeur libre n'a de sens que dans le mode « Valeur… ».
+function bgSyncValueField() {
+  $("bgValue").hidden = $("bgState").value !== "value";
+}
+
+$("bgState").addEventListener("change", bgSyncValueField);
+bgSyncValueField();
+
+$("bgPickBtn").addEventListener("click", async () => {
+  const picked = await pickTargetOnActiveTab();
+  if (!picked) return;
+  // On privilégie l'id : c'est le repère le plus stable sur les tables
+  // générées côté serveur.
+  $("bgScope").value = picked.id || picked.selector || picked.name || "";
+  persistWorkingConfig();
+});
+
+function bgBuildConfig(countOnly) {
+  const mode = $("bgState").value;
+  const desiredState =
+    mode === "check" ? true :
+    mode === "uncheck" ? false :
+    $("bgValue").value;
+
+  return {
+    scopeSelector: $("bgScope").value.trim(),
+    elementType: $("bgElementType").value,
+    desiredState,
+    batchSize: Math.max(1, parseInt($("bgBatchSize").value, 10) || 10),
+    batchDelayMs: Math.max(0, parseInt($("bgBatchDelayMs").value, 10) || 0),
+    matchFilter: $("bgFilter").value.trim(),
+    waitDomSettle: $("bgWaitSettle").checked,
+    countOnly: !!countOnly
+  };
+}
+
+async function bgRun(countOnly) {
+  const btn = countOnly ? $("bgCountBtn") : $("bgApplyBtn");
+  const config = bgBuildConfig(countOnly);
+
+  btn.disabled = true;
+  $("bgInfo").textContent = countOnly ? "Comptage…" : "Traitement…";
+
+  try {
+    const tabId = await resolveTargetTabId();
+    const res = await sendMessageToTab(tabId, { action: "batchToggleInputs", config });
+
+    if (!res) throw new Error("Aucune réponse de la page.");
+    if (!res.success) throw new Error(res.error || "Échec du traitement.");
+
+    if (res.scopeFound === false) {
+      $("bgInfo").textContent = "Périmètre introuvable.";
+      scnLog("Saisie groupée : périmètre introuvable sur la page.", "err");
+      showStatus("Tableau introuvable sur la page.", "error");
+      return;
+    }
+
+    if (!res.total) {
+      $("bgInfo").textContent = "0 élément détecté.";
+      scnLog("Saisie groupée : aucun élément détecté dans le périmètre.", "skip");
+      showStatus("Aucun élément détecté.", "error");
+      return;
+    }
+
+    if (countOnly) {
+      const lots = Math.ceil(res.total / config.batchSize);
+      const txt = `${res.total} élément(s) détecté(s) · ${lots} lot(s) de ${config.batchSize}`;
+      $("bgInfo").textContent = txt;
+      scnLog("Saisie groupée — comptage : " + txt);
+      showStatus(txt, "success");
+      return;
+    }
+
+    let txt = `${res.processed} modifié(s) / ${res.total} · ${res.alreadyInState} déjà OK · ${res.batches} lot(s)`;
+    if (res.skipped) txt += ` · ${res.skipped} ignoré(s)`;
+    $("bgInfo").textContent = txt;
+    scnLog("Saisie groupée — " + txt, res.skipped ? "err" : "ok");
+    showStatus("Saisie groupée terminée.", "success");
+  } catch (err) {
+    $("bgInfo").textContent = "Erreur.";
+    scnLog("Saisie groupée : " + err.message, "err");
+    showStatus("Erreur : " + err.message, "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("bgCountBtn").addEventListener("click", () => bgRun(true));
+$("bgApplyBtn").addEventListener("click", () => bgRun(false));
 
 init();
 
