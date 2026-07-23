@@ -115,6 +115,31 @@ deux modes :
    `checked = true`, resynchronise le miroir en filet de sécurité, et ne
    reclique jamais une case déjà dans le bon état.
 
+10. **Exécution du scénario en parallèle sur plusieurs onglets** : le bouton
+   « Démarrer sur plusieurs onglets » (section *Exécution du scénario*)
+   répartit les lignes de la plage entre N onglets — N étant le nombre
+   réglé dans *Saisie multi-onglets*, juste au-dessus. Chaque onglet pioche
+   la ligne suivante dans une file commune et déroule le scénario complet
+   dessus, indépendamment des autres : aucune ligne n'est traitée deux
+   fois, et un onglet lent ne bloque pas les autres. Le journal préfixe
+   chaque ligne par l'onglet (`O2 · L7 · Étape 1 — …`) et « Arrêter »
+   interrompt tous les onglets.
+
+   Les onglets déjà ouverts sur le site sont réutilisés ; les manquants
+   sont créés en dupliquant l'onglet du formulaire, et l'exécution attend
+   qu'ils aient fini de charger.
+
+   Différence importante avec le mode simple : le **remplissage est
+   cloisonné** à l'onglet qui traite la ligne (et aux popups qu'il a
+   ouvertes). En mode simple, « Remplir » diffuse à tous les onglets du
+   site, ce qui serait destructeur ici — chaque onglet écraserait la ligne
+   des autres. La ligne active de l'interface ne suit pas la boucle, car
+   plusieurs lignes avancent en même temps.
+
+   À savoir : ce mode ne convient pas aux scénarios dont les étapes
+   partagent un état global, en particulier les étapes **PDF β** qui
+   travaillent sur le document actif de la Toolbox.
+
 ## 3. Onglet Extraction (ex-OSA)
 
 1. **Conditions** : ignorer certaines lignes (ex : colonne X = "NON").

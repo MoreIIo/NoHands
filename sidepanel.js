@@ -1262,33 +1262,8 @@ function updateFillButtonState() {
   $("fillBtn").disabled = !((hasRow && hasMapping) || hasCustom);
 }
 
-// Envoie le message de remplissage à tous les onglets de la même origine
-// que l'onglet actif (popups window.open inclus). Hérité de NoHands.
-async function sendFillToAllTabs(message) {
-  // Onglet du formulaire (mémorisé via 🎯), et non l'onglet affiché : le
-  // remplissage fonctionne donc même quand tu es sur une autre page.
-  const targetTabId = await resolveTargetTabId();
-  let targetTab;
-  try {
-    targetTab = await chrome.tabs.get(targetTabId);
-  } catch (_) {
-    state.targetTabId = null;
-    throw new Error("Onglet cible fermé : rouvre le formulaire puis clique 🎯.");
-  }
-
-  const targetUrl = targetTab.url || "";
-  if (targetUrl.startsWith("chrome://") || targetUrl.startsWith("about:") || targetUrl.startsWith("chrome-extension://")) {
-    throw new Error("Page protégée : ouvre d'abord le site cible");
-  }
-
-  const origin = new URL(targetUrl).origin;
-  const allTabs = await chrome.tabs.query({ url: origin + "/*" });
-  const targetTabs = allTabs.filter((t) => {
-    const u = t.url || "";
-    return u.startsWith("http://") || u.startsWith("https://");
-  });
-  // L'onglet mémorisé en tête (popups window.open de même origine inclus).
-  if (!targetTabs.some((t) => t.id === targetTabId)) targetTabs.unshift(targetTab);
+// Envoie le message de remplissage à une liste d'onglets déjà résolue.
+async function sendFillToTabList(targetTabs, message) {
   if (!targetTabs.length) throw new Error("Aucun onglet cible trouvé");
 
   let totalFilled = 0;
@@ -1323,6 +1298,64 @@ async function sendFillToAllTabs(message) {
   }));
 
   return { totalFilled, totalErrors, tabsReached, tabCount: targetTabs.length };
+}
+
+/**
+ * Remplissage cloisonné sur UN onglet (mode scénario multi-onglets).
+ * Chaque onglet traite sa propre ligne : diffuser à tous les onglets du
+ * site écraserait les lignes des autres. On inclut malgré tout les popups
+ * ouvertes PAR cet onglet (window.open), car certains formulaires — SIGEO
+ * notamment — déportent une partie de la saisie dans une popup.
+ */
+async function sendFillToOneTab(tabId, message) {
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch (_) {
+    throw new Error("Onglet de travail fermé pendant l'exécution.");
+  }
+
+  const url = tab.url || "";
+  if (!/^https?:/.test(url)) throw new Error("Page protégée : ouvre d'abord le site cible");
+
+  const origin = new URL(url).origin;
+  const sameOrigin = await chrome.tabs.query({ url: origin + "/*" });
+  const popups = sameOrigin.filter(
+    (t) => t.openerTabId === tabId && /^https?:/.test(t.url || "")
+  );
+
+  return sendFillToTabList([tab, ...popups], message);
+}
+
+// Envoie le message de remplissage à tous les onglets de la même origine
+// que l'onglet actif (popups window.open inclus). Hérité de NoHands.
+async function sendFillToAllTabs(message) {
+  // Onglet du formulaire (mémorisé via 🎯), et non l'onglet affiché : le
+  // remplissage fonctionne donc même quand tu es sur une autre page.
+  const targetTabId = await resolveTargetTabId();
+  let targetTab;
+  try {
+    targetTab = await chrome.tabs.get(targetTabId);
+  } catch (_) {
+    state.targetTabId = null;
+    throw new Error("Onglet cible fermé : rouvre le formulaire puis clique 🎯.");
+  }
+
+  const targetUrl = targetTab.url || "";
+  if (targetUrl.startsWith("chrome://") || targetUrl.startsWith("about:") || targetUrl.startsWith("chrome-extension://")) {
+    throw new Error("Page protégée : ouvre d'abord le site cible");
+  }
+
+  const origin = new URL(targetUrl).origin;
+  const allTabs = await chrome.tabs.query({ url: origin + "/*" });
+  const targetTabs = allTabs.filter((t) => {
+    const u = t.url || "";
+    return u.startsWith("http://") || u.startsWith("https://");
+  });
+  // L'onglet mémorisé en tête (popups window.open de même origine inclus).
+  if (!targetTabs.some((t) => t.id === targetTabId)) targetTabs.unshift(targetTab);
+
+  return sendFillToTabList(targetTabs, message);
 }
 
 // Construit data/mapping/customFields pour une ligne donnée.
@@ -3959,7 +3992,9 @@ function scnStepLabel(s) {
 }
 
 // Exécute une étape. Retourne { ok, error?, info?, warn?, skip?, stop? }.
-async function execScenarioStep(step, rowIdx, tabId) {
+// opts.soloTab : le remplissage ne vise que `tabId` (mode multi-onglets),
+// au lieu de tous les onglets du site.
+async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
   try {
     switch (step.type) {
       case "fill": {
@@ -3967,13 +4002,16 @@ async function execScenarioStep(step, rowIdx, tabId) {
         if (!Object.keys(mapping).length && !Object.keys(customFields).length) {
           return { ok: false, error: "aucun mapping ni champ personnalisé configuré" };
         }
-        const { totalFilled } = await sendFillToAllTabs({
+        const fillMsg = {
           action: "fillForm",
           data,
           mapping,
           customFields: Object.keys(customFields).length ? customFields : undefined,
           rowContext
-        });
+        };
+        const { totalFilled } = opts.soloTab
+          ? await sendFillToOneTab(tabId, fillMsg)
+          : await sendFillToAllTabs(fillMsg);
         return { ok: true, info: `${totalFilled} champ(s) rempli(s)`, warn: totalFilled === 0 };
       }
       case "goto": {
@@ -4164,12 +4202,12 @@ async function execScenarioStep(step, rowIdx, tabId) {
 }
 
 // Exécute toutes les étapes pour une ligne. prefix = préfixe de log (mode boucle).
-async function runScenarioForRow(rowIdx, tabId, steps, prefix = "") {
+async function runScenarioForRow(rowIdx, tabId, steps, prefix = "", opts = {}) {
   for (let i = 0; i < steps.length; i++) {
     if (scnStopRequested) return { stopped: true };
     const step = steps[i];
     const label = `${prefix}Étape ${i + 1} — ${scnStepLabel(step)}`;
-    const res = await execScenarioStep(step, rowIdx, tabId);
+    const res = await execScenarioStep(step, rowIdx, tabId, opts);
     if (!res.ok) {
       scnLog(`✗ ${label} : ${res.error}`, "err");
       return { ok: false };
@@ -4207,6 +4245,8 @@ function scnBegin() {
   scnStopRequested = false;
   $("runScenarioBtn").disabled = true;
   $("runScenarioLoopBtn").disabled = true;
+  $("runScenarioMultiBtn").disabled = true;
+  $("mtStartBtn").disabled = true;
   $("addStepBtn").disabled = true;
   $("stopScenarioBtn").disabled = false;
   $("scnLog").innerHTML = "";
@@ -4216,6 +4256,8 @@ function scnFinish() {
   scnRunning = false;
   $("runScenarioBtn").disabled = false;
   $("runScenarioLoopBtn").disabled = false;
+  $("runScenarioMultiBtn").disabled = false;
+  if (!mtState.active) $("mtStartBtn").disabled = false;
   $("addStepBtn").disabled = false;
   $("stopScenarioBtn").disabled = true;
   persistSession();
@@ -4294,6 +4336,163 @@ $("runScenarioLoopBtn").addEventListener("click", async () => {
   const scnDurationMs = Date.now() - runStart;
   $("scnProgressTiming").textContent = `Terminé en ${formatDuration(scnDurationMs)}`;
   scnLog(`Boucle terminée en ${formatDuration(scnDurationMs)} : ${okCount} OK, ${errCount} erreur(s), ${skippedCount} ligne(s) vide(s).`, errCount ? "err" : "ok");
+  scnFinish();
+  updateScenarioEstimate();
+});
+
+/* ---------- Exécution du scénario en parallèle sur plusieurs onglets ----------
+   Chaque onglet prend la ligne suivante dans une file commune et déroule
+   tout le scénario dessus, indépendamment des autres. Deux précautions
+   propres à ce mode :
+     - le remplissage est cloisonné (soloTab) : diffusé à tous les onglets
+       du site comme en mode simple, un onglet écraserait la ligne des
+       autres ;
+     - la ligne active de l'interface n'est PAS déplacée : plusieurs
+       onglets avancent en même temps, il n'y a plus de « ligne en cours »
+       unique à afficher. */
+
+// Attend qu'un onglet ait fini de charger (onglets fraîchement dupliqués).
+function waitForTabComplete(tabId, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { chrome.tabs.onUpdated.removeListener(onUpd); } catch (_) { /* ignoré */ }
+      resolve();
+    };
+    const onUpd = (id, info) => { if (id === tabId && info.status === "complete") finish(); };
+    const timer = setTimeout(finish, timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpd);
+    chrome.tabs.get(tabId)
+      .then((t) => { if (t && t.status === "complete") finish(); })
+      .catch(finish);
+  });
+}
+
+// Réunit `wanted` onglets de travail sur le site cible : ceux déjà ouverts
+// d'abord, complétés au besoin par duplication de l'onglet du formulaire.
+async function acquireWorkerTabs(wanted) {
+  const targetTab = await chrome.tabs.get(await resolveTargetTabId());
+  const url = targetTab.url || "";
+  if (!/^https?:/.test(url)) {
+    throw new Error("Page protégée : ouvre d'abord le site cible (ou clique 🎯 sur le formulaire).");
+  }
+  const origin = new URL(url).origin;
+
+  const existing = (await chrome.tabs.query({ url: origin + "/*" }))
+    .filter((t) => /^https?:/.test(t.url || ""));
+  if (!existing.some((t) => t.id === targetTab.id)) existing.unshift(targetTab);
+
+  const tabIds = existing.slice(0, wanted).map((t) => t.id);
+  const created = [];
+  while (tabIds.length < wanted) {
+    const dup = await chrome.tabs.duplicate(targetTab.id);
+    tabIds.push(dup.id);
+    created.push(dup.id);
+  }
+
+  // Un onglet encore en chargement ferait échouer la première étape.
+  await Promise.all(created.map((id) => waitForTabComplete(id)));
+  return { tabIds, origin, created };
+}
+
+$("runScenarioMultiBtn").addEventListener("click", async () => {
+  if (scnRunning) return;
+  if (mtState.active) {
+    showStatus("Arrête d'abord la saisie multi-onglets (remplissage assisté).", "error");
+    return;
+  }
+
+  const steps = getScenarioSteps();
+  if (!steps.length) { showStatus("Ajoute au moins une étape au scénario.", "error"); return; }
+  if (!state.rows.length) { showStatus("Charge d'abord des données (onglet Données).", "error"); return; }
+  saveCustomFields();
+
+  const startRowInput = parseInt($("scnStartRow").value, 10) || (dataStartIdx() + 1);
+  const endRowInput = $("scnEndRow").value.trim();
+  const startIdx = Math.max(0, startRowInput - 1);
+  const endIdx = Math.min(state.rows.length - 1, endRowInput ? parseInt(endRowInput, 10) - 1 : state.rows.length - 1);
+  if (endIdx < startIdx) { showStatus("Plage de lignes invalide.", "error"); return; }
+  const rowDelayMs = parseInt($("scnRowDelayMs").value, 10) || 0;
+
+  const queue = [];
+  for (let i = startIdx; i <= endIdx; i++) queue.push(i);
+  const total = queue.length;
+
+  // Inutile d'ouvrir plus d'onglets que de lignes à traiter.
+  const wanted = Math.min(
+    Math.min(Math.max(parseInt($("mtTabCount").value, 10) || 2, 2), 10),
+    total
+  );
+  if (wanted < 2) {
+    showStatus("Une seule ligne à traiter : utilise « Demarrer le scénario ».", "error");
+    return;
+  }
+
+  let tabIds;
+  try {
+    ({ tabIds } = await acquireWorkerTabs(wanted));
+  } catch (err) {
+    showStatus(err.message, "error");
+    return;
+  }
+
+  scnBegin();
+  let done = 0, okCount = 0, errCount = 0, skippedCount = 0;
+  const runStart = Date.now();
+  scnSetProgress(0, total);
+  $("scnEstimate").textContent = "";
+  scnUpdateTiming(0, total, runStart);
+  scnLog(`— Scénario en parallèle : ${total} ligne(s) réparties sur ${tabIds.length} onglet(s) —`);
+
+  const tick = () => {
+    done++;
+    scnSetProgress(done, total);
+    scnUpdateTiming(done, total, runStart);
+  };
+
+  // Un « worker » par onglet : il pioche dans la file commune jusqu'à
+  // épuisement. La file étant un simple tableau et JS mono-thread, le
+  // shift() ne peut pas servir deux fois la même ligne.
+  const worker = async (tabId, n) => {
+    const tag = `O${n}`;
+    while (!scnStopRequested) {
+      const idx = queue.shift();
+      if (idx === undefined) return;
+
+      const row = state.rows[idx] || [];
+      if (!row.some((v) => String(v ?? "").trim() !== "")) {
+        scnLog(`${tag} · L${idx + 1} : ligne vide, ignorée.`, "skip");
+        skippedCount++;
+        tick();
+        continue;
+      }
+
+      const res = await runScenarioForRow(idx, tabId, steps, `${tag} · L${idx + 1} · `, { soloTab: true });
+      if (res.stopped) return;
+      if (res.ok) okCount++; else errCount++;
+      tick();
+
+      if (rowDelayMs > 0 && !scnStopRequested) await scnSleep(rowDelayMs);
+    }
+  };
+
+  await Promise.all(tabIds.map((id, i) => worker(id, i + 1).catch((err) => {
+    scnLog(`O${i + 1} : onglet interrompu — ${err.message}`, "err");
+    errCount++;
+  })));
+
+  const durMs = Date.now() - runStart;
+  $("scnProgressTiming").textContent = `Terminé en ${formatDuration(durMs)}`;
+  if (scnStopRequested) scnLog("Arrêté par l'utilisateur.", "skip");
+  const reste = queue.length;
+  scnLog(
+    `Parallèle terminé en ${formatDuration(durMs)} : ${okCount} OK, ${errCount} erreur(s), ` +
+    `${skippedCount} ligne(s) vide(s)${reste ? `, ${reste} ligne(s) non traitée(s)` : ""}.`,
+    errCount ? "err" : "ok"
+  );
   scnFinish();
   updateScenarioEstimate();
 });
