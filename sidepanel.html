@@ -197,47 +197,6 @@
       <p class="hint">Remplit tous les onglets ouverts du même site (popups inclus).</p>
     </div>
 
-    <h2>Saisie groupée <span class="h2-note">(cases à cocher, par lots)</span></h2>
-    <p class="hint">Coche ou décoche en masse les cases d'un tableau. Les pages à rechargement partiel (UpdatePanel) n'aiment pas les rafales : le traitement se fait par lots, avec une pause entre chaque. Utilise « Compter » avant d'appliquer pour vérifier le périmètre.</p>
-    <div class="field-row">
-      <label for="bgScope">Tableau</label>
-      <input type="text" id="bgScope" placeholder="id du tableau ou sélecteur CSS (vide = toute la page)" />
-      <button class="btn pick icon-only" id="bgPickBtn" title="Choisir le tableau sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
-    </div>
-    <div class="field-row">
-      <label for="bgState">État</label>
-      <select id="bgState">
-        <option value="check">Cocher</option>
-        <option value="uncheck">Décocher</option>
-        <option value="value">Valeur…</option>
-      </select>
-      <input type="text" id="bgValue" placeholder="Valeur à saisir" hidden />
-      <label for="bgElementType">Cibles</label>
-      <select id="bgElementType">
-        <option value="auto">Auto</option>
-        <option value="checkbox">Cases à cocher</option>
-        <option value="input">Champs texte</option>
-      </select>
-    </div>
-    <div class="field-row">
-      <label for="bgBatchSize">Taille de lot</label>
-      <input type="number" id="bgBatchSize" value="10" min="1" step="1" style="width:64px" />
-      <label for="bgBatchDelayMs">Délai entre lots (ms)</label>
-      <input type="number" id="bgBatchDelayMs" value="600" min="0" step="100" style="width:84px" />
-    </div>
-    <div class="field-row">
-      <label for="bgFilter">Filtre</label>
-      <input type="text" id="bgFilter" placeholder="optionnel : texte du libellé, ou /regex/i" />
-    </div>
-    <div class="field-row">
-      <label><input type="checkbox" id="bgWaitSettle" checked /> Attendre la fin du rechargement partiel entre les lots</label>
-    </div>
-    <div class="field-row">
-      <button class="btn" id="bgCountBtn" type="button"><svg class="icon icon-sm"><use href="#icon-search"/></svg> Compter</button>
-      <button class="btn primary" id="bgApplyBtn" type="button"><svg class="icon icon-sm"><use href="#icon-check"/></svg> Appliquer</button>
-      <span class="hint" id="bgInfo"></span>
-    </div>
-
     <h2>Saisie multi-onglets <span class="h2-note">(une ligne différente par onglet)</span></h2>
     <p class="hint">Ouvre plusieurs onglets du site et assigne à chacun une ligne différente, à partir de la ligne active. Un badge dans chaque onglet indique la ligne en cours. Quand tu valides un formulaire (la page se recharge), l'onglet reçoit automatiquement la ligne suivante de la file.</p>
     <div class="field-row">

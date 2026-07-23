@@ -89,25 +89,31 @@ deux modes :
    `AUTH_REQUIRED` (session expirée), `UNRESOLVED_CITY` (CP/ville incohérents),
    `NUM_VOIE_INTROUVABLE` (libellé absent), `VALIDATION` (refus serveur).
 
-9. **Saisie groupée (cases à cocher, par lots)** : coche/décoche en masse les
-   cases d'un tableau (ex. feuille de présence SIGEO, table
-   `…_tabCleRepart`). Renseigne le **tableau** (id, sélecteur CSS, ou bouton
-   🎯 pour le désigner sur la page ; vide = toute la page), l'**état**
-   (Cocher / Décocher / Valeur…), la **taille de lot** (10 par défaut) et le
-   **délai entre lots**. Un **filtre** optionnel restreint aux lignes dont le
-   libellé contient un texte, ou correspond à une expression régulière notée
-   `/motif/i`. Le bouton **Compter** affiche le nombre d'éléments détectés
-   sans rien modifier : à utiliser systématiquement avant d'appliquer.
+9. **Étape de scénario « Éditer par lots (cocher N → cliquer) »** : pour les
+   pages qui limitent le nombre d'éléments traitables en une fois. L'étape
+   coche les cases par paquets de N, clique un bouton entre chaque paquet,
+   et recommence jusqu'à épuisement. Cas d'usage : l'édition de feuille de
+   présence SIGEO (`syn_man_edition_feuille_presence`) — 21 clés de
+   répartition, lots de 10 → le bouton « Editer » est cliqué 3 fois, donc
+   3 `feuille.doc` téléchargées.
 
-   Points techniques : sur ces tables, chaque case `id="X"` a un hidden
-   miroir `id="hdnX"` (c'est *lui* qui est posté au serveur), donc
-   l'extension passe par le clic natif plutôt que par `checked = true`, et
-   resynchronise le miroir en filet de sécurité. Le traitement est
-   **idempotent** (une case déjà dans l'état voulu n'est jamais recliquée) et
-   les éléments sont **re-résolus par id à chaque lot**, pour survivre aux
-   rechargements partiels ASP.NET qui remplacent les noeuds du DOM. Le
-   rapport (détectés / modifiés / déjà OK / lots) s'affiche à côté des
-   boutons et dans le journal.
+   Réglages : **tableau** (id ou sélecteur CSS, bouton 🎯 pour le désigner ;
+   vide = toute la page), **bouton à cliquer**, **taille de lot**,
+   **attente après le clic** (doit couvrir la génération + le
+   téléchargement du fichier), **filtre** optionnel sur le libellé (texte,
+   ou `/regex/i` — pratique pour écarter une clé dont le total est nul), et
+   un garde-fou **lots max**. Le journal détaille chaque lot
+   (`lot 2 : éléments 11-20 / 21 → clic`), et le bouton « Arrêter » du
+   scénario interrompt la boucle entre deux lots.
+
+   Points techniques : avant chaque clic, l'étape décoche tout puis coche
+   uniquement la tranche voulue — aucun risque de cumul d'un lot sur
+   l'autre. Le découpage suit l'ordre du document, donc il reste stable même
+   si la page se recharge partiellement entre deux lots. Sur ces tables
+   chaque case `id="X"` a un hidden miroir `id="hdnX"` (c'est *lui* qui est
+   posté au serveur) : l'extension passe par le clic natif plutôt que par
+   `checked = true`, resynchronise le miroir en filet de sécurité, et ne
+   reclique jamais une case déjà dans le bon état.
 
 ## 3. Onglet Extraction (ex-OSA)
 

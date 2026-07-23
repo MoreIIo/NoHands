@@ -78,15 +78,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const badge = document.getElementById('nohands-osa-row-badge');
     if (badge) badge.remove();
     sendResponse({ success: true });
-  } else if (request.action === 'batchToggleInputs') {
-    // Saisie groupée par lots (cases à cocher / champs d'un tableau).
-    runBatch(request.config || {})
+  } else if (request.action === 'batchSelectSlice') {
+    // Sélection d'une tranche de cases (étape de scénario « éditer par lots »).
+    runSelectSlice(request.config || {})
       .then((report) => sendResponse({ success: true, ...report }))
-      .catch((err) => sendResponse({
-        success: false,
-        error: err.message,
-        total: 0, processed: 0, batches: 0, alreadyInState: 0, skipped: 0
-      }));
+      .catch((err) => sendResponse({ success: false, error: err.message }));
     return true; // réponse asynchrone
   }
   return true;
@@ -921,7 +917,7 @@ function triggerChangeEvent(element) {
 }
 
 /* ====================================================================
- * Saisie groupée par lots (« tableaux de cases à cocher »)
+ * Sélection par lots dans un tableau de cases à cocher
  * --------------------------------------------------------------------
  * Certaines pages internes affichent une table de cases à cocher où
  * chaque case id="X" possède un champ hidden miroir id="hdnX" ; le
@@ -930,20 +926,15 @@ function triggerChangeEvent(element) {
  * input.checked = true ne suffit donc PAS, il faut passer par
  * input.click() (qui exécute le onclick) ou synchroniser le miroir
  * à la main.
- * Ces tables étant souvent dans un UpdatePanel ASP.NET, cocher tout
- * d'un coup déclenche une rafale de postbacks partiels : on traite
- * donc par lots de N avec une pause + attente de stabilisation du DOM
- * entre chaque lot, et on re-résout les éléments par id à chaque lot
- * (un postback partiel remplace les noeuds du DOM : les références
- * gardées deviennent des orphelins silencieux).
+ * Sert à l'étape de scénario « éditer par lots » : la page d'édition
+ * de feuille de présence n'accepte qu'un nombre limité de clés à la
+ * fois, on coche donc N clés, on clique le bouton d'édition (qui
+ * télécharge un .doc), puis on recommence avec les N suivantes.
+ * Les éléments sont re-résolus par id à chaque opération : un postback
+ * partiel remplace les noeuds du DOM, et les références gardées
+ * deviendraient des orphelins silencieux.
  * Cible de référence : syn_man_edition_feuille_presence / tabCleRepart.
  * ==================================================================== */
-
-const OSA_BATCH = {
-  SIZE: 10,          // taille de lot par défaut
-  DELAY_MS: 600,     // pause par défaut entre deux lots
-  SETTLE_QUIET_MS: 500  // silence DOM requis pour considérer un postback terminé
-};
 
 // Résout le périmètre de recherche : id de table, sélecteur CSS, name
 // d'un champ, ou rien du tout (= toute la page).
@@ -1139,52 +1130,68 @@ function resolveBatchKey(key) {
 }
 
 /**
- * Traite les cibles par tranches de batchSize, avec pause entre les lots.
- * config = { scopeSelector, elementType, desiredState, batchSize,
- *            batchDelayMs, matchFilter, waitDomSettle, countOnly }
- * Renvoie { total, processed, batches, alreadyInState, skipped, scopeFound }.
+ * Sélectionne UNE tranche de cases et désélectionne tout le reste.
+ * config = { scopeSelector, matchFilter, offset, count, uncheckOthers }
+ *
+ * L'ordre du document sert de repère : la tranche est
+ * targets[offset … offset+count[. Le décompte est donc stable d'un
+ * appel à l'autre, même si la page se recharge partiellement entre
+ * deux lots (les cases reviennent dans le même ordre).
+ *
+ * Renvoie { scopeFound, total, offset, selected, unchecked, from, to,
+ *           remaining, labels }.
  */
-async function runBatch(config) {
-  const { scopeFound, targets } = collectBatchTargets(config);
+async function runSelectSlice(config) {
+  const { scopeFound, targets } = collectBatchTargets({
+    scopeSelector: config.scopeSelector,
+    matchFilter: config.matchFilter,
+    elementType: 'checkbox'
+  });
+
+  const total = targets.length;
+  const offset = Math.max(0, parseInt(config.offset, 10) || 0);
+  const count = Math.max(1, parseInt(config.count, 10) || 10);
+
   const report = {
-    total: targets.length,
-    processed: 0,
-    batches: 0,
-    alreadyInState: 0,
-    skipped: 0,
-    scopeFound
+    scopeFound,
+    total,
+    offset,
+    selected: 0,
+    unchecked: 0,
+    from: 0,
+    to: 0,
+    remaining: Math.max(0, total - offset),
+    labels: []
   };
 
-  // « Compter » : on inspecte sans rien modifier.
-  if (config.countOnly) return report;
-  if (!report.total) return report;
+  if (!scopeFound || !total || offset >= total) return report;
 
-  const size = Math.max(1, parseInt(config.batchSize, 10) || OSA_BATCH.SIZE);
-  const delay = Math.max(0, parseInt(config.batchDelayMs, 10) || 0);
-  const settle = config.waitDomSettle !== false;
-  const desired = config.desiredState;
-
+  // On travaille sur des clés stables plutôt que sur les références :
+  // si un handler de la page reconstruit le tableau pendant qu'on
+  // coche, les noeuds d'origine seraient détachés silencieusement.
   const keys = targets.map(batchKeyOf);
+  const wanted = new Set();
+  for (let i = offset; i < Math.min(offset + count, total); i++) wanted.add(i);
 
-  for (let i = 0; i < keys.length; i += size) {
-    for (const key of keys.slice(i, i + size)) {
-      const el = resolveBatchKey(key);
-      if (!el) { report.skipped++; continue; } // disparu suite à un postback
-      try {
-        if (applyToTarget(el, desired) === 'already') report.alreadyInState++;
-        else report.processed++;
-      } catch (_) {
-        report.skipped++;
-      }
-    }
-    report.batches++;
+  for (let i = 0; i < keys.length; i++) {
+    const want = wanted.has(i);
+    if (!want && config.uncheckOthers === false) continue;
 
-    if (i + size < keys.length) {
-      if (delay) await osaSleep(delay);
-      if (settle) await waitForDomSettle(OSA_BATCH.SETTLE_QUIET_MS);
+    const el = resolveBatchKey(keys[i]);
+    if (!el) continue;
+
+    const changed = applyToTarget(el, want) === 'done';
+    if (want) {
+      report.selected++;
+      report.labels.push(batchTargetLabel(el).slice(0, 70));
+    } else if (changed) {
+      report.unchecked++;
     }
   }
 
+  report.from = offset + 1;
+  report.to = offset + report.selected;
+  report.remaining = Math.max(0, total - report.to);
   return report;
 }
 

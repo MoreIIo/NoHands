@@ -2789,6 +2789,8 @@ function estimateScenarioStepMs(s) {
     case "cond": return 250;
     case "pdfcheck": case "pdfwrite": return 50; // local, quasi instantané
     case "sigeo": return (s.sigeoNav === false ? 300 : 2500) + 4500; // nav + remplissage + résolution ville + postback
+    // Le nombre de lots n'est connu qu'à l'exécution : on table sur 3.
+    case "batchedit": return ((parseInt(s.batchWaitMs, 10) || 3000) + 600) * 3;
   }
   return 300;
 }
@@ -2841,6 +2843,7 @@ function addScenarioStep(step = {}) {
         <option value="pdfcheck">PDF β : vérifier un champ</option>
         <option value="pdfwrite">PDF β : écrire un champ</option>
         <option value="sigeo">SIGEO : saisir une adresse</option>
+        <option value="batchedit">Éditer par lots (cocher N → cliquer)</option>
       </select>
       <button class="btn icon-only scn-move-up" title="Monter" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-up"/></svg></button>
       <button class="btn icon-only scn-move-down" title="Descendre" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-down"/></svg></button>
@@ -2996,6 +2999,31 @@ function addScenarioStep(step = {}) {
         <label>résultat → colonne :</label>
         <input type="text" class="new-col-input scn-sigeo-resultcol" placeholder="ex : Résultat SIGEO (vide = ne pas écrire)" title="Écrit OK / SIMULATION OK / ERREUR + détail dans cette colonne (créée si besoin), sur la ligne active" value="${escapeAttr(step.sigeoResultCol ?? "")}" />
       </div>
+      <p class="hint scn-only-batchedit">Coche les cases par paquets de N, clique un bouton entre chaque paquet, et recommence jusqu'à épuisement. Prévu pour les pages qui limitent le nombre d'éléments traitables en une fois : édition de feuille de présence (22 clés, lots de 10 → 3 fichiers téléchargés).</p>
+      <div class="scn-row scn-only-batchedit">
+        <label>Tableau :</label>
+        <input type="text" class="scn-batch-scope" placeholder="id du tableau ou sélecteur CSS (vide = toute la page)" value="${escapeAttr(step.batchScope || "")}" />
+        <button class="btn pick icon-only scn-pick-batch-scope" title="Choisir le tableau sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+      </div>
+      <div class="scn-row scn-only-batchedit">
+        <label>Bouton à cliquer :</label>
+        <input type="text" class="scn-batch-button" placeholder="sélecteur CSS du bouton (ex : Editer)" value="${escapeAttr(step.batchButton || "")}" />
+        <button class="btn pick icon-only scn-pick-batch-button" title="Choisir le bouton sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+      </div>
+      <div class="scn-row scn-only-batchedit">
+        <label>Taille de lot :</label>
+        <input type="number" class="scn-batch-size" min="1" step="1" value="${escapeAttr(step.batchSize ?? 10)}" />
+        <label>attente après le clic (ms) :</label>
+        <input type="number" class="scn-batch-wait" min="0" step="100" value="${escapeAttr(step.batchWaitMs ?? 3000)}" />
+      </div>
+      <div class="scn-row scn-only-batchedit">
+        <label>Filtre :</label>
+        <input type="text" class="scn-batch-filter" placeholder="optionnel : texte du libellé, ou /regex/i" value="${escapeAttr(step.batchFilter || "")}" />
+        <label>lots max :</label>
+        <input type="number" class="scn-batch-max" min="1" step="1" title="Garde-fou : nombre maximum de lots avant arrêt" value="${escapeAttr(step.batchMaxRounds ?? 50)}" />
+      </div>
+      <p class="hint scn-only-batchedit">L'attente après le clic doit couvrir la génération et le téléchargement du fichier. Le filtre permet d'exclure certaines lignes (ex. une clé dont le total est nul).</p>
+
       <p class="hint scn-only-sigeo">La simulation est activée par défaut : décoche-la pour enregistrer réellement. Le ViewState est géré par le navigateur (aucune requête forgée).</p>
     </div>
   `;
@@ -3103,6 +3131,8 @@ function addScenarioStep(step = {}) {
   wirePick(".scn-pick-click", ".scn-click-selector");
   wirePick(".scn-pick-wait", ".scn-wait-selector");
   wirePick(".scn-pick-cond", ".scn-cond-selector");
+  wirePick(".scn-pick-batch-scope", ".scn-batch-scope");
+  wirePick(".scn-pick-batch-button", ".scn-batch-button");
 
   $("scenarioSteps").appendChild(div);
 }
@@ -3151,7 +3181,13 @@ function getScenarioSteps() {
     sigeoCompNom: el.querySelector(".scn-sigeo-compnom").value.trim(),
     sigeoDryRun: el.querySelector(".scn-sigeo-dryrun").checked,
     sigeoTimeout: parseInt(el.querySelector(".scn-sigeo-timeout").value, 10) || 15000,
-    sigeoResultCol: el.querySelector(".scn-sigeo-resultcol").value.trim()
+    sigeoResultCol: el.querySelector(".scn-sigeo-resultcol").value.trim(),
+    batchScope: el.querySelector(".scn-batch-scope").value.trim(),
+    batchButton: el.querySelector(".scn-batch-button").value.trim(),
+    batchSize: parseInt(el.querySelector(".scn-batch-size").value, 10) || 10,
+    batchWaitMs: parseInt(el.querySelector(".scn-batch-wait").value, 10) || 0,
+    batchFilter: el.querySelector(".scn-batch-filter").value.trim(),
+    batchMaxRounds: parseInt(el.querySelector(".scn-batch-max").value, 10) || 50
   }));
 }
 
@@ -3917,6 +3953,7 @@ function scnStepLabel(s) {
       return `PDF : « ${tbFieldLabel(s.pdfField)} » → ${s.pdfTargetCol === "__other__" ? (s.pdfNewCol || "?") : (s.pdfTargetCol || "?")}`;
     case "sigeo":
       return `SIGEO : adresse ${scnTrunc(s.sigeoAddressId || "?", 20)}${s.sigeoDryRun !== false ? " (simulation)" : ""}`;
+    case "batchedit": return `Éditer par lots de ${s.batchSize || 10}`;
   }
   return s.type;
 }
@@ -4051,6 +4088,74 @@ async function execScenarioStep(step, rowIdx, tabId) {
         };
       }
       case "sigeo": return await execSigeoStep(step, rowIdx, tabId);
+
+      case "batchedit": {
+        if (!step.batchButton) return { ok: false, error: "sélecteur du bouton manquant" };
+
+        const size = Math.max(1, parseInt(step.batchSize, 10) || 10);
+        const waitMs = Math.max(0, parseInt(step.batchWaitMs, 10) || 0);
+        const maxRounds = Math.max(1, parseInt(step.batchMaxRounds, 10) || 50);
+
+        let offset = 0;
+        let rounds = 0;
+        let total = null;
+
+        while (rounds < maxRounds) {
+          if (scnStopRequested) return { ok: true, stop: true, info: `arrêté après ${rounds} lot(s)` };
+
+          // Coche la tranche suivante et décoche tout le reste.
+          const sel = await sendMessageToTab(tabId, {
+            action: "batchSelectSlice",
+            config: {
+              scopeSelector: step.batchScope,
+              matchFilter: step.batchFilter,
+              offset,
+              count: size
+            }
+          });
+
+          if (!sel) return { ok: false, error: "pas de réponse de la page" };
+          if (!sel.success) return { ok: false, error: sel.error || "sélection impossible" };
+          if (sel.scopeFound === false) return { ok: false, error: "tableau des cases introuvable" };
+
+          if (total === null) {
+            total = sel.total;
+            if (!total) return { ok: false, error: "aucune case à cocher trouvée dans le périmètre" };
+          }
+          if (!sel.selected) break; // plus rien à traiter
+
+          const [{ result: clicked }] = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: scnClickInjected,
+            args: [{ selector: step.batchButton, timeoutMs: 5000 }]
+          });
+          if (!clicked || !clicked.ok) {
+            return {
+              ok: false,
+              error: `lot ${rounds + 1} (éléments ${sel.from}-${sel.to}) : ${(clicked && clicked.error) || "clic impossible"}`
+            };
+          }
+
+          rounds++;
+          offset = sel.to;
+          scnLog(`   lot ${rounds} : éléments ${sel.from}-${sel.to} / ${total} → clic`, "");
+
+          if (!sel.remaining) break;      // dernier lot : pas d'attente inutile
+          if (waitMs) await scnSleep(waitMs);
+        }
+
+        if (total === null) return { ok: false, error: "aucune case à cocher trouvée" };
+
+        const reste = Math.max(0, total - offset);
+        if (reste) {
+          return {
+            ok: true,
+            warn: true,
+            info: `${rounds} lot(s) — arrêt sur le garde-fou « lots max », ${reste} élément(s) non traité(s)`
+          };
+        }
+        return { ok: true, info: `${rounds} lot(s) de ${size} sur ${total} élément(s)` };
+      }
     }
     return { ok: false, error: "type d'étape inconnu" };
   } catch (e) {
@@ -5054,16 +5159,6 @@ function buildProfileConfig() {
       startRow: $("scnStartRow").value,
       endRow: $("scnEndRow").value,
       rowDelayMs: $("scnRowDelayMs").value
-    },
-    batchGroup: {
-      scope: $("bgScope").value,
-      state: $("bgState").value,
-      value: $("bgValue").value,
-      elementType: $("bgElementType").value,
-      batchSize: $("bgBatchSize").value,
-      batchDelayMs: $("bgBatchDelayMs").value,
-      filter: $("bgFilter").value,
-      waitSettle: $("bgWaitSettle").checked
     }
   };
 }
@@ -5120,17 +5215,6 @@ function applyProfileConfig(cfg) {
   $("scnStartRow").value = sc.startRow || 2;
   $("scnEndRow").value = sc.endRow || "";
   $("scnRowDelayMs").value = sc.rowDelayMs || 500;
-
-  const bg = cfg.batchGroup || {};
-  $("bgScope").value = bg.scope || "";
-  $("bgState").value = bg.state || "check";
-  $("bgValue").value = bg.value || "";
-  $("bgElementType").value = bg.elementType || "auto";
-  $("bgBatchSize").value = bg.batchSize || 10;
-  $("bgBatchDelayMs").value = bg.batchDelayMs ?? 600;
-  $("bgFilter").value = bg.filter || "";
-  $("bgWaitSettle").checked = bg.waitSettle !== false;
-  bgSyncValueField();
 
   renderColumns();
   updateMappingInfo();
@@ -5401,101 +5485,6 @@ async function init() {
   // À partir d'ici, toute modification est sauvegardée automatiquement.
   workingReady = true;
 }
-
-/* ================== SAISIE GROUPÉE (cases à cocher par lots) ==================
-   Coche/décoche en masse les cases d'un tableau. Le traitement par lots
-   évite de noyer les pages à rechargement partiel (UpdatePanel ASP.NET)
-   sous une rafale de postbacks. */
-
-// Le champ de valeur libre n'a de sens que dans le mode « Valeur… ».
-function bgSyncValueField() {
-  $("bgValue").hidden = $("bgState").value !== "value";
-}
-
-$("bgState").addEventListener("change", bgSyncValueField);
-bgSyncValueField();
-
-$("bgPickBtn").addEventListener("click", async () => {
-  const picked = await pickTargetOnActiveTab();
-  if (!picked) return;
-  // On privilégie l'id : c'est le repère le plus stable sur les tables
-  // générées côté serveur.
-  $("bgScope").value = picked.id || picked.selector || picked.name || "";
-  persistWorkingConfig();
-});
-
-function bgBuildConfig(countOnly) {
-  const mode = $("bgState").value;
-  const desiredState =
-    mode === "check" ? true :
-    mode === "uncheck" ? false :
-    $("bgValue").value;
-
-  return {
-    scopeSelector: $("bgScope").value.trim(),
-    elementType: $("bgElementType").value,
-    desiredState,
-    batchSize: Math.max(1, parseInt($("bgBatchSize").value, 10) || 10),
-    batchDelayMs: Math.max(0, parseInt($("bgBatchDelayMs").value, 10) || 0),
-    matchFilter: $("bgFilter").value.trim(),
-    waitDomSettle: $("bgWaitSettle").checked,
-    countOnly: !!countOnly
-  };
-}
-
-async function bgRun(countOnly) {
-  const btn = countOnly ? $("bgCountBtn") : $("bgApplyBtn");
-  const config = bgBuildConfig(countOnly);
-
-  btn.disabled = true;
-  $("bgInfo").textContent = countOnly ? "Comptage…" : "Traitement…";
-
-  try {
-    const tabId = await resolveTargetTabId();
-    const res = await sendMessageToTab(tabId, { action: "batchToggleInputs", config });
-
-    if (!res) throw new Error("Aucune réponse de la page.");
-    if (!res.success) throw new Error(res.error || "Échec du traitement.");
-
-    if (res.scopeFound === false) {
-      $("bgInfo").textContent = "Périmètre introuvable.";
-      scnLog("Saisie groupée : périmètre introuvable sur la page.", "err");
-      showStatus("Tableau introuvable sur la page.", "error");
-      return;
-    }
-
-    if (!res.total) {
-      $("bgInfo").textContent = "0 élément détecté.";
-      scnLog("Saisie groupée : aucun élément détecté dans le périmètre.", "skip");
-      showStatus("Aucun élément détecté.", "error");
-      return;
-    }
-
-    if (countOnly) {
-      const lots = Math.ceil(res.total / config.batchSize);
-      const txt = `${res.total} élément(s) détecté(s) · ${lots} lot(s) de ${config.batchSize}`;
-      $("bgInfo").textContent = txt;
-      scnLog("Saisie groupée — comptage : " + txt);
-      showStatus(txt, "success");
-      return;
-    }
-
-    let txt = `${res.processed} modifié(s) / ${res.total} · ${res.alreadyInState} déjà OK · ${res.batches} lot(s)`;
-    if (res.skipped) txt += ` · ${res.skipped} ignoré(s)`;
-    $("bgInfo").textContent = txt;
-    scnLog("Saisie groupée — " + txt, res.skipped ? "err" : "ok");
-    showStatus("Saisie groupée terminée.", "success");
-  } catch (err) {
-    $("bgInfo").textContent = "Erreur.";
-    scnLog("Saisie groupée : " + err.message, "err");
-    showStatus("Erreur : " + err.message, "error");
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-$("bgCountBtn").addEventListener("click", () => bgRun(true));
-$("bgApplyBtn").addEventListener("click", () => bgRun(false));
 
 init();
 
