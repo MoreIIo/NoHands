@@ -99,10 +99,22 @@ deux modes :
 
    Réglages : **tableau** (id ou sélecteur CSS, bouton 🎯 pour le désigner ;
    vide = toute la page), **bouton à cliquer**, **taille de lot**,
-   **attente après le clic** (doit couvrir la génération + le
-   téléchargement du fichier), **filtre** optionnel sur le libellé (texte,
-   ou `/regex/i` — pratique pour écarter une clé dont le total est nul), et
-   un garde-fou **lots max**. Le journal détaille chaque lot
+   **mode d'attente après le clic**, **filtre** optionnel sur le libellé
+   (texte, ou `/regex/i` — pratique pour écarter une clé dont le total est
+   nul), et un garde-fou **lots max**.
+
+   Trois modes d'attente entre les lots : **délai fixe** (prévoir large :
+   génération + téléchargement), **début du téléchargement** (enchaîne dès
+   que le navigateur commence à recevoir le fichier — le plus rapide), ou
+   **fin du téléchargement** (attend que le fichier soit complet — le plus
+   sûr si le serveur est lent). Les deux modes basés sur le téléchargement
+   demandent l'accès aux téléchargements de Chrome : la permission est
+   *optionnelle* et n'est demandée qu'à la sélection du mode, jamais à
+   l'installation. Si aucun fichier n'arrive dans le délai d'abandon
+   (30 s par défaut), le lot est signalé « sans téléchargement » et la
+   boucle continue. En mode multi-onglets, l'attente du téléchargement
+   n'est pas fiable (Chrome ne dit pas quel onglet a déclenché le
+   fichier) : un avertissement est journalisé. Le journal détaille chaque lot
    (`lot 2 : éléments 11-20 / 21 → clic`), et le bouton « Arrêter » du
    scénario interrompt la boucle entre deux lots.
 

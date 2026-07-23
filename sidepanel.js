@@ -2823,7 +2823,13 @@ function estimateScenarioStepMs(s) {
     case "pdfcheck": case "pdfwrite": return 50; // local, quasi instantané
     case "sigeo": return (s.sigeoNav === false ? 300 : 2500) + 4500; // nav + remplissage + résolution ville + postback
     // Le nombre de lots n'est connu qu'à l'exécution : on table sur 3.
-    case "batchedit": return ((parseInt(s.batchWaitMs, 10) || 3000) + 600) * 3;
+    case "batchedit": {
+      const dl = s.batchWaitMode === "start" || s.batchWaitMode === "complete";
+      const parLot = dl
+        ? 2500 + (parseInt(s.batchDlSettleMs, 10) || 300)   // génération + détection
+        : (parseInt(s.batchWaitMs, 10) || 3000);
+      return (parLot + 600) * 3;
+    }
   }
   return 300;
 }
@@ -3046,8 +3052,22 @@ function addScenarioStep(step = {}) {
       <div class="scn-row scn-only-batchedit">
         <label>Taille de lot :</label>
         <input type="number" class="scn-batch-size" min="1" step="1" value="${escapeAttr(step.batchSize ?? 10)}" />
-        <label>attente après le clic (ms) :</label>
+        <label>après le clic, attendre :</label>
+        <select class="scn-batch-waitmode">
+          <option value="delay">un délai fixe</option>
+          <option value="start">le début du téléchargement</option>
+          <option value="complete">la fin du téléchargement</option>
+        </select>
+      </div>
+      <div class="scn-row scn-only-batchedit scn-batch-delay-wrap">
+        <label>délai (ms) :</label>
         <input type="number" class="scn-batch-wait" min="0" step="100" value="${escapeAttr(step.batchWaitMs ?? 3000)}" />
+      </div>
+      <div class="scn-row scn-only-batchedit scn-batch-dl-wrap">
+        <label>abandon après (ms) :</label>
+        <input type="number" class="scn-batch-dltimeout" min="1000" step="500" title="Durée maximale d'attente du téléchargement avant de continuer malgré tout" value="${escapeAttr(step.batchDlTimeoutMs ?? 30000)}" />
+        <label>puis pause (ms) :</label>
+        <input type="number" class="scn-batch-dlsettle" min="0" step="100" title="Petit répit une fois le téléchargement détecté, avant le lot suivant" value="${escapeAttr(step.batchDlSettleMs ?? 300)}" />
       </div>
       <div class="scn-row scn-only-batchedit">
         <label>Filtre :</label>
@@ -3055,7 +3075,7 @@ function addScenarioStep(step = {}) {
         <label>lots max :</label>
         <input type="number" class="scn-batch-max" min="1" step="1" title="Garde-fou : nombre maximum de lots avant arrêt" value="${escapeAttr(step.batchMaxRounds ?? 50)}" />
       </div>
-      <p class="hint scn-only-batchedit">L'attente après le clic doit couvrir la génération et le téléchargement du fichier. Le filtre permet d'exclure certaines lignes (ex. une clé dont le total est nul).</p>
+      <p class="hint scn-only-batchedit">« Début du téléchargement » enchaîne dès que le navigateur commence à recevoir le fichier ; « fin » attend qu'il soit complet — plus sûr si le serveur est lent. Ces deux modes demandent l'accès aux téléchargements (Chrome l'invite à la sélection). En délai fixe, prévois large : la génération + le téléchargement. Le filtre permet d'exclure certaines lignes (ex. une clé dont le total est nul).</p>
 
       <p class="hint scn-only-sigeo">La simulation est activée par défaut : décoche-la pour enregistrer réellement. Le ViewState est géré par le navigateur (aucune requête forgée).</p>
     </div>
@@ -3167,6 +3187,31 @@ function addScenarioStep(step = {}) {
   wirePick(".scn-pick-batch-scope", ".scn-batch-scope");
   wirePick(".scn-pick-batch-button", ".scn-batch-button");
 
+  // Mode d'attente après le clic (étape « Éditer par lots »).
+  const bWaitMode = div.querySelector(".scn-batch-waitmode");
+  const bDelayWrap = div.querySelector(".scn-batch-delay-wrap");
+  const bDlWrap = div.querySelector(".scn-batch-dl-wrap");
+  bWaitMode.value = step.batchWaitMode || "delay";
+  const syncBatchWaitUI = () => {
+    const dl = bWaitMode.value !== "delay";
+    bDelayWrap.hidden = dl;
+    bDlWrap.hidden = !dl;
+  };
+  syncBatchWaitUI();
+  bWaitMode.addEventListener("change", async () => {
+    // chrome.permissions.request exige un geste utilisateur : on le fait
+    // ici, dans le handler du change, avant tout autre await.
+    if (bWaitMode.value !== "delay") {
+      const granted = await requestDownloadsPermission();
+      if (!granted) {
+        bWaitMode.value = "delay";
+        showStatus("Accès aux téléchargements refusé : l'étape restera en délai fixe.", "error");
+      }
+    }
+    syncBatchWaitUI();
+    persistWorkingConfig();
+  });
+
   $("scenarioSteps").appendChild(div);
 }
 
@@ -3218,7 +3263,10 @@ function getScenarioSteps() {
     batchScope: el.querySelector(".scn-batch-scope").value.trim(),
     batchButton: el.querySelector(".scn-batch-button").value.trim(),
     batchSize: parseInt(el.querySelector(".scn-batch-size").value, 10) || 10,
+    batchWaitMode: el.querySelector(".scn-batch-waitmode").value,
     batchWaitMs: parseInt(el.querySelector(".scn-batch-wait").value, 10) || 0,
+    batchDlTimeoutMs: parseInt(el.querySelector(".scn-batch-dltimeout").value, 10) || 30000,
+    batchDlSettleMs: parseInt(el.querySelector(".scn-batch-dlsettle").value, 10) || 0,
     batchFilter: el.querySelector(".scn-batch-filter").value.trim(),
     batchMaxRounds: parseInt(el.querySelector(".scn-batch-max").value, 10) || 50
   }));
@@ -3991,6 +4039,93 @@ function scnStepLabel(s) {
   return s.type;
 }
 
+/* ---------- Attente d'un téléchargement (étape « Éditer par lots ») ----------
+   La permission « downloads » est optionnelle (optional_permissions du
+   manifest) : elle n'est demandée que quand l'utilisateur choisit un mode
+   d'attente basé sur le téléchargement — ainsi la mise à jour de
+   l'extension ne réclame aucune nouvelle permission en bloc. Tant qu'elle
+   n'est pas accordée, chrome.downloads est indéfini. */
+
+async function hasDownloadsPermission() {
+  try {
+    if (!chrome.permissions) return false;
+    return await chrome.permissions.contains({ permissions: ["downloads"] });
+  } catch (_) { return false; }
+}
+
+async function requestDownloadsPermission() {
+  try {
+    if (!chrome.permissions) return false;
+    // Renvoie true sans invite si déjà accordée.
+    return await chrome.permissions.request({ permissions: ["downloads"] });
+  } catch (_) { return false; }
+}
+
+/**
+ * Guette le PROCHAIN téléchargement créé par le navigateur.
+ * À armer AVANT le clic qui le déclenche : un fichier peut partir
+ * immédiatement, un écouteur posé après manquerait l'événement.
+ *
+ * mode 'start'    → résout dès la création du téléchargement ;
+ * mode 'complete' → attend en plus que son état passe à « complete »
+ *                   (ou « interrupted », signalé comme échec).
+ *
+ * Renvoie une promesse de { started, completed?, interrupted?, filename }
+ * qui expose .cancel() pour désarmer le guet.
+ */
+function watchNextDownload(mode, timeoutMs) {
+  let cancel = () => {};
+  const promise = new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    let watchedId = null;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      try { chrome.downloads.onCreated.removeListener(onCreated); } catch (_) { /* ignoré */ }
+      try { chrome.downloads.onChanged.removeListener(onChanged); } catch (_) { /* ignoré */ }
+    };
+    const finish = (res) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(res);
+    };
+
+    const baseName = (item) =>
+      String(item.filename || "").split(/[\\/]/).pop() || item.url || "";
+
+    const onChanged = (delta) => {
+      if (delta.id !== watchedId || !delta.state) return;
+      if (delta.state.current === "complete") finish({ started: true, completed: true, filename: lastName });
+      else if (delta.state.current === "interrupted") finish({ started: true, interrupted: true, filename: lastName });
+    };
+
+    let lastName = "";
+    const onCreated = (item) => {
+      lastName = baseName(item);
+      if (mode !== "complete") { finish({ started: true, filename: lastName }); return; }
+      watchedId = item.id;
+      if (item.state === "complete") { finish({ started: true, completed: true, filename: lastName }); return; }
+      try {
+        chrome.downloads.onChanged.addListener(onChanged);
+      } catch (_) {
+        finish({ started: true, filename: lastName }); // repli : au moins démarré
+      }
+    };
+
+    timer = setTimeout(() => finish({ started: false, timedOut: true }), timeoutMs);
+    cancel = () => finish({ started: false, cancelled: true });
+    try {
+      chrome.downloads.onCreated.addListener(onCreated);
+    } catch (_) {
+      finish({ started: false, unavailable: true });
+    }
+  });
+  promise.cancel = () => cancel();
+  return promise;
+}
+
 // Exécute une étape. Retourne { ok, error?, info?, warn?, skip?, stop? }.
 // opts.soloTab : le remplissage ne vise que `tabId` (mode multi-onglets),
 // au lieu de tous les onglets du site.
@@ -4137,6 +4272,24 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
         let offset = 0;
         let rounds = 0;
         let total = null;
+        let lotsSansDl = 0;
+
+        // Mode d'attente basé sur le téléchargement : la permission peut
+        // avoir été révoquée depuis la configuration de l'étape.
+        let dlMode = (step.batchWaitMode === "start" || step.batchWaitMode === "complete")
+          ? step.batchWaitMode : null;
+        if (dlMode && !(await hasDownloadsPermission())) {
+          dlMode = null;
+          scnLog("   accès aux téléchargements non accordé — repli sur le délai fixe", "skip");
+        }
+        if (dlMode && opts.soloTab) {
+          // chrome.downloads ne dit pas quel onglet a déclenché un fichier :
+          // deux onglets qui guettent en même temps peuvent se voler
+          // l'événement. On prévient, sans bloquer.
+          scnLog("   ⚠ mode multi-onglets : l'attente du téléchargement peut confondre les onglets", "skip");
+        }
+        const dlTimeout = Math.max(1000, parseInt(step.batchDlTimeoutMs, 10) || 30000);
+        const dlSettle = Math.max(0, parseInt(step.batchDlSettleMs, 10) || 0);
 
         while (rounds < maxRounds) {
           if (scnStopRequested) return { ok: true, stop: true, info: `arrêté après ${rounds} lot(s)` };
@@ -4162,12 +4315,17 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
           }
           if (!sel.selected) break; // plus rien à traiter
 
+          // Guet armé AVANT le clic : un téléchargement instantané serait
+          // manqué par un écouteur posé après.
+          const dlWatch = dlMode ? watchNextDownload(dlMode, dlTimeout) : null;
+
           const [{ result: clicked }] = await chrome.scripting.executeScript({
             target: { tabId },
             func: scnClickInjected,
             args: [{ selector: step.batchButton, timeoutMs: 5000 }]
           });
           if (!clicked || !clicked.ok) {
+            if (dlWatch) dlWatch.cancel();
             return {
               ok: false,
               error: `lot ${rounds + 1} (éléments ${sel.from}-${sel.to}) : ${(clicked && clicked.error) || "clic impossible"}`
@@ -4178,21 +4336,41 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
           offset = sel.to;
           scnLog(`   lot ${rounds} : éléments ${sel.from}-${sel.to} / ${total} → clic`, "");
 
+          if (dlWatch) {
+            const dl = await dlWatch;
+            const nom = dl.filename ? " — " + dl.filename : "";
+            if (dl.interrupted) {
+              lotsSansDl++;
+              scnLog(`   lot ${rounds} : téléchargement interrompu${nom}`, "err");
+            } else if (dl.started) {
+              scnLog(`   lot ${rounds} : téléchargement ${dl.completed ? "terminé" : "démarré"}${nom}`, "ok");
+            } else {
+              lotsSansDl++;
+              scnLog(`   lot ${rounds} : aucun téléchargement après ${dlTimeout} ms — on continue`, "err");
+            }
+          }
+
           if (!sel.remaining) break;      // dernier lot : pas d'attente inutile
-          if (waitMs) await scnSleep(waitMs);
+          if (dlMode) { if (dlSettle) await scnSleep(dlSettle); }
+          else if (waitMs) await scnSleep(waitMs);
         }
 
         if (total === null) return { ok: false, error: "aucune case à cocher trouvée" };
 
         const reste = Math.max(0, total - offset);
+        const manque = lotsSansDl ? `, ${lotsSansDl} lot(s) sans téléchargement` : "";
         if (reste) {
           return {
             ok: true,
             warn: true,
-            info: `${rounds} lot(s) — arrêt sur le garde-fou « lots max », ${reste} élément(s) non traité(s)`
+            info: `${rounds} lot(s) — arrêt sur le garde-fou « lots max », ${reste} élément(s) non traité(s)${manque}`
           };
         }
-        return { ok: true, info: `${rounds} lot(s) de ${size} sur ${total} élément(s)` };
+        return {
+          ok: true,
+          warn: lotsSansDl > 0,
+          info: `${rounds} lot(s) de ${size} sur ${total} élément(s)${manque}`
+        };
       }
     }
     return { ok: false, error: "type d'étape inconnu" };
