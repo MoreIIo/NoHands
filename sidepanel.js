@@ -2236,25 +2236,40 @@ function performRowActionInjected(config) {
         }
       }
 
+      // Les pages ASP.NET (SIGEO) émettent des &nbsp; (U+00A0) là où on
+      // attend une espace normale : "Type&nbsp;inconnu". Sans normalisation,
+      // une recherche de "Type inconnu" ne matche jamais, regex comprise.
+      const OSA_SPACES = /[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000\uFEFF]/g;
+
+      // Espaces exotiques -> espace simple, espaces multiples réduites.
+      function normSpaces(s) {
+        return String(s == null ? "" : s).replace(OSA_SPACES, " ").replace(/\s+/g, " ").trim();
+      }
+
+      // Pour comparaison : en plus, sans accents et en minuscules.
+      function foldText(s) {
+        return normSpaces(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      }
+
       function textOf(el) {
         if (!el) return "";
-        if ("value" in el && el.tagName !== "DIV") return el.value;
-        return (el.innerText || el.textContent || "").trim();
+        if ("value" in el && el.tagName !== "DIV") return normSpaces(el.value);
+        return normSpaces(el.innerText || el.textContent || "");
       }
 
       function readTableMatch(out) {
         const trs = document.querySelectorAll(out.rowSelector);
         if (!trs.length) return { found: false, value: "", reason: "noRows" };
-        const needle = (out.matchValue || "").trim().toLowerCase();
+        const needle = foldText(out.matchValue);
         for (const tr of trs) {
           const cells = tr.querySelectorAll("td");
           const matchCell = cells[out.matchTdIndex - 1];
           if (!matchCell) continue;
-          const cellText = matchCell.textContent.trim().toLowerCase();
+          const cellText = foldText(matchCell.textContent);
           const isMatch = out.matchType === "exact" ? cellText === needle : cellText.includes(needle);
           if (isMatch) {
             const extractCell = cells[out.extractTdIndex - 1];
-            return { found: true, value: extractCell ? extractCell.textContent.trim() : "" };
+            return { found: true, value: extractCell ? normSpaces(extractCell.textContent) : "" };
           }
         }
         return { found: false, value: "", reason: "noMatch" };
@@ -2300,17 +2315,20 @@ function performRowActionInjected(config) {
 
         // Recherche de texte : le tableau doit d'abord être rempli.
         if (!filled) return { found: false, filled: false, reason: "empty" };
-        const haystack = meaningful.map((n) => (n.innerText || n.textContent || "")).join("\n");
+        // Chaque ligne est normalisée séparément pour ne pas coller entre elles.
+        const haystack = meaningful.map((n) => normSpaces(n.innerText || n.textContent || "")).join("\n");
         const raw = (out.tcText || "").trim();
         if (!raw) return { found: false, filled, reason: "noTerm" };
 
         let matched = false;
         if (out.tcRegex) {
+          // Le motif est testé sur le texte normalisé : une espace littérale
+          // dans la regex matche donc aussi un &nbsp; de la page.
           try { matched = new RegExp(raw, "i").test(haystack); }
           catch (e) { return { found: false, filled, reason: "badRegex" }; }
         } else {
-          const hay = haystack.toLowerCase();
-          matched = raw.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean)
+          const hay = haystack.split("\n").map(foldText).join("\n");
+          matched = raw.split(",").map((t) => foldText(t)).filter(Boolean)
             .some((t) => hay.includes(t));
         }
         return { found: matched, filled };
