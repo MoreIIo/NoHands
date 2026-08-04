@@ -1907,10 +1907,123 @@ document.querySelectorAll(".btn.pick[data-target]").forEach((btn) => {
 
 /* ---------- Résultats à récupérer (outputs) ---------- */
 
-// o = { mode: "css"|"tableMatch"|"tableCheck", col, selector, rowSelector, matchSourceCol,
-//       matchType, matchTdIndex, extractTdIndex, newCol,
-//       tcSelector, tcCheck, tcText, tcRegex }
+// o = { mode: "css"|"table", col, newCol, selector,
+//       rowSelector, tblConds: [{scope:"cell"|"row", td, op, val}], tblCombine: "and"|"or",
+//       tblResult: "check"|"extract", extractTdIndex, notFound/found/regex... }
+// Les anciens modes "tableMatch" et "tableCheck" (avant v2.7) sont convertis
+// automatiquement vers le mode unifié "table" par normalizeOutputConfig().
+function normalizeOutputConfig(o = {}) {
+  if (o.mode === "tableMatch") {
+    // Ancienne « Ligne de tableau (par valeur) » : une cellule comparée à une
+    // colonne du fichier, extraction d'une autre cellule de la même ligne.
+    return {
+      ...o,
+      mode: "table",
+      rowSelector: o.rowSelector || "",
+      tblCombine: "and",
+      tblResult: "extract",
+      extractTdIndex: o.extractTdIndex || 2,
+      tblConds: [{
+        scope: "cell",
+        td: o.matchTdIndex || 1,
+        op: o.matchType === "exact" ? "equals" : "contains",
+        val: o.matchSourceCol ? "{" + o.matchSourceCol + "}" : ""
+      }]
+    };
+  }
+  if (o.mode === "tableCheck") {
+    // Ancien « Tableau : rempli / contient un texte » : conditions sur toute la
+    // ligne (les termes séparés par des virgules deviennent des conditions OU).
+    let conds = [];
+    const raw = (o.tcText || "").trim();
+    if (o.tcCheck === "text" && raw) {
+      conds = o.tcRegex
+        ? [{ scope: "row", td: 1, op: "regex", val: raw }]
+        : raw.split(",").map((t) => t.trim()).filter(Boolean)
+            .map((t) => ({ scope: "row", td: 1, op: "contains", val: t }));
+    }
+    return {
+      ...o,
+      mode: "table",
+      rowSelector: o.tcSelector || "",
+      tblCombine: "or",
+      tblResult: "check",
+      extractTdIndex: o.extractTdIndex || 2,
+      tblConds: conds
+    };
+  }
+  return o;
+}
+
+// Une ligne de condition du mode "table" : [cellule n°/toute la ligne] [opérateur] [valeur]
+function addTblCondRow(container, c = {}, onChange) {
+  const row = document.createElement("div");
+  row.className = "tbl-cond-item";
+  row.innerHTML = `
+    <select class="tbl-cond-scope">
+      <option value="cell">la cellule n°</option>
+      <option value="row">toute la ligne</option>
+    </select>
+    <input type="number" class="tbl-cond-td" min="1" value="${escapeAttr(c.td || 1)}" />
+    <select class="tbl-cond-op">
+      <option value="contains">contient</option>
+      <option value="equals">= exact</option>
+      <option value="not_contains">ne contient pas</option>
+      <option value="not_equals">&ne; différent de</option>
+      <option value="not_empty">n'est pas vide</option>
+      <option value="empty">est vide</option>
+      <option value="regex">correspond à la regex</option>
+    </select>
+    <input type="text" class="tbl-cond-val" placeholder="texte ou {Ma colonne}" value="${escapeAttr(c.val || "")}" />
+    <button class="remove-btn" title="Supprimer la condition" type="button"><svg class="icon icon-sm"><use href="#icon-close"/></svg></button>
+  `;
+  row.querySelector(".tbl-cond-scope").value = c.scope || "cell";
+  row.querySelector(".tbl-cond-op").value = c.op || "contains";
+  const syncCond = () => {
+    const isCell = row.querySelector(".tbl-cond-scope").value === "cell";
+    row.querySelector(".tbl-cond-td").style.display = isCell ? "" : "none";
+    const op = row.querySelector(".tbl-cond-op").value;
+    row.querySelector(".tbl-cond-val").style.display = (op === "empty" || op === "not_empty") ? "none" : "";
+  };
+  row.querySelector(".tbl-cond-scope").addEventListener("change", syncCond);
+  row.querySelector(".tbl-cond-op").addEventListener("change", syncCond);
+  row.querySelector(".remove-btn").addEventListener("click", () => {
+    row.remove();
+    if (onChange) onChange();
+    persistWorkingConfig();
+  });
+  syncCond();
+  container.appendChild(row);
+}
+
+// Une cellule supplémentaire à extraire de la ligne trouvée : n° + colonne cible.
+function addTblExtraRow(container, ex = {}) {
+  const row = document.createElement("div");
+  row.className = "tbl-extra-item";
+  row.innerHTML = `
+    <label>et la cellule n°</label>
+    <input type="number" class="tbl-extra-td" min="1" value="${escapeAttr(ex.td || 1)}" />
+    <label>→ écrire dans :</label>
+    <select class="tbl-extra-col" data-colselect="target"></select>
+    <input type="text" class="tbl-extra-newcol new-col-input" placeholder="lettre (C) ou nom de nouvelle colonne" style="display:none" value="${escapeAttr(ex.newCol || "")}" />
+    <button class="remove-btn" title="Ne plus extraire cette cellule" type="button"><svg class="icon icon-sm"><use href="#icon-close"/></svg></button>
+  `;
+  const sel = row.querySelector(".tbl-extra-col");
+  fillColumnSelect(sel, ex.col || "", [{ value: "__other__", label: "➕ Autre (lettre ou nouvelle colonne)…" }]);
+  const newColInput = row.querySelector(".tbl-extra-newcol");
+  if (ex.col === "__other__" || (ex.newCol && !ex.col)) {
+    sel.value = "__other__";
+    newColInput.style.display = "block";
+  }
+  sel.addEventListener("change", () => {
+    newColInput.style.display = sel.value === "__other__" ? "block" : "none";
+  });
+  row.querySelector(".remove-btn").addEventListener("click", () => { row.remove(); persistWorkingConfig(); });
+  container.appendChild(row);
+}
+
 function addOutputRow(o = {}) {
+  o = normalizeOutputConfig(o);
   const mode = o.mode || "css";
   const div = document.createElement("div");
   div.className = "out-item";
@@ -1918,8 +2031,7 @@ function addOutputRow(o = {}) {
     <div class="out-item-row1">
       <select class="mode-select">
         <option value="css">Info sur la page (sélecteur CSS)</option>
-        <option value="tableMatch">Ligne de tableau (par valeur)</option>
-        <option value="tableCheck">Tableau : rempli / contient un texte</option>
+        <option value="table">Tableau de résultats (lignes + conditions)</option>
       </select>
       <input type="text" class="selector-input" placeholder="sélecteur CSS du résultat" value="${escapeAttr(o.selector || "")}" />
       <button class="btn pick icon-only" data-pick-inline="1" title="Choisir sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
@@ -1931,50 +2043,35 @@ function addOutputRow(o = {}) {
       <select class="col-target-select" data-colselect="target"></select>
       <input type="text" class="new-col-input" placeholder="lettre (C) ou nom de nouvelle colonne" style="display:none" value="${escapeAttr(o.newCol || "")}" />
     </div>
-    <div class="out-item-tablematch" ${mode === "tableMatch" ? "" : "hidden"}>
-      <p class="hint">Pour lire une valeur dans un tableau de résultats. On cherche la ligne dont une cellule correspond à ta donnée, puis on récupère une autre cellule de <b>cette même ligne</b>.</p>
-      <label class="tm-label">1. Lignes du tableau (sélecteur CSS)</label>
+    <div class="out-item-table" ${mode === "table" ? "" : "hidden"}>
+      <p class="hint">Examine un tableau de la page <b>ligne par ligne</b>. Sans condition : vérifie simplement s'il contient au moins une ligne de données. Avec des conditions : cherche la première ligne qui correspond. Le résultat écrit est OUI / NON, ou le contenu d'une cellule de <b>la ligne trouvée</b>.</p>
+      <label class="tm-label">1. Tableau ou lignes à examiner (sélecteur CSS)</label>
       <div class="tm-row">
-        <input type="text" class="row-selector-input" placeholder="ex : #dataTable tbody tr" value="${escapeAttr(o.rowSelector || "")}" style="flex:1;min-width:110px" />
-        <button class="btn pick icon-only" data-pick-row="1" title="Choisir la ligne du tableau sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+        <input type="text" class="row-selector-input" placeholder="ex : #dataTable tbody tr  ou  .PowerGridClass" value="${escapeAttr(o.rowSelector || "")}" style="flex:1;min-width:110px" />
+        <button class="btn pick icon-only" data-pick-row="1" title="Choisir le tableau ou une ligne sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
       </div>
-      <label class="tm-label">2. Comparer avec ma colonne…</label>
+      <label class="tm-label">2. Conditions sur chaque ligne <span class="tm-label-light">(aucune = « le tableau est-il rempli ? »)</span></label>
+      <div class="tbl-conds"></div>
       <div class="tm-row">
-        <select class="match-col-select" data-colselect="plain"></select>
-        <select class="match-type-select">
-          <option value="contains">contient</option>
-          <option value="exact">= exact</option>
+        <button class="btn tbl-add-cond" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter une condition</button>
+        <select class="tbl-combine" title="Comment combiner plusieurs conditions ?">
+          <option value="and">toutes doivent correspondre (ET)</option>
+          <option value="or">au moins une suffit (OU)</option>
         </select>
       </div>
-      <label class="tm-label">3. N° des cellules dans le tableau (1 = 1<sup>re</sup> colonne)</label>
+      <p class="hint">Valeur : un texte fixe (ex : Dupont) ou <code>{Nom}</code> pour comparer à la valeur de ta colonne « Nom », ligne par ligne. Comparaisons insensibles à la casse et aux accents ; « contient » : « dpe » trouve DPE, test_dpe, DpeDiga… Cellule n° 1 = 1<sup>re</sup> colonne du tableau.</p>
+      <label class="tm-label">3. Résultat à écrire</label>
       <div class="tm-row">
-        <label>cellule à comparer :</label>
-        <input type="number" class="match-td-input" min="1" value="${escapeAttr(o.matchTdIndex || 1)}" />
-        <label>cellule à extraire :</label>
-        <input type="number" class="extract-td-input" min="1" value="${escapeAttr(o.extractTdIndex || 2)}" />
-      </div>
-    </div>
-    <div class="out-item-tablecheck" ${mode === "tableCheck" ? "" : "hidden"}>
-      <p class="hint">Regarde un tableau de la page : d'abord s'il est <b>rempli</b> (au moins une ligne de données), puis, si tu veux, s'il <b>contient un certain texte</b> (ex : DPE, même écrit test_dpe ou DpeDiga). Utilise les messages « trouvé » / « rien trouvé » plus bas pour choisir ce qui est écrit (ex : OUI / NON).</p>
-      <label class="tm-label">1. Tableau à examiner (sélecteur CSS)</label>
-      <div class="tm-row">
-        <input type="text" class="tc-selector-input" placeholder="ex : .PowerGridClass  ou  #dataTable tbody tr" value="${escapeAttr(o.tcSelector || "")}" style="flex:1;min-width:110px" />
-        <button class="btn pick icon-only" data-pick-tc="1" title="Choisir le tableau sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
-      </div>
-      <label class="tm-label">2. Que vérifier ?</label>
-      <div class="tm-row">
-        <select class="tc-check-select">
-          <option value="filled">Seulement : est-il rempli ?</option>
-          <option value="text">Est-il rempli ET contient un texte ?</option>
+        <select class="tbl-result-select">
+          <option value="check">OUI / NON (une ligne correspond ou pas)</option>
+          <option value="extract">Extraire une cellule de la ligne trouvée</option>
         </select>
+        <span class="tbl-extract-wrap"><label>cellule n°</label>
+        <input type="number" class="extract-td-input" min="1" value="${escapeAttr(o.extractTdIndex || 2)}" /></span>
       </div>
-      <div class="tc-text-block" ${o.tcCheck === "text" ? "" : "hidden"}>
-        <label class="tm-label">3. Texte(s) à chercher dans le tableau</label>
-        <div class="tm-row">
-          <input type="text" class="tc-text-input" placeholder="ex : dpe   (plusieurs termes séparés par une virgule = OU)" value="${escapeAttr(o.tcText || "")}" style="flex:1;min-width:110px" />
-        </div>
-        <label class="checkbox-row"><input type="checkbox" class="tc-regex-check" ${o.tcRegex ? "checked" : ""} /> Utiliser une expression régulière (regex, insensible à la casse)</label>
-        <p class="hint">Sans regex : recherche « contient », insensible à la casse. « dpe » trouve DPE, test_dpe, DpeDiga… Plusieurs termes séparés par une virgule = au moins un doit être présent. Tu peux aussi utiliser <code>{Nom de colonne}</code> pour chercher une valeur de la ligne.</p>
+      <div class="tbl-extras-wrap">
+        <div class="tbl-extras"></div>
+        <button class="btn tbl-add-extra" type="button" title="Extraire d'autres cellules de la même ligne trouvée, chacune vers sa colonne"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Extraire une autre cellule de cette ligne</button>
       </div>
     </div>
     <div class="out-item-notfound">
@@ -2024,7 +2121,6 @@ function addOutputRow(o = {}) {
   `;
 
   div.querySelector(".mode-select").value = mode;
-  div.querySelector(".match-type-select").value = o.matchType || "contains";
   div.querySelector(".regex-mode").value = o.regexMode || "extract";
 
   const targetSel = div.querySelector(".col-target-select");
@@ -2038,42 +2134,49 @@ function addOutputRow(o = {}) {
     newColInput.style.display = targetSel.value === "__other__" ? "block" : "none";
   });
 
-  fillColumnSelect(div.querySelector(".match-col-select"), o.matchSourceCol || "");
-
-  const tablematchDiv = div.querySelector(".out-item-tablematch");
-  const tablecheckDiv = div.querySelector(".out-item-tablecheck");
+  const tableDiv = div.querySelector(".out-item-table");
   const cssHint = div.querySelector(".out-item-csshint");
   const selectorInput = div.querySelector(".selector-input");
   const pickCssBtn = div.querySelector("[data-pick-inline]");
   const modeSelect = div.querySelector(".mode-select");
   const syncMode = () => {
-    const isMatch = modeSelect.value === "tableMatch";
-    const isCheck = modeSelect.value === "tableCheck";
-    const isCss = !isMatch && !isCheck;
-    tablematchDiv.hidden = !isMatch;
-    tablecheckDiv.hidden = !isCheck;
-    cssHint.style.display = isCss ? "block" : "none";
-    selectorInput.style.display = isCss ? "block" : "none";
-    pickCssBtn.style.display = isCss ? "" : "none";
+    const isTable = modeSelect.value === "table";
+    tableDiv.hidden = !isTable;
+    cssHint.style.display = isTable ? "none" : "block";
+    selectorInput.style.display = isTable ? "none" : "block";
+    pickCssBtn.style.display = isTable ? "none" : "";
   };
   modeSelect.addEventListener("change", () => { syncMode(); persistWorkingConfig(); });
   syncMode();
 
-  // Mode "tableCheck" : sélecteur du tableau, sous-mode rempli/texte, terme, regex
-  div.querySelector(".tc-check-select").value = o.tcCheck || "filled";
-  const tcCheckSelect = div.querySelector(".tc-check-select");
-  const tcTextBlock = div.querySelector(".tc-text-block");
-  const tcSelInput = div.querySelector(".tc-selector-input");
-  const syncTcMode = () => { tcTextBlock.hidden = tcCheckSelect.value !== "text"; };
-  tcCheckSelect.addEventListener("change", () => { syncTcMode(); persistWorkingConfig(); });
-  syncTcMode();
-  div.querySelector("[data-pick-tc]").addEventListener("click", async () => {
-    const picked = await pickTargetOnActiveTab();
-    if (picked && picked.selector) { tcSelInput.value = picked.selector; persistWorkingConfig(); }
+  // Mode "table" : conditions sur les lignes, combinaison ET/OU, type de résultat
+  const condsBox = div.querySelector(".tbl-conds");
+  const combineSel = div.querySelector(".tbl-combine");
+  const resultSel = div.querySelector(".tbl-result-select");
+  const extractWrap = div.querySelector(".tbl-extract-wrap");
+  const extrasWrap = div.querySelector(".tbl-extras-wrap");
+  const extrasBox = div.querySelector(".tbl-extras");
+  const syncTblUi = () => {
+    const isExtract = resultSel.value === "extract";
+    extractWrap.style.display = isExtract ? "" : "none";
+    extrasWrap.style.display = isExtract ? "" : "none";
+    combineSel.style.display = condsBox.children.length > 1 ? "" : "none";
+  };
+  (o.tblConds || []).forEach((c) => addTblCondRow(condsBox, c, syncTblUi));
+  (o.tblExtras || []).forEach((ex) => addTblExtraRow(extrasBox, ex.newCol ? { ...ex, col: "__other__", newCol: ex.newCol } : ex));
+  combineSel.value = o.tblCombine || "and";
+  resultSel.value = o.tblResult || "extract";
+  resultSel.addEventListener("change", () => { syncTblUi(); persistWorkingConfig(); });
+  div.querySelector(".tbl-add-cond").addEventListener("click", () => {
+    addTblCondRow(condsBox, {}, syncTblUi);
+    syncTblUi();
+    persistWorkingConfig();
   });
-  div.querySelectorAll(".tc-selector-input, .tc-text-input, .tc-regex-check").forEach((el) => {
-    el.addEventListener("change", persistWorkingConfig);
+  div.querySelector(".tbl-add-extra").addEventListener("click", () => {
+    addTblExtraRow(extrasBox);
+    persistWorkingConfig();
   });
+  syncTblUi();
 
   div.querySelector(".remove-btn").addEventListener("click", () => { div.remove(); persistWorkingConfig(); });
   pickCssBtn.addEventListener("click", async () => {
@@ -2175,30 +2278,34 @@ function getOutputs() {
     const regexReplace = el.querySelector(".regex-replace").value;
     const regexFlagI = el.querySelector(".regex-i").checked;
     const base = { mode, col, newCol, notFoundEnabled, notFoundMsg, foundEnabled, foundMsg, regexEnabled, regexMode, regexPattern, regexReplace, regexFlagI };
-    if (mode === "tableMatch") {
+    if (mode === "table") {
       return {
         ...base,
         rowSelector: el.querySelector(".row-selector-input").value.trim(),
-        matchSourceCol: el.querySelector(".match-col-select").value,
-        matchType: el.querySelector(".match-type-select").value,
-        matchTdIndex: parseInt(el.querySelector(".match-td-input").value, 10) || 1,
-        extractTdIndex: parseInt(el.querySelector(".extract-td-input").value, 10) || 1
-      };
-    }
-    if (mode === "tableCheck") {
-      return {
-        ...base,
-        tcSelector: el.querySelector(".tc-selector-input").value.trim(),
-        tcCheck: el.querySelector(".tc-check-select").value,
-        tcText: el.querySelector(".tc-text-input").value.trim(),
-        tcRegex: el.querySelector(".tc-regex-check").checked
+        tblCombine: el.querySelector(".tbl-combine").value,
+        tblResult: el.querySelector(".tbl-result-select").value,
+        extractTdIndex: parseInt(el.querySelector(".extract-td-input").value, 10) || 1,
+        tblConds: Array.from(el.querySelectorAll(".tbl-cond-item")).map((c) => ({
+          scope: c.querySelector(".tbl-cond-scope").value,
+          td: parseInt(c.querySelector(".tbl-cond-td").value, 10) || 1,
+          op: c.querySelector(".tbl-cond-op").value,
+          val: c.querySelector(".tbl-cond-val").value
+        })).filter((c) => c.op === "empty" || c.op === "not_empty" || c.val.trim() !== ""),
+        tblExtras: Array.from(el.querySelectorAll(".tbl-extra-item")).map((x) => {
+          let col = x.querySelector(".tbl-extra-col").value;
+          let newCol = "";
+          if (col === "__other__") {
+            newCol = x.querySelector(".tbl-extra-newcol").value.trim();
+            col = newCol;
+          }
+          return { td: parseInt(x.querySelector(".tbl-extra-td").value, 10) || 1, col, newCol };
+        }).filter((x) => x.col)
       };
     }
     return { ...base, selector: el.querySelector(".selector-input").value.trim() };
   }).filter((o) => {
     if (!o.col) return false;
-    if (o.mode === "tableMatch") return Boolean(o.rowSelector && o.matchSourceCol);
-    if (o.mode === "tableCheck") return Boolean(o.tcSelector && (o.tcCheck !== "text" || o.tcText));
+    if (o.mode === "table") return Boolean(o.rowSelector);
     return Boolean(o.selector);
   });
 }
@@ -2257,32 +2364,16 @@ function performRowActionInjected(config) {
         return normSpaces(el.innerText || el.textContent || "");
       }
 
-      function readTableMatch(out) {
-        const trs = document.querySelectorAll(out.rowSelector);
-        if (!trs.length) return { found: false, value: "", reason: "noRows" };
-        const needle = foldText(out.matchValue);
-        for (const tr of trs) {
-          const cells = tr.querySelectorAll("td");
-          const matchCell = cells[out.matchTdIndex - 1];
-          if (!matchCell) continue;
-          const cellText = foldText(matchCell.textContent);
-          const isMatch = out.matchType === "exact" ? cellText === needle : cellText.includes(needle);
-          if (isMatch) {
-            const extractCell = cells[out.extractTdIndex - 1];
-            return { found: true, value: extractCell ? normSpaces(extractCell.textContent) : "" };
-          }
-        }
-        return { found: false, value: "", reason: "noMatch" };
-      }
-
-      // Vérifie si un tableau est rempli, et éventuellement s'il contient un texte.
-      // Robuste : ignore les lignes d'en-tête, gère un sélecteur qui vise le
-      // tableau, le tbody ou directement les lignes.
-      function readTableCheck(out) {
+      // Mode unifié "table" : collecte les lignes de données du tableau, cherche
+      // la première ligne qui satisfait les conditions (ET/OU), puis renvoie
+      // OUI/NON ou la valeur d'une cellule de cette ligne. Robuste : ignore les
+      // lignes d'en-tête, accepte un sélecteur qui vise le tableau, le tbody ou
+      // directement les lignes.
+      function readTable(out) {
         let nodes;
-        try { nodes = document.querySelectorAll(out.tcSelector); }
-        catch (e) { return { found: false, filled: false, reason: "badSelector" }; }
-        if (!nodes.length) return { found: false, filled: false, reason: "noNode" };
+        try { nodes = document.querySelectorAll(out.rowSelector); }
+        catch (e) { return { found: false, value: "", reason: "badSelector" }; }
+        if (!nodes.length) return { found: false, value: "", reason: "noRows" };
 
         // Récupère les lignes candidates (tr) ou, à défaut, les nœuds eux-mêmes.
         const candidates = [];
@@ -2300,7 +2391,7 @@ function performRowActionInjected(config) {
         });
 
         // Ne garde que les lignes de données non vides (on écarte les en-têtes).
-        const meaningful = candidates.filter((n) => {
+        const rows = candidates.filter((n) => {
           const tag = n.tagName ? n.tagName.toLowerCase() : "";
           if (tag === "tr") {
             const cls = (n.className || "").toLowerCase();
@@ -2309,68 +2400,98 @@ function performRowActionInjected(config) {
           }
           return (n.innerText || n.textContent || "").trim() !== "";
         });
+        if (!rows.length) return { found: false, value: "", reason: "empty" };
 
-        const filled = meaningful.length > 0;
-        if (out.tcCheck !== "text") return { found: filled, filled };
-
-        // Recherche de texte : le tableau doit d'abord être rempli.
-        if (!filled) return { found: false, filled: false, reason: "empty" };
-        // Chaque ligne est normalisée séparément pour ne pas coller entre elles.
-        const haystack = meaningful.map((n) => normSpaces(n.innerText || n.textContent || "")).join("\n");
-        const raw = (out.tcText || "").trim();
-        if (!raw) return { found: false, filled, reason: "noTerm" };
-
-        let matched = false;
-        if (out.tcRegex) {
-          // Le motif est testé sur le texte normalisé : une espace littérale
-          // dans la regex matche donc aussi un &nbsp; de la page.
-          try { matched = new RegExp(raw, "i").test(haystack); }
-          catch (e) { return { found: false, filled, reason: "badRegex" }; }
-        } else {
-          const hay = haystack.split("\n").map(foldText).join("\n");
-          matched = raw.split(",").map((t) => foldText(t)).filter(Boolean)
-            .some((t) => hay.includes(t));
+        const conds = out.conds || [];
+        // Valide les regex une fois pour toutes avant de parcourir les lignes.
+        for (const c of conds) {
+          if (c.op === "regex") {
+            try { new RegExp(c.val, "i"); }
+            catch (e) { return { found: false, value: "", reason: "badRegex", detail: c.val }; }
+          }
         }
-        return { found: matched, filled };
+
+        // Texte d'une cellule (1 = 1re colonne) ; "" si la cellule n'existe pas.
+        const cellText = (tr, i) => {
+          const cells = tr.querySelectorAll ? tr.querySelectorAll("td") : [];
+          return cells[i - 1] ? normSpaces(cells[i - 1].textContent) : "";
+        };
+
+        // Une condition testée sur une ligne. Comparaisons sans casse ni accents
+        // (foldText) ; la regex est testée sur le texte normalisé (une espace
+        // littérale matche donc aussi un &nbsp; de la page).
+        const condOk = (tr, c) => {
+          const txt = c.scope === "row"
+            ? normSpaces(tr.innerText || tr.textContent || "")
+            : cellText(tr, c.td);
+          switch (c.op) {
+            case "empty": return txt === "";
+            case "not_empty": return txt !== "";
+            case "regex": return new RegExp(c.val, "i").test(txt);
+            case "equals": return foldText(txt) === foldText(c.val);
+            case "not_equals": return foldText(txt) !== foldText(c.val);
+            case "not_contains": return !foldText(txt).includes(foldText(c.val));
+            default: return foldText(txt).includes(foldText(c.val)); // contains
+          }
+        };
+
+        for (const tr of rows) {
+          const ok = !conds.length
+            || (out.combine === "or" ? conds.some((c) => condOk(tr, c)) : conds.every((c) => condOk(tr, c)));
+          if (ok) {
+            return {
+              found: true,
+              value: out.result === "extract" ? cellText(tr, out.extractTdIndex) : "",
+              extraValues: (out.extras || []).map((e) => cellText(tr, e.td))
+            };
+          }
+        }
+        return { found: false, value: "", reason: "noMatch" };
       }
 
-      function readResults() {
+      function computeResults() {
         const values = [];
         const notFound = [];
+        const info = [];
+        const extraValues = [];
+        let retry = false; // true si un "rien trouvé" pourrait venir d'une page pas finie de charger
         for (const out of config.outputs) {
           const fallback = out.notFoundEnabled ? (out.notFoundMsg || "") : "";
-          if (out.mode === "tableMatch") {
-            const { found, value, reason } = readTableMatch(out);
-            if (found) {
-              // Si un message perso "trouvé" est défini, il remplace la valeur extraite.
-              values.push(out.foundEnabled ? (out.foundMsg || "") : value);
-            } else {
-              values.push(fallback);
-              // Si un message perso est défini, on ne signale plus d'erreur "introuvable".
-              if (!out.notFoundEnabled) {
-                notFound.push(reason === "noRows"
-                  ? 'aucune ligne trouvée pour le sélecteur "' + out.rowSelector + '" (vérifie ce sélecteur ou augmente le délai d\'attente)'
-                  : 'aucune ligne où la cellule n°' + out.matchTdIndex + ' correspond à "' + out.matchValue + '"');
-              }
-            }
-          } else if (out.mode === "tableCheck") {
-            const r = readTableCheck(out);
+          if (out.mode === "table") {
+            const r = readTable(out);
+            extraValues.push(r.found ? (r.extraValues || []) : null);
             // Erreurs de configuration : on le signale comme "introuvable".
             if (r.reason === "badSelector" || r.reason === "badRegex") {
               values.push(out.notFoundEnabled ? (out.notFoundMsg || "") : "");
               notFound.push(r.reason === "badRegex"
-                ? 'expression régulière invalide : "' + out.tcText + '"'
-                : 'sélecteur de tableau invalide : "' + out.tcSelector + '"');
+                ? 'expression régulière invalide : "' + (r.detail || "") + '"'
+                : 'sélecteur de tableau invalide : "' + out.rowSelector + '"');
             } else if (r.found) {
-              // Trouvé (rempli, ou rempli + texte présent) : message perso ou "OUI".
-              values.push(out.foundEnabled ? (out.foundMsg || "") : "OUI");
+              // Trouvé : message perso s'il est défini, sinon la cellule extraite ou "OUI".
+              values.push(out.foundEnabled ? (out.foundMsg || "") : (out.result === "extract" ? r.value : "OUI"));
+            } else if (out.result === "extract") {
+              // Extraction sans ligne correspondante : peut-être un tableau pas
+              // encore affiché -> on re-tentera avant de conclure.
+              retry = true;
+              values.push(fallback);
+              const why = r.reason === "noRows"
+                ? 'aucune ligne trouvée pour le sélecteur "' + out.rowSelector + '" (vérifie ce sélecteur ou augmente le délai d\'attente)'
+                : (r.reason === "empty"
+                  ? 'tableau vide pour le sélecteur "' + out.rowSelector + '"'
+                  : "aucune ligne du tableau ne correspond aux conditions");
+              if (!out.notFoundEnabled) notFound.push(why);
+              else info.push('tableau : ' + why + ' — message « ' + (out.notFoundMsg || "") + ' » écrit');
             } else {
-              // Pas trouvé (vide, ou texte absent) : c'est un résultat normal, pas une erreur.
+              // Mode OUI/NON : "pas trouvé" est un résultat normal, pas une erreur,
+              // mais on re-vérifie quand même au cas où la page charge encore.
+              retry = true;
               values.push(out.notFoundEnabled ? (out.notFoundMsg || "") : "NON");
             }
           } else {
+            extraValues.push(null);
             const el = document.querySelector(out.selector);
             if (!el) {
+              retry = true;
               values.push(fallback);
               if (!out.notFoundEnabled) notFound.push(out.selector);
               continue;
@@ -2378,7 +2499,21 @@ function performRowActionInjected(config) {
             values.push(out.foundEnabled ? (out.foundMsg || "") : textOf(el));
           }
         }
-        resolve({ ok: true, values, notFound });
+        return { values, notFound, info, extraValues, retry };
+      }
+
+      // Les pages AJAX affichent parfois leurs résultats APRÈS le délai
+      // d'attente : au lieu d'une lecture unique, on re-lit toutes les 250 ms
+      // pendant 1,6 s de plus tant que rien n'est trouvé, et on s'arrête dès
+      // que ça matche. Évite les faux « rien trouvé » sans ralentir les cas OK.
+      function readResults() {
+        const deadline = Date.now() + 1600;
+        const attempt = () => {
+          const r = computeResults();
+          if (r.retry && Date.now() < deadline) return setTimeout(attempt, 250);
+          resolve({ ok: true, values: r.values, notFound: r.notFound, info: r.info, extraValues: r.extraValues });
+        };
+        attempt();
       }
 
       fields.forEach((f) => setElementValue(f.el, f.value));
@@ -2443,6 +2578,117 @@ function resolveRowTemplate(str, row) {
     return getCellByIndex(row, idx);
   });
 }
+
+/* ---------- Autocomplétion {Colonne} dans les champs texte ----------
+   Façon VSCode : taper « { » dans un champ compatible ouvre un petit menu
+   avec les noms de colonnes du fichier ; on filtre en tapant, ↑/↓ pour
+   naviguer, Entrée ou Tab pour insérer, Échap pour fermer, clic possible. */
+
+// Tous les champs texte du panneau, sauf les zones de collage de données
+// (Excel/JSON/modèle) où « { » et Entrée font partie du contenu collé.
+const AC_FIELDS_SELECTOR = 'input[type="text"], input:not([type]), textarea';
+const AC_EXCLUDE_SELECTOR = "#pasteArea, #jsonTextArea, #newModelColumns";
+function acEligible(t) {
+  return t && t.matches && t.matches(AC_FIELDS_SELECTOR) && !t.matches(AC_EXCLUDE_SELECTOR);
+}
+
+let acState = { input: null, items: [], index: -1, start: -1 };
+let acMenuEl = null;
+
+function acMenu() {
+  if (acMenuEl) return acMenuEl;
+  acMenuEl = document.createElement("div");
+  acMenuEl.id = "colAcMenu";
+  acMenuEl.hidden = true;
+  document.body.appendChild(acMenuEl);
+  // mousedown (et non click) pour passer avant le blur du champ.
+  acMenuEl.addEventListener("mousedown", (e) => {
+    const item = e.target.closest("[data-ac-i]");
+    if (!item) return;
+    e.preventDefault();
+    acInsert(parseInt(item.getAttribute("data-ac-i"), 10));
+  });
+  return acMenuEl;
+}
+
+function acClose() {
+  if (acMenuEl) acMenuEl.hidden = true;
+  acState = { input: null, items: [], index: -1, start: -1 };
+}
+
+function acFold(s) {
+  return String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+// Insère le nom choisi à la place de « {texte-tapé », ajoute « } » si absent.
+function acInsert(i) {
+  const { input, items, start } = acState;
+  const name = items[i];
+  if (!input || name === undefined) { acClose(); return; }
+  const v = input.value;
+  const caret = input.selectionStart ?? v.length;
+  const rest = v.slice(caret);
+  const closing = rest.startsWith("}") ? "" : "}";
+  input.value = v.slice(0, start + 1) + name + closing + rest;
+  const pos = start + 1 + name.length + 1;
+  acClose();
+  input.focus();
+  try { input.setSelectionRange(pos, pos); } catch (_) {}
+  input.dispatchEvent(new Event("change", { bubbles: true })); // sauvegarde auto
+}
+
+function acHighlight(newIndex) {
+  if (!acState.items.length) return;
+  acState.index = (newIndex + acState.items.length) % acState.items.length;
+  acMenu().querySelectorAll("[data-ac-i]").forEach((el, i) => {
+    el.classList.toggle("sel", i === acState.index);
+  });
+  const sel = acMenu().querySelector(".sel");
+  if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
+}
+
+function acRefresh(input) {
+  const caret = input.selectionStart ?? input.value.length;
+  const before = input.value.slice(0, caret);
+  const open = before.lastIndexOf("{");
+  // Pas de « { » ouvert avant le curseur (ou déjà refermé) : pas de menu.
+  if (open < 0 || before.slice(open + 1).includes("}")) { acClose(); return; }
+  const typed = acFold(before.slice(open + 1));
+  const names = getColumns().map((c) => c.name).filter(Boolean);
+  let items = names.filter((n) => acFold(n).startsWith(typed));
+  if (!items.length) items = names.filter((n) => acFold(n).includes(typed)); // repli « contient »
+  if (!items.length) { acClose(); return; }
+  acState = { input, items, index: 0, start: open };
+  const menu = acMenu();
+  menu.innerHTML = items.map((n, i) =>
+    `<div class="ac-item${i === 0 ? " sel" : ""}" data-ac-i="${i}">{${escapeHtml(n)}}</div>`).join("");
+  const r = input.getBoundingClientRect();
+  menu.style.left = Math.round(Math.max(4, Math.min(r.left, window.innerWidth - 250))) + "px";
+  menu.style.top = Math.round(r.bottom + 2) + "px";
+  menu.hidden = false;
+}
+
+document.addEventListener("input", (e) => {
+  if (acEligible(e.target)) acRefresh(e.target);
+  else acClose();
+}, true);
+
+document.addEventListener("keydown", (e) => {
+  if (!acMenuEl || acMenuEl.hidden) return;
+  if (e.key === "ArrowDown") { e.preventDefault(); acHighlight(acState.index + 1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); acHighlight(acState.index - 1); }
+  else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); e.stopPropagation(); acInsert(acState.index); }
+  else if (e.key === "Escape") { e.stopPropagation(); acClose(); }
+}, true);
+
+// Fermer quand le champ perd le focus (sauf si on vient de cliquer le menu),
+// au clic ailleurs, ou quand le panneau défile (le menu est en position fixe).
+document.addEventListener("focusout", (e) => {
+  if (acState.input && e.target === acState.input) {
+    setTimeout(() => { if (document.activeElement !== acState.input) acClose(); }, 120);
+  }
+}, true);
+document.addEventListener("scroll", () => acClose(), true);
 
 // Navigue l'onglet vers l'URL. Si waitForLoad, attend la fin du chargement
 // (status "complete") avec timeout ; en cas de timeout on continue quand même
@@ -2586,11 +2832,23 @@ async function runAutomation() {
   const outputsResolved = outputs.map((o) => ({
     ...o,
     targetIdx: resolveOutputTarget(o.col, createdCols),
-    matchSourceIdx: o.mode === "tableMatch" ? colIndexByName(o.matchSourceCol) : -1
+    // Cellules supplémentaires du mode table : résolution de leur colonne cible.
+    tblExtrasResolved: (o.mode === "table" && o.tblResult === "extract" ? (o.tblExtras || []) : [])
+      .map((ex) => ({ td: ex.td, targetIdx: resolveOutputTarget(ex.col, createdCols) }))
   }));
-  const badMatch = outputsResolved.filter((o) => o.mode === "tableMatch" && o.matchSourceIdx < 0);
-  if (badMatch.length) {
-    logLine("Colonne de comparaison introuvable : " + badMatch.map((o) => o.matchSourceCol).join(", "), "err");
+  // Vérifie en amont que les {Colonnes} citées dans les conditions de tableau existent.
+  const badCondCols = new Set();
+  outputsResolved.forEach((o) => {
+    if (o.mode !== "table") return;
+    (o.tblConds || []).forEach((c) => {
+      String(c.val || "").replace(/\{([^{}]+)\}/g, (_, name) => {
+        if (colIndexByName(name.trim()) < 0) badCondCols.add(name.trim());
+        return "";
+      });
+    });
+  });
+  if (badCondCols.size) {
+    logLine("Colonne(s) introuvable(s) dans les conditions de tableau : " + [...badCondCols].join(", "), "err");
     return;
   }
 
@@ -2632,7 +2890,7 @@ async function runAutomation() {
       continue;
     }
 
-    const searchFieldValues = searchResolved.map((f) => ({ selector: f.selector, value: getCellByIndex(row, f.colIdx) }));
+    const searchFieldValues = searchResolved.map((f) => ({ selector: resolveRowTemplate(f.selector, row), value: getCellByIndex(row, f.colIdx) }));
     let searchLabel = searchFieldValues.map((f) => f.value).filter((v) => v.trim()).join(" / ");
     if (searchResolved.length && !searchFieldValues.some((f) => f.value.trim())) {
       logLine(`Ligne ${rowNum} : ignorée (valeur(s) de recherche vide(s)).`, "skip");
@@ -2670,36 +2928,33 @@ async function runAutomation() {
         args: [{
           searchFields: searchFieldValues,
           submitMode,
-          submitSelector,
+          submitSelector: resolveRowTemplate(submitSelector, row),
           waitMs,
-          outputs: outputsResolved.map((o) => o.mode === "tableMatch" ? {
-            mode: "tableMatch",
-            rowSelector: o.rowSelector,
-            matchType: o.matchType,
-            matchTdIndex: o.matchTdIndex,
-            extractTdIndex: o.extractTdIndex,
-            matchValue: getCellByIndex(row, o.matchSourceIdx),
+          outputs: outputsResolved.map((o) => o.mode === "table" ? {
+            mode: "table",
+            rowSelector: resolveRowTemplate(o.rowSelector, row),
+            combine: o.tblCombine || "and",
+            result: o.tblResult || "check",
+            extractTdIndex: o.extractTdIndex || 1,
+            extras: (o.tblExtrasResolved || []).map((ex) => ({ td: ex.td })),
+            // Les {Colonnes} sont résolues ici, ligne par ligne.
+            conds: (o.tblConds || []).map((c) => ({
+              scope: c.scope,
+              td: c.td,
+              op: c.op,
+              val: resolveRowTemplate(c.val, row)
+            })),
             notFoundEnabled: o.notFoundEnabled,
-            notFoundMsg: o.notFoundMsg,
+            notFoundMsg: resolveRowTemplate(o.notFoundMsg, row),
             foundEnabled: o.foundEnabled,
-            foundMsg: o.foundMsg
-          } : o.mode === "tableCheck" ? {
-            mode: "tableCheck",
-            tcSelector: o.tcSelector,
-            tcCheck: o.tcCheck,
-            tcText: resolveRowTemplate(o.tcText, row),
-            tcRegex: o.tcRegex,
-            notFoundEnabled: o.notFoundEnabled,
-            notFoundMsg: o.notFoundMsg,
-            foundEnabled: o.foundEnabled,
-            foundMsg: o.foundMsg
+            foundMsg: resolveRowTemplate(o.foundMsg, row)
           } : {
             mode: "css",
-            selector: o.selector,
+            selector: resolveRowTemplate(o.selector, row),
             notFoundEnabled: o.notFoundEnabled,
-            notFoundMsg: o.notFoundMsg,
+            notFoundMsg: resolveRowTemplate(o.notFoundMsg, row),
             foundEnabled: o.foundEnabled,
-            foundMsg: o.foundMsg
+            foundMsg: resolveRowTemplate(o.foundMsg, row)
           })
         }]
       });
@@ -2711,13 +2966,29 @@ async function runAutomation() {
       } else {
         outputsResolved.forEach((o, i) => {
           let val = result.values[i];
-          // Ne pas reformater le message "non trouvé" éventuel.
-          const isNotFoundMsg = o.notFoundEnabled && val === (o.notFoundMsg || "");
-          const isFoundMsg = o.foundEnabled && val === (o.foundMsg || "");
-          if (!isNotFoundMsg && !isFoundMsg) val = applyOutputRegex(val, o);
+          // Ne pas reformater le message "non trouvé" éventuel (les messages
+          // peuvent contenir des {Colonnes} : on compare aux versions résolues).
+          const isNotFoundMsg = o.notFoundEnabled && val === (resolveRowTemplate(o.notFoundMsg, row) || "");
+          const isFoundMsg = o.foundEnabled && val === (resolveRowTemplate(o.foundMsg, row) || "");
+          if (!isNotFoundMsg && !isFoundMsg) {
+            val = applyOutputRegex(val, {
+              ...o,
+              regexPattern: resolveRowTemplate(o.regexPattern, row),
+              regexReplace: resolveRowTemplate(o.regexReplace, row)
+            });
+          }
           setCellByIndex(row, o.targetIdx, val);
+          // Cellules supplémentaires du mode table : mêmes règles, ligne trouvée
+          // -> valeurs extraites, sinon le même message/fallback que la cellule principale.
+          const evs = (result.extraValues && result.extraValues[i]) || null;
+          (o.tblExtrasResolved || []).forEach((ex, j) => {
+            setCellByIndex(row, ex.targetIdx, evs ? (evs[j] ?? "") : val);
+          });
         });
         state.rows[idx] = row;
+        if (result.info && result.info.length) {
+          logLine(`Ligne ${rowNum} : ${result.info.join(" ; ")}`, "skip");
+        }
         const missingSelectors = result.notFound || [];
         const allValuesEmpty = result.values.every((v) => !String(v || "").trim());
         if (missingSelectors.length) {
@@ -4172,6 +4443,9 @@ function batchScopeErrorMsg(sel) {
 // au lieu de tous les onglets du site.
 async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
   try {
+    // Ligne active (ou null) : sert à résoudre les {Colonne} des sélecteurs.
+    const stepRow = (rowIdx !== null && rowIdx !== undefined) ? (state.rows[rowIdx] || []) : null;
+    const rts = (v) => resolveRowTemplate(v, stepRow);
     switch (step.type) {
       case "fill": {
         const { data, mapping, customFields, rowContext } = buildFillPayload(rowIdx);
@@ -4213,7 +4487,7 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
         const [{ result }] = await chrome.scripting.executeScript({
           target: { tabId },
           func: scnClickInjected,
-          args: [{ selector: step.clickSelector, timeoutMs: step.clickTimeout }]
+          args: [{ selector: rts(step.clickSelector), timeoutMs: step.clickTimeout }]
         });
         return result || { ok: false, error: "pas de réponse de la page" };
       }
@@ -4226,7 +4500,7 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
         const [{ result }] = await chrome.scripting.executeScript({
           target: { tabId },
           func: scnWaitInjected,
-          args: [{ selector: step.waitSelector, timeoutMs: step.waitTimeout, mode: step.waitMode }]
+          args: [{ selector: rts(step.waitSelector), timeoutMs: step.waitTimeout, mode: step.waitMode }]
         });
         return result || { ok: false, error: "pas de réponse de la page" };
       }
@@ -4239,7 +4513,7 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
           const [{ result }] = await chrome.scripting.executeScript({
             target: { tabId },
             func: scnCheckInjected,
-            args: [{ selector: step.condSelector, op: step.condPageOp, value: pageVal }]
+            args: [{ selector: rts(step.condSelector), op: step.condPageOp, value: pageVal }]
           });
           if (!result || !result.ok) return { ok: false, error: result ? result.error : "pas de réponse de la page" };
           match = result.match;
