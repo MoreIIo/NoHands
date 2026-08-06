@@ -2346,11 +2346,17 @@ function performRowActionInjected(config) {
       // Les pages ASP.NET (SIGEO) émettent des &nbsp; (U+00A0) là où on
       // attend une espace normale : "Type&nbsp;inconnu". Sans normalisation,
       // une recherche de "Type inconnu" ne matche jamais, regex comprise.
-      const OSA_SPACES = /[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000\uFEFF]/g;
-
+      //
+      // La regex est volontairement inlinée : en mode navigation seule
+      // (aucun champ de recherche), on sort de la fonction avant d'atteindre
+      // cette ligne, et readResults s'exécute plus tard via setTimeout. Une
+      // const externe serait alors dans sa TDZ -> ReferenceError.
       // Espaces exotiques -> espace simple, espaces multiples réduites.
       function normSpaces(s) {
-        return String(s == null ? "" : s).replace(OSA_SPACES, " ").replace(/\s+/g, " ").trim();
+        return String(s == null ? "" : s)
+          .replace(/[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000\uFEFF]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
       }
 
       // Pour comparaison : en plus, sans accents et en minuscules.
