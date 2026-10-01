@@ -532,6 +532,28 @@ input[type="file"]::file-selector-button {
   border-radius: 50%; font-size: 11px; font-weight: 700;
 }
 .scn-num::before { content: counter(scn); }
+
+/* Icône du type d'étape : une couleur par famille pour repérer le scénario
+   d'un coup d'œil (saisie, navigation, attente, logique, PDF, SIGEO…). */
+.scn-step { --scn-c: var(--accent); border-left: 3px solid var(--scn-c); }
+.scn-step[data-type="fill"]      { --scn-c: #8b7ff5; }
+.scn-step[data-type="input"]     { --scn-c: #60a5fa; }
+.scn-step[data-type="goto"]      { --scn-c: #22d3ee; }
+.scn-step[data-type="click"]     { --scn-c: #f472b6; }
+.scn-step[data-type="wait"]      { --scn-c: #fbbf24; }
+.scn-step[data-type="cond"]      { --scn-c: #fb923c; }
+.scn-step[data-type="pdfcheck"],
+.scn-step[data-type="pdfwrite"]  { --scn-c: #f87171; }
+.scn-step[data-type="sigeo"]     { --scn-c: #4ade80; }
+.scn-step[data-type="batchedit"] { --scn-c: #2dd4bf; }
+.scn-icon {
+  flex: none; width: 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px;
+  color: var(--scn-c);
+  background: color-mix(in srgb, var(--scn-c) 16%, transparent);
+}
+.scn-icon .icon { width: 15px; height: 15px; }
 .scn-head .scn-type { flex: 1; min-width: 0; }
 .scn-body .scn-row {
   display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
@@ -553,6 +575,7 @@ input[type="file"]::file-selector-button {
 .scn-step:not([data-type="pdfcheck"]):not([data-type="pdfwrite"]) .scn-only-pdf { display: none; }
 .scn-step:not([data-type="sigeo"]) .scn-only-sigeo { display: none; }
 .scn-step:not([data-type="batchedit"]) .scn-only-batchedit { display: none; }
+.scn-step:not([data-type="input"]) .scn-only-input { display: none; }
 
 /* ---------- Toolbox PDF (bêta) ---------- */
 .beta-badge {

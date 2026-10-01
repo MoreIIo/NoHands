@@ -52,6 +52,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         startFillObserver();
         sendResponse({ success: false, filledCount: 0, filled: [], errors: [err.message], error: err.message });
       });
+  } else if (request.action === 'fillOne') {
+    // Étape de scénario « Saisir un champ » : un seul champ, sans toucher à
+    // l'état du remplissage complet (ni à son observer de re-remplissage).
+    // Le message part vers toutes les frames et seule la PREMIÈRE réponse
+    // compte : une frame qui n'a pas le champ se tait, et la frame principale
+    // ne signale l'échec qu'après un court délai (laisse répondre les iframes).
+    const { name: id } = parseInputIdentifier(request.identifier || '');
+    if (!findFormInput(id)) {
+      if (window !== window.top) return false;
+      setTimeout(() => sendResponse({
+        success: false, filledCount: 0, filled: [],
+        errors: [`Input non trouvé (name/id/classe): ${id}`]
+      }), 400);
+      return true;
+    }
+    fillOneField(request.identifier, request.value ?? '', request.rowContext || null)
+      .then((res) => sendResponse({
+        success: !!res.success,
+        filledCount: res.success ? 1 : 0,
+        filled: res.success ? [`${res.identifier || id}${res.detail ? ` (${res.detail})` : ''}`] : [],
+        errors: res.success ? (res.warning ? [res.warning] : []) : [res.error || `Échec pour ${id}`]
+      }))
+      .catch((err) => sendResponse({ success: false, filledCount: 0, filled: [], errors: [err.message] }));
+    return true;
   } else if (request.action === 'copyInputName') {
     if (lastContextMenuTarget) {
       // On privilégie le name ; à défaut on récupère l'id (beaucoup de

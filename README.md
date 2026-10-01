@@ -265,7 +265,12 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 └── test.html          Page de test locale des deux modes
 ```
 
-**Version** : 2.5.0 — étape de scénario **SIGEO : saisir une adresse**
+**Version** : 2.8.0 — scénario : nouvelle étape **Saisir un champ** (un seul
+champ name/id/classe, valeur fixe ou `{Colonne}`, option « puis appuyer sur
+Entrée ») ; l'étape **Cliquer sur un élément** peut **appuyer sur Entrée** au
+lieu de cliquer (valide un formulaire comme au clavier) ; chaque étape affiche
+une **icône colorée** selon son type (horloge pour Attendre, etc.).
+2.5.0 — étape de scénario **SIGEO : saisir une adresse**
 (formulaire address_manage : résolution code commune via autocomplétion ou
 sélecteur, n° de voie par libellé, dryRun, rapport par ligne).
 2.2.0 — Toolbox : **OCR local** (Tesseract) pour PDF scannés et

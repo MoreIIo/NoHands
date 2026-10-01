@@ -3109,6 +3109,7 @@ function scnUpdateTiming(done, total, runStart) {
 function estimateScenarioStepMs(s) {
   switch (s.type) {
     case "fill": return 700;
+    case "input": return s.inputEnter ? 600 : 400;
     case "goto": return s.gotoWait !== false ? Math.min(2500, parseInt(s.gotoTimeout, 10) || 15000) : 400;
     case "click": return 700;
     case "wait":
@@ -3168,8 +3169,10 @@ function addScenarioStep(step = {}) {
     <div class="scn-head">
       <button class="btn icon-only scn-drag" title="Glisser pour réordonner" type="button" aria-label="Déplacer l'étape"><svg class="icon icon-sm"><use href="#icon-grip"/></svg></button>
       <span class="scn-num"></span>
+      <span class="scn-icon" aria-hidden="true"><svg class="icon icon-sm"><use href="#icon-step-fill"/></svg></span>
       <select class="scn-type" title="Type d'étape">
         <option value="fill">Remplir les champs</option>
+        <option value="input">Saisir un champ</option>
         <option value="goto">Ouvrir une URL</option>
         <option value="click">Cliquer sur un élément</option>
         <option value="wait">Attendre</option>
@@ -3201,9 +3204,29 @@ function addScenarioStep(step = {}) {
         <button class="btn pick icon-only scn-pick-click" title="Choisir sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
       </div>
       <div class="scn-row scn-only-click">
+        <label>action :</label>
+        <select class="scn-click-mode" title="Clic souris, ou touche Entrée envoyée à l'élément (valide un formulaire comme au clavier)">
+          <option value="click">clic souris</option>
+          <option value="enter">appuyer sur Entrée</option>
+        </select>
+      </div>
+      <div class="scn-row scn-only-click">
         <label>attendre l'élément max (ms) :</label>
         <input type="number" class="scn-click-timeout" min="0" step="100" value="${escapeAttr(step.clickTimeout ?? 5000)}" />
       </div>
+      <p class="hint scn-only-click scn-click-enter-hint">Entrée : vise de préférence le <strong>champ</strong> (ex. la zone de recherche) plutôt que le bouton — la page réagit comme si tu validais au clavier. Si la page n'intercepte pas la touche, le comportement du navigateur est reproduit (bouton par défaut du formulaire).</p>
+
+      <div class="scn-row scn-only-input">
+        <input type="text" class="scn-input-field" placeholder="name, id ou classe du champ" value="${escapeAttr(step.inputField || "")}" />
+        <button class="btn pick icon-only scn-pick-input" title="Cliquer sur le champ du site pour récupérer son name/id" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+      </div>
+      <div class="scn-row scn-only-input">
+        <input type="text" class="scn-input-value" placeholder="valeur (ex : MG{N° MG})" title="Valeur dynamique : {Nom de colonne} ou {A} est remplacé par la valeur de la ligne active. Vide = vide le champ." value="${escapeAttr(step.inputValue ?? "")}" />
+      </div>
+      <div class="scn-row scn-only-input">
+        <label class="checkbox-row" title="Envoie la touche Entrée au champ une fois rempli (valide une recherche, un formulaire…)"><input type="checkbox" class="scn-input-enter" ${step.inputEnter ? "checked" : ""} /> puis appuyer sur Entrée</label>
+      </div>
+      <p class="hint scn-only-input">Remplit <strong>un seul</strong> champ, sans toucher au mapping ni aux autres champs personnalisés. Mêmes préfixes que les champs personnalisés (<code>ac:</code> pour forcer l'autocomplétion…). <code>{Nom de colonne}</code> (ou <code>{A}</code>) est remplacé par la valeur de la ligne active.</p>
 
       <div class="scn-row scn-only-wait">
         <select class="scn-wait-mode">
@@ -3380,6 +3403,7 @@ function addScenarioStep(step = {}) {
   // Valeurs initiales des selects
   div.querySelector(".scn-type").value = step.type || "fill";
   div.querySelector(".scn-wait-mode").value = step.waitMode || "delay";
+  div.querySelector(".scn-click-mode").value = step.clickMode || "click";
   div.querySelector(".scn-cond-source").value = step.condSource || "excel";
   div.querySelector(".scn-cond-op").value = step.condOp || "equals";
   div.querySelector(".scn-cond-pageop").value = step.condPageOp || "exists";
@@ -3415,8 +3439,17 @@ function addScenarioStep(step = {}) {
   const pdfTargetCol = div.querySelector(".scn-pdf-targetcol");
   const pdfNewCol = div.querySelector(".scn-pdf-newcol");
 
+  const clickMode = div.querySelector(".scn-click-mode");
+  const clickEnterHint = div.querySelector(".scn-click-enter-hint");
+  const iconUse = div.querySelector(".scn-icon use");
+
   function syncStepUI() {
     div.dataset.type = typeSelect.value;
+    const enterMode = clickMode.value === "enter";
+    div.dataset.clickMode = clickMode.value;
+    clickEnterHint.hidden = !enterMode;
+    iconUse.setAttribute("href", "#" + scnStepIconId(typeSelect.value, clickMode.value));
+    div.querySelector(".scn-icon").title = typeSelect.options[typeSelect.selectedIndex]?.text || "";
     const delayMode = waitMode.value === "delay";
     waitDelayWrap.hidden = !delayMode;
     waitEltWrap.hidden = delayMode;
@@ -3431,7 +3464,7 @@ function addScenarioStep(step = {}) {
     pdfNewCol.style.display = pdfTargetCol.value === "__other__" ? "block" : "none";
   }
   [typeSelect, waitMode, condSource, condOp, condPageOp, condAction,
-    pdfDocMode, pdfOp, pdfMissAction, pdfTargetCol]
+    pdfDocMode, pdfOp, pdfMissAction, pdfTargetCol, clickMode]
     .forEach((sel) => sel.addEventListener("change", syncStepUI));
   syncStepUI();
 
@@ -3482,6 +3515,21 @@ function addScenarioStep(step = {}) {
   wirePick(".scn-pick-batch-scope", ".scn-batch-scope");
   wirePick(".scn-pick-batch-button", ".scn-batch-button");
 
+  // 🎯 de l'étape « Saisir un champ » : récupère le name (ou l'id), comme
+  // les champs personnalisés — c'est ce que comprend le moteur de remplissage.
+  div.querySelector(".scn-pick-input").addEventListener("click", async () => {
+    const picked = await pickTargetOnActiveTab();
+    if (!picked) return;
+    const identifier = picked.name || picked.id;
+    if (identifier) {
+      div.querySelector(".scn-input-field").value = identifier;
+      persistWorkingConfig();
+      showStatus(`✓ ${picked.name ? "name" : "id"} récupéré : ${identifier}`, "success");
+    } else {
+      showStatus("Cet élément n'a ni name ni id — saisis une classe manuellement.", "error");
+    }
+  });
+
   // Mode d'attente après le clic (étape « Éditer par lots »).
   const bWaitMode = div.querySelector(".scn-batch-waitmode");
   const bDelayWrap = div.querySelector(".scn-batch-delay-wrap");
@@ -3518,6 +3566,10 @@ function getScenarioSteps() {
     gotoTimeout: parseInt(el.querySelector(".scn-goto-timeout").value, 10) || 15000,
     clickSelector: el.querySelector(".scn-click-selector").value.trim(),
     clickTimeout: parseInt(el.querySelector(".scn-click-timeout").value, 10) || 0,
+    clickMode: el.querySelector(".scn-click-mode").value,
+    inputField: el.querySelector(".scn-input-field").value.trim(),
+    inputValue: el.querySelector(".scn-input-value").value,
+    inputEnter: el.querySelector(".scn-input-enter").checked,
     waitMode: el.querySelector(".scn-wait-mode").value,
     waitMs: parseInt(el.querySelector(".scn-wait-ms").value, 10) || 0,
     waitSelector: el.querySelector(".scn-wait-selector").value.trim(),
@@ -3625,8 +3677,17 @@ function scnWaitInjected(cfg) {
     }
     (function poll() {
       let el = null;
-      try { el = document.querySelector(cfg.selector); }
-      catch (e) { return resolve({ ok: false, error: "sélecteur invalide : " + cfg.selector }); }
+      el = (function (raw) {
+        const t = String(raw || "").trim().replace(/^((ac|pb):\s*)+/i, "");
+        let css = null;
+        try { css = document.querySelector(t); } catch (_) { /* pas un sélecteur CSS */ }
+        if (css) return css;
+        const byName = Array.from(document.getElementsByName(t));
+        const vis = (n) => { try { const cs = getComputedStyle(n); return cs.display !== "none" && cs.visibility !== "hidden" && n.getClientRects().length > 0; } catch (_) { return false; } };
+        const hit = byName.find(vis) || byName[0] || document.getElementById(t);
+        if (hit) return hit;
+        try { return document.querySelector("." + CSS.escape(t)); } catch (_) { return null; }
+      })(cfg.selector);
       const visible = isVisible(el);
       if (cfg.mode === "gone" ? !visible : visible) return resolve({ ok: true });
       if (Date.now() >= deadline) {
@@ -3641,6 +3702,137 @@ function scnWaitInjected(cfg) {
 }
 
 // Attend l'élément (jusqu'au timeout) puis clique dessus.
+// Icône affichée à côté du numéro de l'étape (symboles #icon-step-* du HTML).
+function scnStepIconId(type, clickMode) {
+  if (type === "click" && clickMode === "enter") return "icon-step-enter";
+  const known = ["fill", "input", "goto", "click", "wait", "cond", "pdfcheck", "pdfwrite", "sigeo", "batchedit"];
+  return "icon-step-" + (known.includes(type) ? type : "fill");
+}
+
+// Envoie la touche Entrée à un élément de l'onglet cible.
+// byIdentifier : `target` est un name / id / classe (étape « Saisir un champ »)
+// plutôt qu'un sélecteur CSS.
+async function scnPressEnter(tabId, target, byIdentifier, timeoutMs) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      // Monde de la page : les handlers inline (onkeypress="return
+      // WebForm_FireDefaultButton(event…)") voient bien keyCode = 13.
+      world: "MAIN",
+      func: scnPressEnterInjected,
+      args: [{ target, byIdentifier: !!byIdentifier, timeoutMs: timeoutMs || 0 }]
+    });
+    return result || { ok: false, error: "pas de réponse de la page" };
+  } catch (e) {
+    return { ok: false, error: "échec de l'envoi d'Entrée : " + (e.message || e) };
+  }
+}
+
+// Fonction injectée (monde MAIN) : simule keydown / keypress / keyup Entrée.
+// Un événement synthétique ne déclenche aucune action par défaut du
+// navigateur : si la page ne l'a pas intercepté (preventDefault), on
+// reproduit nous-mêmes ce qu'aurait fait un vrai appui —
+//   bouton / lien → activation (clic) ;
+//   champ de formulaire → soumission implicite (bouton par défaut du form).
+function scnPressEnterInjected(cfg) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + Math.max(0, cfg.timeoutMs || 0);
+    const t = String(cfg.target || "").trim();
+    function isVisible(el) {
+      if (!el) return false;
+      const cs = window.getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden") return false;
+      return el.getClientRects().length > 0;
+    }
+    function find() {
+      // Sélecteur CSS d'abord ; s'il est invalide ou ne trouve rien, on
+      // retombe sur name / id / classe (names ASP.NET avec « : » inclus).
+      if (!cfg.byIdentifier) {
+        let css = null;
+        try { css = document.querySelector(t); } catch (_) { /* pas du CSS */ }
+        if (css) return css;
+      }
+      const id = t.replace(/^((ac|pb):\s*)+/i, "");
+      const byName = Array.from(document.getElementsByName(id));
+      const el = byName.find(isVisible) || byName[0] || document.getElementById(id);
+      if (el) return el;
+      try { return document.querySelector("." + CSS.escape(id)); } catch (_) { return null; }
+    }
+    function keyEvent(type, extra) {
+      const init = Object.assign({
+        key: "Enter", code: "Enter", keyCode: 13, which: 13, charCode: 0,
+        bubbles: true, cancelable: true, composed: true, view: window
+      }, extra || {});
+      const ev = new KeyboardEvent(type, init);
+      // Certains moteurs ignorent keyCode/which du dictionnaire : on force.
+      for (const k of ["keyCode", "which", "charCode"]) {
+        if (ev[k] !== init[k]) {
+          try { Object.defineProperty(ev, k, { get: () => init[k] }); } catch (_) {}
+        }
+      }
+      return ev;
+    }
+    function defaultAction(el) {
+      const tag = el.tagName.toLowerCase();
+      const type = String(el.type || "").toLowerCase();
+      if (tag === "button" || (tag === "a" && el.hasAttribute("href")) ||
+          (tag === "input" && ["submit", "button", "image", "reset"].includes(type))) {
+        el.click();
+        return "Entrée → bouton activé";
+      }
+      if (tag === "input" && el.form && !["checkbox", "radio", "file"].includes(type)) {
+        const form = el.form;
+        const isSubmit = (c) => {
+          const ct = String(c.type || "").toLowerCase();
+          return (c.tagName === "BUTTON" && (ct === "submit" || !c.getAttribute("type"))) ||
+            (c.tagName === "INPUT" && (ct === "submit" || ct === "image"));
+        };
+        const def = Array.from(form.elements).find(isSubmit);
+        if (def) {
+          if (def.disabled) return "Entrée envoyée (bouton par défaut désactivé)";
+          def.click();
+          return "Entrée → bouton par défaut du formulaire";
+        }
+        const blocking = Array.from(form.elements).filter((c) =>
+          c.tagName === "INPUT" && !["hidden", "checkbox", "radio", "file", "button", "submit", "reset", "image"].includes(String(c.type || "").toLowerCase()));
+        if (blocking.length <= 1) {
+          if (form.requestSubmit) form.requestSubmit(); else form.submit();
+          return "Entrée → formulaire soumis";
+        }
+        return "Entrée envoyée (aucun bouton par défaut)";
+      }
+      return "Entrée envoyée";
+    }
+    function press(el, note) {
+      try {
+        if (el.scrollIntoView) el.scrollIntoView({ block: "center", inline: "center" });
+        try { el.focus({ preventScroll: true }); } catch (_) {}
+        const downOk = el.dispatchEvent(keyEvent("keydown"));
+        // Comme dans un vrai navigateur : pas de keypress si keydown annulé.
+        const pressOk = downOk ? el.dispatchEvent(keyEvent("keypress", { charCode: 13 })) : false;
+        let info;
+        if (downOk && pressOk) info = defaultAction(el);
+        else info = "Entrée prise en charge par la page";
+        el.dispatchEvent(keyEvent("keyup"));
+        resolve({ ok: true, info: note ? info + " — " + note : info });
+      } catch (e) {
+        resolve({ ok: false, error: "échec de l'appui sur Entrée : " + (e.message || e) });
+      }
+    }
+    (function poll() {
+      let el = null;
+      try { el = find(); }
+      catch (e) { return resolve({ ok: false, error: "sélecteur invalide : " + t }); }
+      if (el && isVisible(el)) return press(el, "");
+      if (Date.now() >= deadline) {
+        if (el) return press(el, "élément non visible");
+        return resolve({ ok: false, error: "élément introuvable pour Entrée : " + t });
+      }
+      setTimeout(poll, 120);
+    })();
+  });
+}
+
 function scnClickInjected(cfg) {
   return new Promise((resolve) => {
     const deadline = Date.now() + Math.max(0, cfg.timeoutMs || 0);
@@ -3664,8 +3856,17 @@ function scnClickInjected(cfg) {
     }
     (function poll() {
       let el = null;
-      try { el = document.querySelector(cfg.selector); }
-      catch (e) { return resolve({ ok: false, error: "sélecteur invalide : " + cfg.selector }); }
+      el = (function (raw) {
+        const t = String(raw || "").trim().replace(/^((ac|pb):\s*)+/i, "");
+        let css = null;
+        try { css = document.querySelector(t); } catch (_) { /* pas un sélecteur CSS */ }
+        if (css) return css;
+        const byName = Array.from(document.getElementsByName(t));
+        const vis = (n) => { try { const cs = getComputedStyle(n); return cs.display !== "none" && cs.visibility !== "hidden" && n.getClientRects().length > 0; } catch (_) { return false; } };
+        const hit = byName.find(vis) || byName[0] || document.getElementById(t);
+        if (hit) return hit;
+        try { return document.querySelector("." + CSS.escape(t)); } catch (_) { return null; }
+      })(cfg.selector);
       if (el && isVisible(el)) return doClick(el, "");
       if (Date.now() >= deadline) {
         // Présent mais masqué : on tente quand même (menus/onglets techniques).
@@ -3680,8 +3881,17 @@ function scnClickInjected(cfg) {
 // Teste l'état d'un élément (condition « page »).
 function scnCheckInjected(cfg) {
   let el = null;
-  try { el = document.querySelector(cfg.selector); }
-  catch (e) { return { ok: false, error: "sélecteur invalide : " + cfg.selector }; }
+  el = (function (raw) {
+    const t = String(raw || "").trim().replace(/^((ac|pb):\s*)+/i, "");
+    let css = null;
+    try { css = document.querySelector(t); } catch (_) { /* pas un sélecteur CSS */ }
+    if (css) return css;
+    const byName = Array.from(document.getElementsByName(t));
+    const vis = (n) => { try { const cs = getComputedStyle(n); return cs.display !== "none" && cs.visibility !== "hidden" && n.getClientRects().length > 0; } catch (_) { return false; } };
+    const hit = byName.find(vis) || byName[0] || document.getElementById(t);
+    if (hit) return hit;
+    try { return document.querySelector("." + CSS.escape(t)); } catch (_) { return null; }
+  })(cfg.selector);
   function isVisible(node) {
     if (!node) return false;
     const cs = window.getComputedStyle(node);
@@ -4317,7 +4527,10 @@ function scnStepLabel(s) {
   switch (s.type) {
     case "fill": return "Remplir";
     case "goto": return "Ouvrir " + scnTrunc(s.gotoUrl || "?");
-    case "click": return "Cliquer " + scnTrunc(s.clickSelector || "?");
+    case "click":
+      return (s.clickMode === "enter" ? "Entrée sur " : "Cliquer ") + scnTrunc(s.clickSelector || "?");
+    case "input":
+      return `Saisir ${scnTrunc(s.inputField || "?", 25)} = « ${scnTrunc(s.inputValue, 25)} »${s.inputEnter ? " + Entrée" : ""}`;
     case "wait":
       if (s.waitMode === "delay") return `Attendre ${s.waitMs} ms`;
       return (s.waitMode === "gone" ? "Attendre disparition de " : "Attendre ") + scnTrunc(s.waitSelector || "?");
@@ -4470,6 +4683,24 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
           : await sendFillToAllTabs(fillMsg);
         return { ok: true, info: `${totalFilled} champ(s) rempli(s)`, warn: totalFilled === 0 };
       }
+      case "input": {
+        if (!step.inputField) return { ok: false, error: "champ (name/id) manquant" };
+        const { rowContext } = buildFillPayload(rowIdx);
+        const value = resolveRowTemplate(step.inputValue ?? "", stepRow);
+        const msg = { action: "fillOne", identifier: step.inputField, value, rowContext };
+        const { totalFilled, totalErrors } = opts.soloTab
+          ? await sendFillToOneTab(tabId, msg)
+          : await sendFillToAllTabs(msg);
+        if (!totalFilled) {
+          return { ok: false, error: totalErrors[0] || `champ introuvable : ${step.inputField}` };
+        }
+        const shown = `${step.inputField} = « ${scnTrunc(value, 40)} »`;
+        if (!step.inputEnter) return { ok: true, info: shown };
+        await sleep(80); // laisse les handlers input/change de la page passer
+        const res = await scnPressEnter(tabId, step.inputField, true, 2000);
+        if (!res.ok) return { ok: false, error: shown + " — mais " + res.error };
+        return { ok: true, info: shown + " — " + res.info };
+      }
       case "goto": {
         if (!step.gotoUrl) return { ok: false, error: "URL manquante" };
         let url = step.gotoUrl;
@@ -4490,6 +4721,9 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
       }
       case "click": {
         if (!step.clickSelector) return { ok: false, error: "sélecteur manquant" };
+        if (step.clickMode === "enter") {
+          return await scnPressEnter(tabId, rts(step.clickSelector), false, step.clickTimeout);
+        }
         const [{ result }] = await chrome.scripting.executeScript({
           target: { tabId },
           func: scnClickInjected,
@@ -4763,6 +4997,7 @@ function scenarioNeedsRow(steps) {
     (s.type === "fill" && Object.keys(state.mapping).length > 0) ||
     (s.type === "cond" && s.condSource === "excel") ||
     (s.type === "goto" && /\{[^{}]+\}/.test(s.gotoUrl || "")) ||
+    (s.type === "input" && /\{[^{}]+\}/.test(s.inputValue || "")) ||
     (s.type === "pdfwrite") ||
     (s.type === "pdfcheck" && (/\{[^{}]+\}/.test(s.pdfVal || "") ||
       (s.pdfDocMode === "match" && /\{[^{}]+\}/.test(s.pdfDocMatch || "")))) ||
