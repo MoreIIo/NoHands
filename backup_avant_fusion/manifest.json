@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Excel <-> Logiciel Interne (Auto)",
+  "version": "1.0.0",
+  "description": "Automatise la copie de valeurs entre un fichier Excel et une application web interne, avec mapping de colonnes et conditions configurables.",
+  "permissions": ["sidePanel", "scripting", "activeTab", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Ouvrir Excel <-> Logiciel Interne"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  }
+}

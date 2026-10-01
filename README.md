@@ -74,6 +74,11 @@ deux modes :
    (évite les boucles de postback). L'ordre de remplissage suit l'ordre des
    colonnes : place Pays avant Code postal, Code postal avant Voie, etc.
    Les marqueurs se cumulent (`pb:ac:monChamp`).
+   Depuis la v2.8.2, les champs texte ayant un `onblur` inline (sans
+   `__doPostBack`) reçoivent automatiquement la sortie de champ après
+   remplissage, comme si tu cliquais ailleurs. `pb:` reste utile pour les
+   champs dont le handler n'est pas visible dans le HTML ; `nopb:` désactive
+   la sortie automatique sur un champ.
 
 8. **Étape de scénario « SIGEO : saisir une adresse »** : automatise le
    formulaire d'adresse SIGEO (`popup.aspx/…/address_manage/{id}`) de bout en

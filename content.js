@@ -333,13 +333,16 @@ function parseInputIdentifier(raw) {
   let name = String(raw).trim();
   let forceAutocomplete = false;
   let forcePostback = false;
+  let noBlur = false;
   let m;
-  while ((m = name.match(/^(ac|pb):/i)) !== null) {
-    if (m[1].toLowerCase() === 'ac') forceAutocomplete = true;
-    else forcePostback = true;
+  while ((m = name.match(/^(ac|pb|nopb):/i)) !== null) {
+    const tag = m[1].toLowerCase();
+    if (tag === 'ac') forceAutocomplete = true;
+    else if (tag === 'pb') forcePostback = true;
+    else noBlur = true;
     name = name.slice(m[0].length).trim();
   }
-  return { name, forceAutocomplete, forcePostback };
+  return { name, forceAutocomplete, forcePostback, noBlur };
 }
 
 // Détection automatique d'un champ à autocomplétion :
@@ -555,6 +558,25 @@ function selectTriggersPostback(el) {
   return code.includes('__doPostBack') || code.includes('WebForm_DoPostBack');
 }
 
+// Le champ réagit-il à la sortie de champ (onblur/onfocusout inline) ?
+// Ex. code postal → ville (initCacheresultCall) : sans blur, la page ne
+// se met à jour que si l'utilisateur clique ailleurs à la main.
+// Les blur qui font un __doPostBack restent exclus (popups indésirables) :
+// pour ceux-là, utiliser explicitement le marqueur pb:.
+function inputHasBlurHandler(el) {
+  if (!el || !el.getAttribute) return false;
+  const code = (el.getAttribute('onblur') || '') + (el.getAttribute('onfocusout') || '');
+  if (!code.trim()) return false;
+  return !code.includes('__doPostBack') && !code.includes('WebForm_DoPostBack');
+}
+
+// Entrée de champ simulée : certains handlers mémorisent l'ancienne valeur
+// au focus (onfocus="this.old=this.value") et comparent au blur.
+function triggerFocusEvents(element) {
+  element.dispatchEvent(new FocusEvent('focus'));
+  element.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+}
+
 // Sortie de champ ciblée : déclenche les handlers inline onblur
 // (initCacheresultCall…) sans toucher aux autres champs.
 function triggerBlurEvents(element) {
@@ -665,7 +687,7 @@ async function fillSelectWaiting(identifier, value) {
  * @returns {Promise<{success: boolean, identifier?: string, detail?: string, warning?: string, error?: string}>}
  */
 async function fillOneField(rawIdentifier, value, rowContext) {
-  const { name: identifier, forceAutocomplete, forcePostback } = parseInputIdentifier(rawIdentifier);
+  const { name: identifier, forceAutocomplete, forcePostback, noBlur } = parseInputIdentifier(rawIdentifier);
   const input = findFormInput(identifier);
   if (!input) {
     return { success: false, identifier, error: `Input non trouvé (name/id/classe): ${identifier}` };
@@ -702,17 +724,24 @@ async function fillOneField(rawIdentifier, value, rowContext) {
   }
 
   // 4. Champs classiques
+  const tag = input.tagName.toLowerCase();
+  const isTextLike = tag === 'textarea' ||
+    (tag === 'input' && ['text', 'email', 'tel', 'number', 'url', 'search', 'password'].includes((input.type || 'text').toLowerCase()));
+  if (isTextLike) triggerFocusEvents(input);
+
   const success = fillInputByType(input, value);
   if (!success) {
     return { success: false, identifier, error: `Échec pour ${identifier}` };
   }
 
-  // 5. Marqueur pb: : sortie de champ + attente du rechargement
-  //    (ex. code postal initCacheresultCall, voie onblur)
-  if (forcePostback) {
-    triggerBlurEvents(input);
+  // 5. Sortie de champ : marqueur pb: (forcé), ou automatique quand le champ
+  //    a un handler onblur inline sans postback (ex. code postal → ville).
+  //    nopb: désactive l'automatique.
+  const autoBlur = !noBlur && isTextLike && inputHasBlurHandler(input);
+  if (forcePostback || autoBlur) {
+    triggerBlurEvents(findFormInput(identifier) || input);
     await waitForDomSettle();
-    return { success: true, identifier, detail: 'blur + rechargement attendu' };
+    return { success: true, identifier, detail: forcePostback ? 'blur + rechargement attendu' : 'blur auto' };
   }
   return { success: true, identifier };
 }
