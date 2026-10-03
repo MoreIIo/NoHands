@@ -546,6 +546,7 @@ input[type="file"]::file-selector-button {
 .scn-step[data-type="pdfwrite"]  { --scn-c: #f87171; }
 .scn-step[data-type="sigeo"]     { --scn-c: #4ade80; }
 .scn-step[data-type="batchedit"] { --scn-c: #2dd4bf; }
+.scn-step[data-type="sigeoSelector"] { --scn-c: #a3e635; }
 .scn-icon {
   flex: none; width: 24px; height: 24px;
   display: inline-flex; align-items: center; justify-content: center;
@@ -576,6 +577,7 @@ input[type="file"]::file-selector-button {
 .scn-step:not([data-type="sigeo"]) .scn-only-sigeo { display: none; }
 .scn-step:not([data-type="batchedit"]) .scn-only-batchedit { display: none; }
 .scn-step:not([data-type="input"]) .scn-only-input { display: none; }
+.scn-step:not([data-type="sigeoSelector"]) .scn-only-ssel { display: none; }
 
 /* ---------- Toolbox PDF (bêta) ---------- */
 .beta-badge {
@@ -722,3 +724,22 @@ input[type="file"]::file-selector-button {
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #44445a; }
+
+/* ---------- Étape « Sélecteur SIGEO » ---------- */
+.btn-ssel { border-color: #a3e635; color: #a3e635; }
+.scn-ssel-result { font-size: 11.5px; color: var(--text-dim); word-break: break-word; }
+.scn-ssel-result.ok { color: var(--ok); }
+.scn-ssel-result.err { color: var(--err); }
+.scn-body .scn-row select.scn-ssel-mode:disabled { opacity: 0.6; }
+.scn-warnings {
+  margin: 6px 0; padding: 6px 8px; border: 1px solid var(--warn); border-radius: 6px;
+  color: var(--warn); font-size: 11.5px; background: rgba(251, 191, 36, 0.08);
+}
+.scn-warnings div + div { margin-top: 3px; }
+.ssel-journal { margin-top: 10px; }
+.ssel-journal summary { cursor: pointer; font-weight: 600; }
+.ssel-journal-wrap { max-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+.ssel-journal-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.ssel-journal-table th, .ssel-journal-table td { padding: 3px 5px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.ssel-journal-table td.err { color: var(--err); white-space: normal; }
+.ssel-journal-table td.ok { color: var(--ok); }

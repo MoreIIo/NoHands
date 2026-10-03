@@ -45,7 +45,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     performFill(request.data, request.mapping, request.customFields, lastFillRowContext)
       .then((result) => {
         // Observe le contenu chargé dynamiquement (UpdatePanels ASP.NET, etc.)
-        startFillObserver();
+        // — sauf échec bloquant (Mandat MG) : re-remplir relancerait le postback.
+        if (!result.fatal) startFillObserver();
         sendResponse(result);
       })
       .catch((err) => {
@@ -58,12 +59,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // Le message part vers toutes les frames et seule la PREMIÈRE réponse
     // compte : une frame qui n'a pas le champ se tait, et la frame principale
     // ne signale l'échec qu'après un court délai (laisse répondre les iframes).
-    const { name: id } = parseInputIdentifier(request.identifier || '');
-    if (!findFormInput(id)) {
+    const parsedId = parseInputIdentifier(request.identifier || '');
+    const id = parsedId.name;
+    const mandatCtrl = mandatCtrlIdFor(parsedId);
+    if (mandatCtrl ? !document.getElementById(mandatCtrl) : !findFormInput(id)) {
       if (window !== window.top) return false;
       setTimeout(() => sendResponse({
         success: false, filledCount: 0, filled: [],
-        errors: [`Input non trouvé (name/id/classe): ${id}`]
+        errors: [mandatCtrl ? `champ Mandat MG introuvable sur cette page (${mandatCtrl})` : `Input non trouvé (name/id/classe): ${id}`]
       }), 400);
       return true;
     }
@@ -153,21 +156,17 @@ function showRowBadge(label, state) {
 
 /**
  * Remplit avec data+mapping, plus les champs personnalisés éventuels.
- * Asynchrone : les champs à autocomplétion sont attendus séquentiellement.
+ * Mapping et champs personnalisés passent par EXACTEMENT la même logique :
+ * ils sont convertis en une seule liste de saisies, remplie par fillEntries
+ * (marqueurs, autocomplétion, idempotence, postbacks, Mandat MG, erreurs).
+ * Seul l'ordre est réarrangé : les champs Mandat MG passent en tête, car
+ * leur postback recharge Journal & co et écraserait le reste.
  */
 async function performFill(data, mapping, customFields, rowContext) {
-  const result = await fillFormFields(data, mapping, rowContext);
-  if (customFields && typeof customFields === 'object') {
-    const customResult = await fillCustomFields(customFields, rowContext);
-    result.filledCount += customResult.filledCount;
-    if (customResult.filled.length) result.filled.push(...customResult.filled);
-    if (customResult.errors && customResult.errors.length) {
-      result.errors = (result.errors || []).concat(customResult.errors);
-      result.error = result.errors.slice(0, 3).join(', ');
-    }
-    result.success = result.filledCount > 0;
-  }
-  return result;
+  const entries = buildFillEntries(data, mapping, customFields);
+  const isMandat = (e) => !!mandatCtrlIdFor(parseInputIdentifier(e.raw));
+  const ordered = [...entries.filter(isMandat), ...entries.filter((e) => !isMandat(e))];
+  return fillEntries(ordered, rowContext);
 }
 
 /**
@@ -329,20 +328,84 @@ const OSA_AC = {
 //   « ac:nom » force le traitement autocomplétion (si la détection auto échoue) ;
 //   « pb:nom » force un postback après remplissage : blur ciblé + attente du
 //   rechargement partiel ASP.NET (champs « en cascade », ex. code postal, voie).
+//   « mg:nom » : champ SIGEO « Mandat MG » (SelectorControl) — voir plus bas ;
+//   « mg: » seul vise le contrôle par défaut body_x_selMan_x.
 function parseInputIdentifier(raw) {
   let name = String(raw).trim();
   let forceAutocomplete = false;
   let forcePostback = false;
   let noBlur = false;
+  let forceMandat = false;
   let m;
-  while ((m = name.match(/^(ac|pb|nopb):/i)) !== null) {
+  while ((m = name.match(/^(ac|pb|nopb|mg):/i)) !== null) {
     const tag = m[1].toLowerCase();
     if (tag === 'ac') forceAutocomplete = true;
     else if (tag === 'pb') forcePostback = true;
+    else if (tag === 'mg') forceMandat = true;
     else noBlur = true;
     name = name.slice(m[0].length).trim();
   }
-  return { name, forceAutocomplete, forcePostback, noBlur };
+  return { name, forceAutocomplete, forcePostback, noBlur, forceMandat };
+}
+
+/* ====================================================================
+ * SIGEO — champ « Mandat MG » (page Saisie d'opérations diverses)
+ * --------------------------------------------------------------------
+ * SelectorControl + AutoCompletion : écrire .value dans l'input texte ne
+ * suffit pas (input caché vide, Journal non rechargé). Il faut passer par
+ * window.__ivCtrl[id].add(), invisible depuis ce monde isolé : le service
+ * worker l'exécute en world 'MAIN' (setMandatMG dans background.js), attend
+ * la fin du postback et vérifie le résultat.
+ * Activé par le marqueur « mg: », ou automatiquement quand l'identifiant
+ * désigne le contrôle (input caché ou texte visible, ex. choisi avec 🎯).
+ * Un échec est BLOQUANT : le reste du remplissage est abandonné.
+ * ==================================================================== */
+
+const MANDAT_DEFAULT_CTRL = 'body_x_selMan_x';
+const MANDAT_TXT_SUFFIX = '_txt_x__ctl0';
+
+// id du contrôle Mandat MG visé par un identifiant parsé, ou null si ce
+// n'est pas un champ Mandat MG.
+function mandatCtrlIdFor(parsed) {
+  const name = parsed.name || '';
+  if (!parsed.forceMandat) {
+    if (!name) return null;
+    const el = findFormInput(name);
+    const elId = el && el.id ? el.id : '';
+    if (elId === MANDAT_DEFAULT_CTRL || elId === MANDAT_DEFAULT_CTRL + MANDAT_TXT_SUFFIX) return MANDAT_DEFAULT_CTRL;
+    return null;
+  }
+  if (!name) return MANDAT_DEFAULT_CTRL;
+  // name ASP.NET (body:x:selMan:x) ou id texte visible → id du contrôle
+  const el = findFormInput(name);
+  let id = (el && el.id) ? el.id : name.replace(/[:$]/g, '_');
+  if (id.endsWith(MANDAT_TXT_SUFFIX)) id = id.slice(0, -MANDAT_TXT_SUFFIX.length);
+  return id;
+}
+
+async function fillMandatMGField(ctrlId, value) {
+  if (!document.getElementById(ctrlId)) {
+    // Frame / onglet sans le champ : erreur simple, non bloquante (comme un
+    // input absent) — le remplissage est diffusé à toutes les frames.
+    return { success: false, identifier: ctrlId, error: `champ Mandat MG introuvable sur cette page (${ctrlId})` };
+  }
+  console.log(`NoHands OSA: Mandat MG « ${value} » → ${ctrlId}`);
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ action: 'setMandatMG', mg: value, ctrlId });
+  } catch (e) {
+    res = { ok: false, error: 'service worker injoignable : ' + e.message };
+  }
+  if (res && res.ok) {
+    const d = res.detail || {};
+    return {
+      success: true, identifier: ctrlId,
+      detail: d.already ? `${res.label} déjà en place` : `${res.label}, id ${res.id} — postback terminé`
+    };
+  }
+  const error = (res && res.error) || 'Mandat MG : échec inconnu';
+  console.warn('NoHands OSA: ' + error, res);
+  return { success: false, fatal: true, identifier: ctrlId, error };
 }
 
 // Détection automatique d'un champ à autocomplétion :
@@ -687,7 +750,13 @@ async function fillSelectWaiting(identifier, value) {
  * @returns {Promise<{success: boolean, identifier?: string, detail?: string, warning?: string, error?: string}>}
  */
 async function fillOneField(rawIdentifier, value, rowContext) {
-  const { name: identifier, forceAutocomplete, forcePostback, noBlur } = parseInputIdentifier(rawIdentifier);
+  const parsed = parseInputIdentifier(rawIdentifier);
+  const { name: identifier, forceAutocomplete, forcePostback, noBlur } = parsed;
+
+  // 0. Champ SIGEO « Mandat MG » : traitement dédié (world MAIN + postback)
+  const mandatCtrl = mandatCtrlIdFor(parsed);
+  if (mandatCtrl) return fillMandatMGField(mandatCtrl, value);
+
   const input = findFormInput(identifier);
   if (!input) {
     return { success: false, identifier, error: `Input non trouvé (name/id/classe): ${identifier}` };
@@ -747,79 +816,80 @@ async function fillOneField(rawIdentifier, value, rowContext) {
 }
 
 /**
- * Remplit les champs du formulaire à partir des données et du mapping
- * @param {Object} data - Données de la ligne (nomColonne -> valeur)
+ * Liste unique des saisies à effectuer, dans l'ordre : mapping (ordre des
+ * colonnes, chaque colonne pouvant viser plusieurs inputs), puis champs
+ * personnalisés. Les deux sources produisent le même format d'entrée.
+ * @param {Object} data - nomColonne -> valeur (déjà formatée par le panneau)
  * @param {Object} mapping - nomColonne -> nom(s) d'input
+ * @param {Object|null} customFields - nom d'input -> valeur (déjà résolue)
+ * @returns {Array<{source: string, raw: string, value: *}>}
+ */
+function buildFillEntries(data, mapping, customFields) {
+  const entries = [];
+  for (const [columnName, inputNames] of Object.entries(mapping || {})) {
+    const value = data ? data[columnName] : undefined;
+    if (value === undefined || value === null) continue;
+    const names = typeof inputNames === 'string' ? [inputNames] : (Array.isArray(inputNames) ? inputNames : []);
+    for (const raw of names) {
+      if (raw && String(raw).trim()) entries.push({ source: columnName, raw: String(raw), value });
+    }
+  }
+  if (customFields && typeof customFields === 'object') {
+    for (const [raw, value] of Object.entries(customFields)) {
+      if (value === undefined || value === null) continue;
+      if (raw && String(raw).trim()) entries.push({ source: 'custom', raw: String(raw), value });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Remplit une liste de saisies, séquentiellement (les autocomplétions et
+ * postbacks sont attendus un par un). S'arrête net sur un échec bloquant
+ * (ex. Mandat MG non posé) : { fatal: true, fatalError }.
+ * @param {Array<{source: string, raw: string, value: *}>} entries
  * @param {Object|null} rowContext - toutes les colonnes de la ligne (désambiguïsation)
  */
-async function fillFormFields(data, mapping, rowContext) {
+async function fillEntries(entries, rowContext) {
   let filledCount = 0;
-  const errors = [];
+  let errors = [];
   const filled = [];
+  let fatalError = null;
 
-  for (const [columnName, inputNames] of Object.entries(mapping)) {
-    const value = data[columnName];
-    if (value === undefined || value === null) continue;
-
-    let inputNamesArray = inputNames;
-    if (typeof inputNames === 'string') inputNamesArray = [inputNames];
-    if (!Array.isArray(inputNamesArray)) continue;
-
-    for (const rawName of inputNamesArray) {
-      if (!rawName || rawName.trim() === '') continue;
-
-      try {
-        const res = await fillOneField(rawName, value, rowContext);
-        const shownName = res.identifier || rawName;
-        if (res.success) {
-          filledCount++;
-          filled.push(`${columnName} → ${shownName}${res.detail ? ` (${res.detail})` : ''}`);
-          if (res.warning) errors.push(res.warning);
-        } else {
-          errors.push(res.error || `Échec pour ${columnName} → ${shownName}`);
-        }
-      } catch (error) {
-        errors.push(`Erreur pour ${columnName} → ${rawName}: ${error.message}`);
+  for (const { source, raw, value } of entries) {
+    try {
+      const res = await fillOneField(raw, value, rowContext);
+      const shownName = res.identifier || raw;
+      if (res.success) {
+        filledCount++;
+        filled.push(`${source} → ${shownName}${res.detail ? ` (${res.detail})` : ''}`);
+        if (res.warning) errors.push(res.warning);
+      } else if (res.fatal) {
+        fatalError = res.error || `Échec bloquant pour ${source} → ${shownName}`;
+        errors = [fatalError];
+        break;
+      } else {
+        errors.push(res.error || `Échec pour ${source} → ${shownName}`);
       }
+    } catch (error) {
+      errors.push(`Erreur pour ${source} → ${raw}: ${error.message}`);
     }
   }
 
-  return {
-    success: filledCount > 0,
+  const result = {
+    success: !fatalError && filledCount > 0,
     filledCount: filledCount,
     filled: filled,
     errors: errors.length > 0 ? errors : null,
     error: errors.length > 0 ? errors.slice(0, 3).join(', ') : null
   };
-}
-
-/**
- * Remplit des champs personnalisés (nom d'input -> valeur fixe).
- * Gère aussi les champs à autocomplétion (auto ou marqueur « ac: »).
- */
-async function fillCustomFields(customFields, rowContext) {
-  let filledCount = 0;
-  const errors = [];
-  const filled = [];
-
-  for (const [rawName, value] of Object.entries(customFields)) {
-    if (!rawName || rawName.trim() === '') continue;
-    try {
-      const res = await fillOneField(rawName, value, rowContext);
-      const shownName = res.identifier || rawName;
-      if (res.success) {
-        filledCount++;
-        filled.push(`custom:${shownName}${res.detail ? ` (${res.detail})` : ''}`);
-        if (res.warning) errors.push(res.warning);
-      } else {
-        errors.push(res.error || `Échec pour custom → ${shownName}`);
-      }
-    } catch (error) {
-      errors.push(`Erreur custom ${rawName}: ${error.message}`);
-    }
+  if (fatalError) {
+    result.fatal = true;
+    result.fatalError = fatalError;
+    result.filledCount = 0;
+    result.filled = [];
   }
-
-  return { filledCount, filled, errors };
+  return result;
 }
 
 /**

@@ -1268,6 +1268,7 @@ async function sendFillToTabList(targetTabs, message) {
 
   let totalFilled = 0;
   const totalErrors = [];
+  const fatalErrors = []; // échecs bloquants (ex. Mandat MG) : la ligne doit s'arrêter
   let tabsReached = 0;
 
   await Promise.all(targetTabs.map(async (tab) => {
@@ -1277,6 +1278,7 @@ async function sendFillToTabList(targetTabs, message) {
         tabsReached++;
         totalFilled += response.filledCount || 0;
         if (response.errors) totalErrors.push(...response.errors);
+        if (response.fatal) fatalErrors.push(response.fatalError || response.error || "échec bloquant");
       }
     } catch (msgErr) {
       // Secours : injecter le content script puis réessayer
@@ -1290,6 +1292,7 @@ async function sendFillToTabList(targetTabs, message) {
           tabsReached++;
           totalFilled += response.filledCount || 0;
           if (response.errors) totalErrors.push(...response.errors);
+          if (response.fatal) fatalErrors.push(response.fatalError || response.error || "échec bloquant");
         }
       } catch (retryErr) {
         console.warn(`NoHands OSA: onglet ${tab.id} injoignable:`, retryErr.message);
@@ -1297,7 +1300,8 @@ async function sendFillToTabList(targetTabs, message) {
     }
   }));
 
-  return { totalFilled, totalErrors, tabsReached, tabCount: targetTabs.length };
+  if (fatalErrors.length) console.warn("NoHands OSA: remplissage interrompu :", fatalErrors);
+  return { totalFilled, totalErrors, fatalErrors, tabsReached, tabCount: targetTabs.length };
 }
 
 /**
@@ -1371,19 +1375,20 @@ function buildFillPayload(rowIdx) {
     for (const [colName, inputNames] of Object.entries(state.mapping)) {
       const col = colByName[colName];
       if (!col) continue;
-      data[colName] = applyValueRules(formatValueForColumn(colName, getCellByIndex(row, col.index)));
+      data[colName] = mappedCellValue(row, col.index, colName);
       mapping[colName] = inputNames;
     }
   }
   const customFields = {};
-  state.customFields.forEach(({ name, value }) => { if (name) customFields[name] = resolveRowTemplate(value, activeRow); });
+  // Même traitement de valeur que le mapping (formatage + règles de valeurs).
+  state.customFields.forEach(({ name, value }) => { if (name) customFields[name] = resolveFieldTemplate(value, activeRow); });
   // Contexte de ligne complet (toutes les colonnes) : sert au content script
   // à départager les suggestions des champs à autocomplétion asynchrone
   // (ex. CP tapé → choisit « 70600 - ARGILLIERES » si la ligne contient la ville).
   const rowContext = {};
   if (activeRow) {
     getColumns().forEach((c) => {
-      const v = applyValueRules(formatValueForColumn(c.name, getCellByIndex(activeRow, c.index)));
+      const v = mappedCellValue(activeRow, c.index, c.name);
       if (v !== undefined && v !== null && String(v).trim() !== "") rowContext[c.name] = String(v);
     });
   }
@@ -1408,9 +1413,11 @@ $("fillBtn").addEventListener("click", async () => {
       customFields: Object.keys(customFields).length ? customFields : undefined,
       rowContext
     };
-    const { totalFilled, totalErrors, tabsReached, tabCount } = await sendFillToAllTabs(message);
+    const { totalFilled, totalErrors, fatalErrors, tabsReached, tabCount } = await sendFillToAllTabs(message);
 
-    if (totalFilled > 0) {
+    if (fatalErrors.length) {
+      showStatus(`Remplissage interrompu : ${fatalErrors[0]}`, "error");
+    } else if (totalFilled > 0) {
       const tabInfo = tabCount > 1 ? ` (${tabsReached} onglet${tabsReached > 1 ? "s" : ""})` : "";
       showStatus(`✓ ${totalFilled} champ${totalFilled > 1 ? "s" : ""} rempli${totalFilled > 1 ? "s" : ""}${tabInfo} !`, "success");
     } else if (totalErrors.length) {
@@ -2585,6 +2592,30 @@ function resolveRowTemplate(str, row) {
   });
 }
 
+// Valeur d'une cellule telle que le MAPPING l'envoie au site : formatage
+// selon le nom de colonne (IBAN, trimestre…) puis règles de valeurs
+// (female → Mme…). Point unique, partagé par le mapping, les champs
+// personnalisés, l'étape « Saisir un champ » et le contexte de ligne.
+function mappedCellValue(row, idx, colName) {
+  const name = colName ?? (getColumns().find((c) => c.index === idx)?.name || "");
+  return applyValueRules(formatValueForColumn(name, getCellByIndex(row, idx)));
+}
+
+// Comme resolveRowTemplate, mais chaque {Colonne} est remplacée par la
+// valeur que le mapping enverrait pour cette colonne (mappedCellValue).
+// « {IBAN} » dans un champ personnalisé donne donc exactement la même
+// saisie que la colonne IBAN mappée. Le texte fixe autour reste tel quel.
+function resolveFieldTemplate(str, row) {
+  if (str === null || str === undefined) return str;
+  if (!row) return String(str);
+  return String(str).replace(/\{([^{}]+)\}/g, (whole, name) => {
+    const idx = colIndexByName(name.trim());
+    if (idx < 0) return whole;
+    const v = mappedCellValue(row, idx);
+    return v === undefined || v === null ? "" : String(v);
+  });
+}
+
 /* ---------- Autocomplétion {Colonne} dans les champs texte ----------
    Façon VSCode : taper « { » dans un champ compatible ouvre un petit menu
    avec les noms de colonnes du fichier ; on filtre en tapant, ↑/↓ pour
@@ -3118,6 +3149,7 @@ function estimateScenarioStepMs(s) {
     case "cond": return 250;
     case "pdfcheck": case "pdfwrite": return 50; // local, quasi instantané
     case "sigeo": return (s.sigeoNav === false ? 300 : 2500) + 4500; // nav + remplissage + résolution ville + postback
+    case "sigeoSelector": return (s.sselChamp || "mandatMG") === "mandatMG" ? 1500 : 1200; // sélection + postback
     // Le nombre de lots n'est connu qu'à l'exécution : on table sur 3.
     case "batchedit": {
       const dl = s.batchWaitMode === "start" || s.batchWaitMode === "complete";
@@ -3181,6 +3213,7 @@ function addScenarioStep(step = {}) {
         <option value="pdfwrite">PDF β : écrire un champ</option>
         <option value="sigeo">SIGEO : saisir une adresse</option>
         <option value="batchedit">Éditer par lots (cocher N → cliquer)</option>
+        <option value="sigeoSelector">Sélecteur SIGEO (Mandat MG, Compte…)</option>
       </select>
       <button class="btn icon-only scn-move-up" title="Monter" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-up"/></svg></button>
       <button class="btn icon-only scn-move-down" title="Descendre" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-down"/></svg></button>
@@ -3226,7 +3259,7 @@ function addScenarioStep(step = {}) {
       <div class="scn-row scn-only-input">
         <label class="checkbox-row" title="Envoie la touche Entrée au champ une fois rempli (valide une recherche, un formulaire…)"><input type="checkbox" class="scn-input-enter" ${step.inputEnter ? "checked" : ""} /> puis appuyer sur Entrée</label>
       </div>
-      <p class="hint scn-only-input">Remplit <strong>un seul</strong> champ, sans toucher au mapping ni aux autres champs personnalisés. Mêmes préfixes que les champs personnalisés (<code>ac:</code> pour forcer l'autocomplétion…). <code>{Nom de colonne}</code> (ou <code>{A}</code>) est remplacé par la valeur de la ligne active.</p>
+      <p class="hint scn-only-input">Remplit <strong>un seul</strong> champ, sans toucher au mapping ni aux autres champs personnalisés. Mêmes préfixes que les champs personnalisés (<code>ac:</code> pour forcer l'autocomplétion, <code>mg:</code> pour le champ SIGEO « Mandat MG »…). <code>{Nom de colonne}</code> (ou <code>{A}</code>) est remplacé par la valeur de la ligne active.</p>
 
       <div class="scn-row scn-only-wait">
         <select class="scn-wait-mode">
@@ -3395,6 +3428,49 @@ function addScenarioStep(step = {}) {
       </div>
       <p class="hint scn-only-batchedit">« Début du téléchargement » enchaîne dès que le navigateur commence à recevoir le fichier ; « fin » attend qu'il soit complet — plus sûr si le serveur est lent. Ces deux modes demandent l'accès aux téléchargements (Chrome l'invite à la sélection). En délai fixe, prévois large : la génération + le téléchargement. Le filtre permet d'exclure certaines lignes (ex. une clé dont le total est nul).</p>
 
+      <p class="hint scn-only-ssel">Champs SIGEO à autocomplétion (<code>SelectorControl</code>) : écrire la valeur ne suffit pas, l'étape passe par le contrôle de la page, attend la sélection (et le postback), puis vérifie qu'<strong>une seule</strong> valeur est retenue. Ne clique jamais sur un bouton d'enregistrement.</p>
+      <div class="scn-row scn-only-ssel">
+        <label>champ :</label>
+        <select class="scn-ssel-champ">
+          <option value="mandatMG">Mandat MG</option>
+          <option value="compte">Compte (contrepartie)</option>
+          <option value="custom">Personnalisé</option>
+        </select>
+        <span class="scn-inline scn-ssel-ligne-wrap">
+          <label>ligne :</label>
+          <input type="number" class="scn-ssel-ligne" min="1" step="1" style="max-width:60px" value="${escapeAttr(step.sselLigne ?? 1)}" />
+        </span>
+      </div>
+      <div class="scn-row scn-only-ssel">
+        <label>valeur :</label>
+        <input type="text" class="scn-ssel-valeur" placeholder="ex : {Mandat MG} ou MG0396166" title="Valeur fixe, ou {Nom de colonne} / {A} remplacé par la valeur de la ligne (même traitement que le mapping). Mode direct personnalisé : « id|libellé »." value="${escapeAttr(step.sselValeur ?? "")}" />
+      </div>
+      <div class="scn-row scn-only-ssel scn-ssel-ctrlkey-wrap">
+        <label class="scn-ssel-ctrlkey-label">clé __ivCtrl :</label>
+        <input type="text" class="scn-ssel-ctrlkey" placeholder="ex : body_x_selMan_x" value="${escapeAttr(step.sselCtrlKey ?? "")}" />
+      </div>
+      <div class="scn-row scn-only-ssel">
+        <label>mode :</label>
+        <select class="scn-ssel-mode" title="direct : id connu → ctrl.add(id, libellé) ; recherche : frappe simulée puis choix de la suggestion">
+          <option value="direct">direct (id + ctrl.add)</option>
+          <option value="recherche">recherche (frappe + suggestion)</option>
+        </select>
+        <label>timeout (ms) :</label>
+        <input type="number" class="scn-ssel-timeout" min="500" step="500" style="max-width:80px" value="${escapeAttr(step.sselTimeout ?? 8000)}" />
+      </div>
+      <div class="scn-row scn-only-ssel">
+        <label>si erreur :</label>
+        <select class="scn-ssel-onerror">
+          <option value="stop">stopper le scénario</option>
+          <option value="skip">ignorer la ligne du batch et continuer</option>
+        </select>
+      </div>
+      <div class="scn-row scn-only-ssel">
+        <button class="btn sm scn-ssel-test" type="button" title="Exécute cette étape seule sur l'onglet actif (ligne active pour les {Colonne})"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester l'étape</button>
+        <span class="scn-ssel-result"></span>
+      </div>
+      <p class="hint scn-only-ssel scn-ssel-hint"></p>
+
       <p class="hint scn-only-sigeo">La simulation est activée par défaut : décoche-la pour enregistrer réellement. Le ViewState est géré par le navigateur (aucune requête forgée).</p>
     </div>
   `;
@@ -3555,6 +3631,8 @@ function addScenarioStep(step = {}) {
     persistWorkingConfig();
   });
 
+  wireSigeoSelectorStepUI(div, step);
+
   $("scenarioSteps").appendChild(div);
 }
 
@@ -3615,7 +3693,14 @@ function getScenarioSteps() {
     batchDlTimeoutMs: parseInt(el.querySelector(".scn-batch-dltimeout").value, 10) || 30000,
     batchDlSettleMs: parseInt(el.querySelector(".scn-batch-dlsettle").value, 10) || 0,
     batchFilter: el.querySelector(".scn-batch-filter").value.trim(),
-    batchMaxRounds: parseInt(el.querySelector(".scn-batch-max").value, 10) || 50
+    batchMaxRounds: parseInt(el.querySelector(".scn-batch-max").value, 10) || 50,
+    sselChamp: el.querySelector(".scn-ssel-champ").value,
+    sselLigne: Math.max(1, parseInt(el.querySelector(".scn-ssel-ligne").value, 10) || 1),
+    sselValeur: el.querySelector(".scn-ssel-valeur").value,
+    sselCtrlKey: el.querySelector(".scn-ssel-ctrlkey").value.trim(),
+    sselMode: el.querySelector(".scn-ssel-mode").value,
+    sselTimeout: parseInt(el.querySelector(".scn-ssel-timeout").value, 10) || sselDefaults(el.querySelector(".scn-ssel-champ").value).timeoutMs,
+    sselOnError: el.querySelector(".scn-ssel-onerror").value
   }));
 }
 
@@ -3663,6 +3748,398 @@ $("clearStepsBtn").addEventListener("click", () => {
 $("scenarioSteps").addEventListener("input", updateScenarioEstimate);
 $("scenarioSteps").addEventListener("change", updateScenarioEstimate);
 
+/* ---------- Étape « Sélecteur SIGEO » (sigeoSelector) ----------
+   Champs SIGEO à autocomplétion (SelectorControl + AutoCompletion) : la
+   valeur réellement soumise est un id caché, posé par le contrôle JS de la
+   page (window.__ivCtrl). L'exécution se fait dans le service worker
+   (background.js : setMandatMG / setCompte / setSigeoSelector), en world
+   MAIN. Cette étape ne clique JAMAIS sur un bouton d'enregistrement. */
+
+// Réglages par défaut selon le champ (fonction : pas de TDZ à l'init).
+function sselDefaults(champ) {
+  switch (champ) {
+    case "compte": return { mode: "recherche", timeoutMs: 5000 };
+    case "custom": return { mode: "recherche", timeoutMs: 5000 };
+    default: return { mode: "direct", timeoutMs: 8000 }; // mandatMG : postback
+  }
+}
+
+function sselChampLabel(s) {
+  const champ = s.sselChamp || "mandatMG";
+  if (champ === "compte") return `Compte ligne ${s.sselLigne || 1}`;
+  if (champ === "custom") return s.sselCtrlKey || "personnalisé";
+  return "Mandat MG";
+}
+
+// Étape qui pose le Mandat MG (pour le garde-fou des étapes Compte).
+function isMandatScenarioStep(s) {
+  return (s.type === "sigeoSelector" && (s.sselChamp || "mandatMG") === "mandatMG") ||
+    (s.type === "input" && /^\s*(?:[a-z]+:)*mg:/i.test(s.inputField || ""));
+}
+
+function wireSigeoSelectorStepUI(div, step) {
+  const champSel = div.querySelector(".scn-ssel-champ");
+  const modeSel = div.querySelector(".scn-ssel-mode");
+  const timeoutIn = div.querySelector(".scn-ssel-timeout");
+  const ligneWrap = div.querySelector(".scn-ssel-ligne-wrap");
+  const keyWrap = div.querySelector(".scn-ssel-ctrlkey-wrap");
+  const keyLabel = div.querySelector(".scn-ssel-ctrlkey-label");
+  const keyIn = div.querySelector(".scn-ssel-ctrlkey");
+  const hint = div.querySelector(".scn-ssel-hint");
+  const valIn = div.querySelector(".scn-ssel-valeur");
+
+  champSel.value = step.sselChamp || "mandatMG";
+  modeSel.value = step.sselMode || sselDefaults(champSel.value).mode;
+  div.querySelector(".scn-ssel-onerror").value = step.sselOnError || "stop";
+  if (step.sselTimeout == null) timeoutIn.value = sselDefaults(champSel.value).timeoutMs;
+
+  const sync = () => {
+    const champ = champSel.value;
+    ligneWrap.hidden = champ !== "compte";
+    keyWrap.hidden = champ === "mandatMG";
+    // Mode imposé pour Mandat MG (direct) et Compte (recherche).
+    if (champ !== "custom") modeSel.value = sselDefaults(champ).mode;
+    modeSel.disabled = champ !== "custom";
+    if (champ === "compte") {
+      keyLabel.textContent = "modèle de clé :";
+      keyIn.placeholder = "vide = auto (body_x_proxyTabSaisie_x__compte_ajax_selector_{n}_x_selCompte_x)";
+      keyIn.title = "{n} = n° de ligne, {n0} = ligne-1, {ctl} = ligne+1 sur 2 chiffres. Format id (body_x_…) ou name (body:x:…), converti automatiquement.";
+      valIn.placeholder = "ex : {Compte} ou 411000";
+      hint.innerHTML = "Compte de la ligne de contrepartie N, en mode recherche (frappe + suggestion). Nécessite qu'une étape <strong>Mandat MG</strong> ait réussi plus tôt dans le scénario. Clé détectée automatiquement (N-ième contrôle « cpt/compte » de la page) si le modèle est vide.";
+    } else if (champ === "custom") {
+      keyLabel.textContent = "clé __ivCtrl :";
+      keyIn.placeholder = "ex : body_x_selMan_x";
+      keyIn.title = "Clé du contrôle dans window.__ivCtrl (souvent l'id de l'input caché)";
+      valIn.placeholder = modeSel.value === "direct" ? "id|libellé (ex : 396166|MG0396166) ou code numérique" : "texte à taper (ex : {Code})";
+      hint.innerHTML = "Moteur générique : vérifie que <code>__ivCtrl[clé]</code> existe, applique le mode choisi, puis valide <code>SelectedValues.length === 1</code> et que le texte affiché commence par la valeur.";
+    } else {
+      valIn.placeholder = "ex : {Mandat MG} ou MG0396166";
+      hint.innerHTML = "Accepte <code>MG0396166</code>, <code>mg396166</code> ou <code>396166</code>. Attend la fin du postback (rechargement du Journal) et vérifie l'id soumis. À placer <strong>avant</strong> Journal, Date, Libellé…";
+    }
+  };
+  champSel.addEventListener("change", () => {
+    // Nouveau champ : on repart des valeurs par défaut (mode, timeout).
+    const d = sselDefaults(champSel.value);
+    modeSel.value = d.mode;
+    timeoutIn.value = d.timeoutMs;
+    sync();
+    persistWorkingConfig();
+  });
+  modeSel.addEventListener("change", sync);
+  sync();
+
+  // « Tester l'étape » : exécute cette étape seule sur l'onglet actif.
+  const testBtn = div.querySelector(".scn-ssel-test");
+  const out = div.querySelector(".scn-ssel-result");
+  testBtn.addEventListener("click", async () => {
+    if (scnRunning) { showStatus("Un scénario est en cours d'exécution.", "error"); return; }
+    const idx = Array.from($("scenarioSteps").children).indexOf(div);
+    const s = getScenarioSteps()[idx];
+    out.className = "scn-ssel-result";
+    out.textContent = "test en cours…";
+    testBtn.disabled = true;
+    try {
+      const tabId = await getActiveTabId();
+      const res = await execSigeoSelectorStep(s, state.selectedRowIdx, tabId, { testMode: true });
+      if (res.ok) {
+        out.className = "scn-ssel-result ok";
+        out.textContent = "✓ " + res.info;
+        showStatus("Sélecteur SIGEO : " + res.info, "success");
+      } else {
+        out.className = "scn-ssel-result err";
+        out.textContent = "✗ " + res.error;
+        showStatus("Sélecteur SIGEO : " + res.error, "error");
+      }
+    } catch (e) {
+      out.className = "scn-ssel-result err";
+      out.textContent = "✗ " + e.message;
+    } finally {
+      testBtn.disabled = false;
+    }
+  });
+}
+
+// Appel au service worker.
+async function sselCallBackground(msg) {
+  try {
+    const res = await chrome.runtime.sendMessage(msg);
+    return res || { ok: false, error: "aucune réponse du service worker" };
+  } catch (e) {
+    return { ok: false, error: "service worker injoignable : " + e.message };
+  }
+}
+
+// Le Mandat MG est-il posé sur la page ? Renvoie son libellé/id, ou "".
+// Deux cas SIGEO : champ encore éditable (input caché body_x_selMan_x), ou
+// en-tête figé après « Saisir les contreparties » (texte « Mandat MG MG0396789 »).
+async function sselPageHasMandat(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const nb = (s) => String(s || "").replace(/[\u00a0\u202f\u2007]/g, " ");
+        const hidden = String(document.getElementById("body_x_selMan_x")?.value || "").trim();
+        if (hidden) {
+          const txt = nb(document.getElementById("body_x_selMan_x_txt_x__ctl0")?.value).trim();
+          return txt || hidden;
+        }
+        const m = nb(document.body?.innerText).match(/Mandat\s+MG\s*:?\s*(MG\d{5,})/i);
+        return m ? m[1].toUpperCase() : "";
+      }
+    });
+    return result || "";
+  } catch (_) { return ""; }
+}
+
+// Exécute une étape sigeoSelector. Retourne { ok, info?, error?, abortRun?, id?, label? }.
+async function execSigeoSelectorStep(step, rowIdx, tabId, opts = {}) {
+  const champ = step.sselChamp || "mandatMG";
+  const row = (rowIdx !== null && rowIdx !== undefined && state.rows.length) ? (state.rows[rowIdx] || []) : null;
+  const raw = step.sselValeur ?? "";
+  const timeoutMs = step.sselTimeout || sselDefaults(champ).timeoutMs;
+  const what = sselChampLabel(step);
+
+  const finish = (res, valeur) => {
+    sselJournalAdd({
+      row: opts.testMode ? "test" : (row ? rowIdx + 1 : "—"),
+      champ: what, valeur, id: res.id || "", label: res.label || "",
+      ok: !!res.ok, error: res.ok ? "" : (res.error || "échec")
+    });
+    if (res.ok) {
+      const info = `${what} « ${valeur} » → id ${res.id || "?"} — « ${res.label || "?"} »${res.detail?.already ? " (déjà en place)" : ""}`;
+      return { ok: true, info, id: res.id, label: res.label };
+    }
+    const error = `${what} « ${valeur} » : ${res.error || "échec"}`;
+    if (opts.testMode) return { ok: false, error };
+    return step.sselOnError === "skip"
+      ? { ok: false, error: error + " — ligne ignorée, on continue" }
+      : { ok: false, error, abortRun: true };
+  };
+
+  if (/\{[^{}]+\}/.test(raw) && !row) return finish({ ok: false, error: "aucune ligne active pour résoudre la valeur" }, raw);
+  const valeur = String(resolveFieldTemplate(raw, row) ?? "").trim();
+  const missing = valeur.match(/\{[^{}]+\}/g);
+  if (missing) return finish({ ok: false, error: "colonne(s) introuvable(s) : " + missing.join(", ") }, valeur);
+  if (!valeur) return finish({ ok: false, error: "valeur vide" }, valeur);
+
+  let res;
+  if (champ === "mandatMG") {
+    res = await sselCallBackground({ action: "setMandatMG", tabId, frameId: 0, mg: valeur, timeoutMs });
+  } else if (champ === "compte") {
+    // Garde-fou : un Mandat MG doit être en place avant le compte. Soit une
+    // étape Mandat MG a réussi plus tôt dans ce déroulé, soit la page en a
+    // déjà un (posé à la main, par une étape « Remplir » avec mg:, ou en-tête
+    // figé après « Saisir les contreparties »).
+    if (!opts.ctx?.mandatOk) {
+      const pageMandat = await sselPageHasMandat(tabId);
+      if (!pageMandat) {
+        return finish({
+          ok: false,
+          error: "aucun Mandat MG sur la page (et aucune étape Mandat MG réussie avant celle-ci) — sélectionne le mandat d'abord"
+        }, valeur);
+      }
+      if (opts.ctx) opts.ctx.mandatOk = true;
+      console.log(`NoHands OSA [Sélecteur SIGEO]: mandat déjà présent sur la page (${pageMandat})`);
+    }
+    res = await sselCallBackground({
+      action: "setCompte", tabId, frameId: 0, ligne: step.sselLigne || 1, valeur,
+      keyTemplate: step.sselCtrlKey || "", timeoutMs
+    });
+  } else {
+    if (!step.sselCtrlKey) return finish({ ok: false, error: "clé __ivCtrl manquante" }, valeur);
+    res = await sselCallBackground({
+      action: "setSigeoSelector", tabId, frameId: 0, ctrlKey: step.sselCtrlKey,
+      mode: step.sselMode || "recherche", value: valeur, timeoutMs
+    });
+  }
+  // setMandatMG renvoie le libellé calculé : on préfère le texte réellement affiché.
+  if (res && res.detail && res.detail.text) res.label = String(res.detail.text).replace(/[\u00a0\u202f\u2007]/g, " ").trim() || res.label;
+  if (res && res.detail && res.detail.hidden && !res.id) res.id = res.detail.hidden;
+  return finish(res || { ok: false, error: "aucun résultat" }, valeur);
+}
+
+/* --- Journal des sélecteurs (contrôle a posteriori des id rattachés) --- */
+
+function sselJournal() {
+  if (!Array.isArray(state.sselJournal)) state.sselJournal = [];
+  return state.sselJournal;
+}
+
+function sselJournalAdd(entry) {
+  const j = sselJournal();
+  j.push({ ts: Date.now(), ...entry });
+  if (j.length > 2000) j.splice(0, j.length - 2000);
+  try { chrome.storage.local.set({ sselJournal: j }); } catch (_) { /* ignoré */ }
+  console.log("NoHands OSA [Sélecteur SIGEO] journal:", entry);
+  renderSselJournal();
+}
+
+function renderSselJournal() {
+  const body = $("sselJournalBody");
+  if (!body) return;
+  const j = sselJournal();
+  $("sselJournalCount").textContent = j.length ? `(${j.length})` : "";
+  body.innerHTML = "";
+  // Les plus récentes en haut ; affichage limité, l'export CSV contient tout.
+  j.slice(-300).reverse().forEach((e) => {
+    const tr = document.createElement("tr");
+    const cells = [
+      new Date(e.ts).toLocaleTimeString(), String(e.row), e.champ, e.valeur, e.id, e.label,
+      e.ok ? "OK" : "ERREUR : " + e.error
+    ];
+    cells.forEach((c, i) => {
+      const td = document.createElement("td");
+      td.textContent = c ?? "";
+      if (i === cells.length - 1) td.className = e.ok ? "ok" : "err";
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+}
+
+$("sselJournalExportBtn").addEventListener("click", () => {
+  const j = sselJournal();
+  if (!j.length) { showStatus("Journal vide.", "error"); return; }
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = [["Date", "Ligne", "Champ", "Valeur", "Id", "Libellé", "Statut", "Erreur"].map(esc).join(";")];
+  j.forEach((e) => lines.push([
+    new Date(e.ts).toLocaleString(), e.row, e.champ, e.valeur, e.id, e.label, e.ok ? "OK" : "ERREUR", e.error
+  ].map(esc).join(";")));
+  // BOM UTF-8 : accents corrects à l'ouverture dans Excel.
+  const blob = new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `journal-selecteurs-sigeo-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+});
+
+$("sselJournalClearBtn").addEventListener("click", () => {
+  if (!sselJournal().length) return;
+  if (!confirm("Vider le journal des sélecteurs SIGEO ?")) return;
+  state.sselJournal = [];
+  chrome.storage.local.remove("sselJournal");
+  renderSselJournal();
+});
+
+chrome.storage.local.get("sselJournal").then((st) => {
+  if (Array.isArray(st.sselJournal)) state.sselJournal = st.sselJournal;
+  renderSselJournal();
+}).catch(() => { /* ignoré */ });
+
+/* --- Garde-fous à l'enregistrement du scénario ---
+   Le scénario est sauvegardé en continu : les avertissements sont donc
+   recalculés à chaque modification (ajout, suppression, déplacement, saisie)
+   et rappelés dans le journal au démarrage d'une exécution. */
+
+// Montant (Débit / Crédit / TVA) saisi par une étape « Saisir un champ ».
+function scnAmountKind(s) {
+  if (s.type !== "input") return null;
+  const t = `${s.inputField || ""} ${s.inputValue || ""}`;
+  if (/d[ée]bit/i.test(t)) return "Débit";
+  if (/cr[ée]dit/i.test(t)) return "Crédit";
+  if (/tva/i.test(t)) return "TVA";
+  return null;
+}
+
+// N° de ligne de contrepartie d'une étape montant : « ligne 2 », « l2 »,
+// « row_2 »… dans le champ ou la valeur ; à défaut, ligne 1.
+function scnGuessLine(s) {
+  const t = `${s.inputField || ""} ${s.inputValue || ""}`.replace(/[:$]/g, "_");
+  const m = t.match(/(?<![a-z])(?:ligne|line|row|lig|l)[\s_-]?0*(\d+)\b/i) ||
+    t.match(/_[a-z]+_(\d+)_x/i); // grille SIGEO : body_x_proxyTabSaisie_x__tva_2_x…
+  return m ? parseInt(m[1], 10) : 1;
+}
+
+function scnValidateScenario(steps) {
+  const warns = [];
+  const firstMandat = steps.findIndex(isMandatScenarioStep);
+  const compteAt = {}; // ligne -> index de la 1re étape Compte
+  steps.forEach((s, i) => {
+    if (s.type !== "sigeoSelector") return;
+    const champ = s.sselChamp || "mandatMG";
+    if (!String(s.sselValeur || "").trim()) warns.push(`Étape ${i + 1} (${sselChampLabel(s)}) : valeur vide.`);
+    if (champ === "custom" && !s.sselCtrlKey) warns.push(`Étape ${i + 1} (Sélecteur personnalisé) : clé __ivCtrl manquante.`);
+    if (champ === "compte") {
+      if (firstMandat < 0 || firstMandat > i) {
+        warns.push(`Étape ${i + 1} (${sselChampLabel(s)}) : aucune étape Mandat MG avant — elle échouera à l'exécution si le mandat n'est pas déjà posé sur la page.`);
+      }
+      const n = s.sselLigne || 1;
+      if (compteAt[n] === undefined) compteAt[n] = i;
+    }
+  });
+  steps.forEach((s, i) => {
+    const kind = scnAmountKind(s);
+    if (!kind) return;
+    const n = scnGuessLine(s);
+    const ci = compteAt[n];
+    if (ci !== undefined && ci > i) {
+      warns.push(`Étape ${i + 1} (${kind} ligne ${n}) placée avant l'étape ${ci + 1} (Compte ligne ${n}) : choisis le compte d'abord, son postback peut effacer le montant.`);
+    }
+  });
+  return warns;
+}
+
+function refreshScenarioWarnings() {
+  const box = $("scnWarnings");
+  if (!box) return;
+  const warns = scnValidateScenario(getScenarioSteps());
+  box.hidden = !warns.length;
+  box.innerHTML = "";
+  warns.forEach((w) => {
+    const d = document.createElement("div");
+    d.textContent = "⚠ " + w;
+    box.appendChild(d);
+  });
+}
+
+function scnLogScenarioWarnings() {
+  scnValidateScenario(getScenarioSteps()).forEach((w) => scnLog("⚠ " + w, "skip"));
+}
+
+{
+  let warnTimer = null;
+  const schedule = () => { clearTimeout(warnTimer); warnTimer = setTimeout(refreshScenarioWarnings, 150); };
+  $("scenarioSteps").addEventListener("input", schedule);
+  $("scenarioSteps").addEventListener("change", schedule);
+  // Ajout, suppression, déplacement, glisser-déposer, chargement de profil
+  new MutationObserver(schedule).observe($("scenarioSteps"), { childList: true });
+}
+
+/* --- Boutons « + Sélecteur SIGEO » et modèle « OD – Saisie contrepartie » --- */
+
+$("addSselStepBtn").addEventListener("click", () => {
+  addScenarioStep({ type: "sigeoSelector", sselChamp: "mandatMG", sselValeur: "{Mandat MG}" });
+  persistWorkingConfig();
+  updateScenarioEstimate();
+});
+
+$("addOdTemplateBtn").addEventListener("click", () => {
+  const steps = [
+    { type: "sigeoSelector", sselChamp: "mandatMG", sselValeur: "{Mandat MG}", sselTimeout: 8000, sselOnError: "stop" },
+    // Clic sur « Saisir les contreparties » : sélecteur à désigner avec 🎯
+    // (ou supprimer l'étape et cliquer à la main — voir le message).
+    { type: "click", clickSelector: "", clickMode: "click", clickTimeout: 5000 },
+    { type: "sigeoSelector", sselChamp: "compte", sselLigne: 1, sselValeur: "{Compte}", sselTimeout: 5000, sselOnError: "stop" },
+    { type: "input", inputField: "", inputValue: "{Débit}" },
+    { type: "input", inputField: "", inputValue: "{Crédit}" },
+    { type: "input", inputField: "", inputValue: "{Libellé}" }
+  ];
+  const first = $("scenarioSteps").children.length + 1;
+  steps.forEach((s) => addScenarioStep(s));
+  persistWorkingConfig();
+  updateScenarioEstimate();
+  showStatus(
+    `Modèle « OD – Saisie contrepartie » ajouté (étapes ${first} à ${first + steps.length - 1}). ` +
+    `À compléter : 🎯 sur le bouton « Saisir les contreparties » (étape ${first + 1}) — ou remplace-la par « Attendre qu'un élément apparaisse » si tu cliques à la main — ` +
+    `et 🎯 sur les champs Débit, Crédit, Libellé.`,
+    "info"
+  );
+});
+
 /* ---------- Fonctions injectées (autonomes) ---------- */
 
 // Attend qu'un élément apparaisse (visible) ou disparaisse, avec timeout.
@@ -3705,7 +4182,7 @@ function scnWaitInjected(cfg) {
 // Icône affichée à côté du numéro de l'étape (symboles #icon-step-* du HTML).
 function scnStepIconId(type, clickMode) {
   if (type === "click" && clickMode === "enter") return "icon-step-enter";
-  const known = ["fill", "input", "goto", "click", "wait", "cond", "pdfcheck", "pdfwrite", "sigeo", "batchedit"];
+  const known = ["fill", "input", "goto", "click", "wait", "cond", "pdfcheck", "pdfwrite", "sigeo", "batchedit", "sigeoSelector"];
   return "icon-step-" + (known.includes(type) ? type : "fill");
 }
 
@@ -4543,6 +5020,7 @@ function scnStepLabel(s) {
     case "sigeo":
       return `SIGEO : adresse ${scnTrunc(s.sigeoAddressId || "?", 20)}${s.sigeoDryRun !== false ? " (simulation)" : ""}`;
     case "batchedit": return `Éditer par lots de ${s.batchSize || 10}`;
+    case "sigeoSelector": return `Sélecteur SIGEO : ${sselChampLabel(s)} = « ${scnTrunc(s.sselValeur, 25)} »`;
   }
   return s.type;
 }
@@ -4678,15 +5156,18 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
           customFields: Object.keys(customFields).length ? customFields : undefined,
           rowContext
         };
-        const { totalFilled } = opts.soloTab
+        const { totalFilled, fatalErrors } = opts.soloTab
           ? await sendFillToOneTab(tabId, fillMsg)
           : await sendFillToAllTabs(fillMsg);
+        // Échec bloquant (ex. Mandat MG non posé) : on n'enchaîne pas les
+        // étapes suivantes sur un formulaire incohérent.
+        if (fatalErrors && fatalErrors.length) return { ok: false, error: fatalErrors[0] };
         return { ok: true, info: `${totalFilled} champ(s) rempli(s)`, warn: totalFilled === 0 };
       }
       case "input": {
         if (!step.inputField) return { ok: false, error: "champ (name/id) manquant" };
         const { rowContext } = buildFillPayload(rowIdx);
-        const value = resolveRowTemplate(step.inputValue ?? "", stepRow);
+        const value = resolveFieldTemplate(step.inputValue ?? "", stepRow);
         const msg = { action: "fillOne", identifier: step.inputField, value, rowContext };
         const { totalFilled, totalErrors } = opts.soloTab
           ? await sendFillToOneTab(tabId, msg)
@@ -4701,6 +5182,8 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
         if (!res.ok) return { ok: false, error: shown + " — mais " + res.error };
         return { ok: true, info: shown + " — " + res.info };
       }
+      case "sigeoSelector":
+        return await execSigeoSelectorStep(step, rowIdx, tabId, opts);
       case "goto": {
         if (!step.gotoUrl) return { ok: false, error: "URL manquante" };
         let url = step.gotoUrl;
@@ -4969,6 +5452,9 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
 
 // Exécute toutes les étapes pour une ligne. prefix = préfixe de log (mode boucle).
 async function runScenarioForRow(rowIdx, tabId, steps, prefix = "", opts = {}) {
+  // Contexte propre à la ligne : garde-fous inter-étapes (ex. une étape
+  // Compte exige qu'un Mandat MG ait réussi plus tôt dans CE déroulé).
+  opts = { ...opts, ctx: { mandatOk: false } };
   for (let i = 0; i < steps.length; i++) {
     if (scnStopRequested) return { stopped: true };
     const step = steps[i];
@@ -4976,8 +5462,14 @@ async function runScenarioForRow(rowIdx, tabId, steps, prefix = "", opts = {}) {
     const res = await execScenarioStep(step, rowIdx, tabId, opts);
     if (!res.ok) {
       scnLog(`✗ ${label} : ${res.error}`, "err");
+      if (res.abortRun) {
+        // « si erreur : stopper » — toute la boucle s'arrête (multi-onglets compris).
+        scnStopRequested = true;
+        scnLog(`${prefix}Scénario stoppé (étape ${i + 1} réglée sur « stopper »).`, "err");
+      }
       return { ok: false };
     }
+    if (isMandatScenarioStep(step)) opts.ctx.mandatOk = true;
     scnLog(
       `${res.stop || res.skip ? "→" : "✓"} ${label}${res.info ? " : " + res.info : ""}`,
       res.stop || res.skip || res.warn ? "skip" : "ok"
@@ -4999,6 +5491,7 @@ function scenarioNeedsRow(steps) {
     (s.type === "goto" && /\{[^{}]+\}/.test(s.gotoUrl || "")) ||
     (s.type === "input" && /\{[^{}]+\}/.test(s.inputValue || "")) ||
     (s.type === "pdfwrite") ||
+    (s.type === "sigeoSelector" && /\{[^{}]+\}/.test(s.sselValeur || "")) ||
     (s.type === "pdfcheck" && (/\{[^{}]+\}/.test(s.pdfVal || "") ||
       (s.pdfDocMode === "match" && /\{[^{}]+\}/.test(s.pdfDocMatch || "")))) ||
     (s.type === "sigeo" && ([s.sigeoAddressId, s.sigeoTable, s.sigeoPays, s.sigeoCp, s.sigeoVille,
@@ -5015,8 +5508,11 @@ function scnBegin() {
   $("runScenarioMultiBtn").disabled = true;
   $("mtStartBtn").disabled = true;
   $("addStepBtn").disabled = true;
+  $("addSselStepBtn").disabled = true;
+  $("addOdTemplateBtn").disabled = true;
   $("stopScenarioBtn").disabled = false;
   $("scnLog").innerHTML = "";
+  scnLogScenarioWarnings();
 }
 
 function scnFinish() {
@@ -5026,6 +5522,8 @@ function scnFinish() {
   $("runScenarioMultiBtn").disabled = false;
   if (!mtState.active) $("mtStartBtn").disabled = false;
   $("addStepBtn").disabled = false;
+  $("addSselStepBtn").disabled = false;
+  $("addOdTemplateBtn").disabled = false;
   $("stopScenarioBtn").disabled = true;
   persistSession();
 }

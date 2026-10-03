@@ -47,6 +47,11 @@ deux modes :
    - bouton 🎯 dans le mapping → clique directement sur le champ.
    Le mapping est mémorisé par modèle / jeu de colonnes.
 4. **Champs personnalisés** : paires name→valeur fixes (import/export JSON).
+   Ils suivent **exactement la même logique que le mapping** : une variable
+   `{Colonne}` reçoit la même valeur que si la colonne était mappée
+   (formatage IBAN / trimestre, règles de valeurs), et le remplissage passe
+   par le même moteur (marqueurs `ac:` / `pb:` / `nopb:` / `mg:`,
+   autocomplétion, postbacks, erreurs). Idem pour l'étape « Saisir un champ ».
 5. **Remplir le formulaire** : remplit tous les onglets ouverts du même site
    (popups compris). Les contenus chargés dynamiquement (ASP.NET UpdatePanel)
    sont re-remplis automatiquement pendant 30 s.
@@ -79,6 +84,19 @@ deux modes :
    remplissage, comme si tu cliquais ailleurs. `pb:` reste utile pour les
    champs dont le handler n'est pas visible dans le HTML ; `nopb:` désactive
    la sortie automatique sur un champ.
+
+   **Champ SIGEO « Mandat MG »** (saisie d'opérations diverses) : ce n'est
+   pas un input simple (sélecteur + valeur cachée soumise + postback qui
+   recharge le Journal). Mappe la colonne « Mandat MG » sur `mg:` (ou
+   `mg:body_x_selMan_x` ; choisir le champ avec 🎯 est aussi détecté
+   automatiquement). Valeurs acceptées : `MG0396166`, `mg396166`, `396166`.
+   Le mandat est **toujours saisi en premier**, quelle que soit la position
+   de la colonne ; l'extension attend la fin du rechargement (8 s max) puis
+   vérifie la valeur soumise et le libellé. En cas d'échec (entrée mal
+   formée, mandat inexistant, champ absent, délai dépassé), **le reste du
+   remplissage est abandonné** et l'étape de scénario passe en erreur.
+   Aucun bouton (« Saisir les contreparties »…) n'est jamais cliqué.
+   Fonctionne aussi dans l'étape « Saisir un champ » (champ `mg:`).
 
 8. **Étape de scénario « SIGEO : saisir une adresse »** : automatise le
    formulaire d'adresse SIGEO (`popup.aspx/…/address_manage/{id}`) de bout en
@@ -156,6 +174,32 @@ deux modes :
    À savoir : ce mode ne convient pas aux scénarios dont les étapes
    partagent un état global, en particulier les étapes **PDF β** qui
    travaillent sur le document actif de la Toolbox.
+
+11. **Étape de scénario « Sélecteur SIGEO »** (bouton **+ Sélecteur SIGEO**) :
+   dédiée aux champs SIGEO à autocomplétion (`SelectorControl` +
+   `AutoCompletion`), où écrire la valeur ne suffit pas.
+
+   | Réglage | Rôle |
+   |---|---|
+   | champ | `Mandat MG`, `Compte` (ligne de contrepartie N) ou `Personnalisé` |
+   | ligne | n° de ligne de contrepartie (Compte uniquement) |
+   | valeur | fixe ou `{Colonne}` (même traitement que le mapping) |
+   | clé __ivCtrl | Personnalisé : clé du contrôle. Compte : modèle optionnel (`{n}`, `{n0}`, `{ctl}`), sinon détection auto |
+   | mode | `direct` (id + `ctrl.add`, imposé pour Mandat MG) ou `recherche` (frappe + suggestion, imposé pour Compte) |
+   | timeout | 8000 ms (Mandat MG) / 5000 ms (Compte) |
+   | si erreur | **stopper** tout le scénario, ou ignorer la ligne du batch et continuer |
+
+   Validation : une seule valeur sélectionnée (`SelectedValues.length === 1`)
+   et texte affiché qui commence par la valeur ; suggestions ambiguës refusées
+   avec la liste des candidats. **Tester l'étape** l'exécute seule sur
+   l'onglet actif. Chaque exécution est inscrite dans le **journal des
+   sélecteurs SIGEO** (ligne, valeur, id rattaché, libellé, statut ; export
+   CSV). Garde-fous : une étape Compte exige un Mandat MG réussi plus tôt
+   dans le scénario ; avertissement si une étape Débit / Crédit / TVA d'une
+   ligne précède le Compte de cette ligne. Aucun clic d'enregistrement.
+   Le bouton **Modèle OD** ajoute le scénario « OD – Saisie contrepartie »
+   (Mandat MG → clic « Saisir les contreparties » → Compte ligne 1 → Débit →
+   Crédit → Libellé), à compléter avec 🎯.
 
 ## 3. Onglet Extraction (ex-OSA)
 

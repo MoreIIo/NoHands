@@ -1,0 +1,1799 @@
+diff --git a/README.md b/README.md
+index a2682f6..eb9094b 100755
+--- a/README.md
++++ b/README.md
+@@ -47,6 +47,11 @@ deux modes :
+    - bouton 🎯 dans le mapping → clique directement sur le champ.
+    Le mapping est mémorisé par modèle / jeu de colonnes.
+ 4. **Champs personnalisés** : paires name→valeur fixes (import/export JSON).
++   Ils suivent **exactement la même logique que le mapping** : une variable
++   `{Colonne}` reçoit la même valeur que si la colonne était mappée
++   (formatage IBAN / trimestre, règles de valeurs), et le remplissage passe
++   par le même moteur (marqueurs `ac:` / `pb:` / `nopb:` / `mg:`,
++   autocomplétion, postbacks, erreurs). Idem pour l'étape « Saisir un champ ».
+ 5. **Remplir le formulaire** : remplit tous les onglets ouverts du même site
+    (popups compris). Les contenus chargés dynamiquement (ASP.NET UpdatePanel)
+    sont re-remplis automatiquement pendant 30 s.
+@@ -80,6 +85,19 @@ deux modes :
+    champs dont le handler n'est pas visible dans le HTML ; `nopb:` désactive
+    la sortie automatique sur un champ.
+ 
++   **Champ SIGEO « Mandat MG »** (saisie d'opérations diverses) : ce n'est
++   pas un input simple (sélecteur + valeur cachée soumise + postback qui
++   recharge le Journal). Mappe la colonne « Mandat MG » sur `mg:` (ou
++   `mg:body_x_selMan_x` ; choisir le champ avec 🎯 est aussi détecté
++   automatiquement). Valeurs acceptées : `MG0396166`, `mg396166`, `396166`.
++   Le mandat est **toujours saisi en premier**, quelle que soit la position
++   de la colonne ; l'extension attend la fin du rechargement (8 s max) puis
++   vérifie la valeur soumise et le libellé. En cas d'échec (entrée mal
++   formée, mandat inexistant, champ absent, délai dépassé), **le reste du
++   remplissage est abandonné** et l'étape de scénario passe en erreur.
++   Aucun bouton (« Saisir les contreparties »…) n'est jamais cliqué.
++   Fonctionne aussi dans l'étape « Saisir un champ » (champ `mg:`).
++
+ 8. **Étape de scénario « SIGEO : saisir une adresse »** : automatise le
+    formulaire d'adresse SIGEO (`popup.aspx/…/address_manage/{id}`) de bout en
+    bout — navigation (ViewState frais), pays, CP (autocomplétion
+@@ -157,6 +175,32 @@ deux modes :
+    partagent un état global, en particulier les étapes **PDF β** qui
+    travaillent sur le document actif de la Toolbox.
+ 
++11. **Étape de scénario « Sélecteur SIGEO »** (bouton **+ Sélecteur SIGEO**) :
++   dédiée aux champs SIGEO à autocomplétion (`SelectorControl` +
++   `AutoCompletion`), où écrire la valeur ne suffit pas.
++
++   | Réglage | Rôle |
++   |---|---|
++   | champ | `Mandat MG`, `Compte` (ligne de contrepartie N) ou `Personnalisé` |
++   | ligne | n° de ligne de contrepartie (Compte uniquement) |
++   | valeur | fixe ou `{Colonne}` (même traitement que le mapping) |
++   | clé __ivCtrl | Personnalisé : clé du contrôle. Compte : modèle optionnel (`{n}`, `{n0}`, `{ctl}`), sinon auto — clé connue de la saisie d'OD : `body_x_proxyTabSaisie_x__compte_ajax_selector_{n}_x_selCompte_x`. Format id (`body_x_…`) ou name (`body:x:…`) accepté ; la clé de l'input texte (`…_txt_x__ctl0`) est ramenée à celle du contrôle |
++   | mode | `direct` (id + `ctrl.add`, imposé pour Mandat MG) ou `recherche` (frappe + suggestion, imposé pour Compte) |
++   | timeout | 8000 ms (Mandat MG) / 5000 ms (Compte) |
++   | si erreur | **stopper** tout le scénario, ou ignorer la ligne du batch et continuer |
++
++   Validation : une seule valeur sélectionnée (`SelectedValues.length === 1`)
++   et texte affiché qui commence par la valeur ; suggestions ambiguës refusées
++   avec la liste des candidats. **Tester l'étape** l'exécute seule sur
++   l'onglet actif. Chaque exécution est inscrite dans le **journal des
++   sélecteurs SIGEO** (ligne, valeur, id rattaché, libellé, statut ; export
++   CSV). Garde-fous : une étape Compte exige un Mandat MG en place — étape
++   Mandat MG réussie plus tôt, ou mandat déjà visible sur la page ; avertissement si une étape Débit / Crédit / TVA d'une
++   ligne précède le Compte de cette ligne. Aucun clic d'enregistrement.
++   Le bouton **Modèle OD** ajoute le scénario « OD – Saisie contrepartie »
++   (Mandat MG → clic « Saisir les contreparties » → Compte ligne 1 → Débit →
++   Crédit → Libellé), à compléter avec 🎯.
++
+ ## 3. Onglet Extraction (ex-OSA)
+ 
+ 1. **Conditions** : ignorer certaines lignes (ex : colonne X = "NON").
+diff --git a/background.js b/background.js
+index ade47d6..e218d47 100755
+--- a/background.js
++++ b/background.js
+@@ -46,3 +46,619 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+     // Ignoré : déjà injecté via le manifest, ou page protégée.
+   });
+ });
++
++/* ====================================================================
++ * SIGEO — champ « Mandat MG » (SelectorControl + AutoCompletion)
++ * --------------------------------------------------------------------
++ * Le champ n'est pas un simple input :
++ *   - #body_x_selMan_x_txt_x__ctl0 : texte visible (libellé « MG0396166 ») ;
++ *   - #body_x_selMan_x            : input caché = valeur SOUMISE (« 396166 ») ;
++ *   - window.__ivCtrl["body_x_selMan_x"] : objet JS du contrôle (AutoPostBack).
++ * ctrl.add(id, libellé) remplit caché + texte et déclenche un __doPostBack
++ * qui recharge la liste Journal et les updatePanels. __ivCtrl n'existe que
++ * dans le monde de la page : injection en world 'MAIN' obligatoire.
++ * Appelé par le content script (marqueur « mg: ») via runtime.sendMessage.
++ * ==================================================================== */
++
++const MANDAT_MG = {
++  CTRL_ID: "body_x_selMan_x",
++  TIMEOUT_MS: 8000,        // attente max de la fin du postback
++  // Mandat inexistant : si SIGEO accepte l'id mais ne charge aucun journal,
++  // on considère que le mandat n'existe pas. Passer à false si un mandat
++  // valide peut légitimement n'avoir aucun journal.
++  REQUIRE_JOURNAL: true
++};
++
++// « MG0396166 », « mg396166 », « 396166 », « MG 0396166 » → { id, label }
++function normalizeMandatMG(raw) {
++  const s = String(raw ?? "").replace(/[\s\u00a0\u202f\u2007]/g, "").toUpperCase();
++  const m = s.match(/^(?:MG)?(\d+)$/);
++  if (!m) {
++    return { error: `Mandat MG invalide : « ${String(raw ?? "").trim()} » (attendu MG0396166, mg396166 ou 396166)` };
++  }
++  const id = String(parseInt(m[1], 10));
++  if (id === "0") return { error: `Mandat MG invalide : « ${String(raw).trim()} » (numéro nul)` };
++  return { id, label: "MG" + id.padStart(7, "0") };
++}
++
++// --- Code injecté dans la page (world MAIN) : doit rester autonome ---------
++// Pose la valeur, attend la fin du postback, puis vérifie le résultat.
++// Les nœuds peuvent être remplacés par le postback : on ré-interroge le DOM
++// par ID à chaque lecture, sans garder de référence.
++async function mgPageSetAndWait(ctrlId, id, label, timeoutMs, requireJournal) {
++  const JOURNAL_ID = "body_x_ddlJournal_ddlJournal";
++  const txtId = ctrlId + "_txt_x__ctl0";
++  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++  // Espaces insécables du DOM SIGEO : normalisés avant toute comparaison.
++  const norm = (s) => String(s ?? "").replace(/[\u00a0\u202f\u2007]/g, " ").replace(/\s+/g, " ").trim().toUpperCase();
++  const labelOk = (t) => {
++    const n = norm(t);
++    return n === label || (n.startsWith(label) && !/\d/.test(n.charAt(label.length)));
++  };
++  const read = () => ({
++    hidden: String(document.getElementById(ctrlId)?.value ?? "").trim(),
++    text: document.getElementById(txtId)?.value ?? ""
++  });
++  const journalSig = () => {
++    const j = document.getElementById(JOURNAL_ID);
++    return j ? Array.from(j.options).map((o) => o.value).join("|") : null;
++  };
++  const isBusy = () => {
++    try {
++      if (window.Sys?.WebForms?.PageRequestManager?.getInstance?.()?.get_isInAsyncPostBack?.()) return true;
++    } catch (_) { /* ignoré */ }
++    const p = document.getElementById("progessUpdatePanel") || document.querySelector('[id$="progessUpdatePanel"]');
++    if (!p) return false;
++    const cs = getComputedStyle(p);
++    return cs.display !== "none" && cs.visibility !== "hidden" && p.getClientRects().length > 0;
++  };
++
++  const ctrl = window.__ivCtrl?.[ctrlId];
++  if (!ctrl || typeof ctrl.add !== "function") {
++    return { ok: false, code: "NOT_FOUND", error: "champ Mandat MG introuvable sur cette page" };
++  }
++
++  // Idempotence : déjà le bon mandat → aucun postback (évite les boucles
++  // quand le re-remplissage automatique repasse sur le champ).
++  const before = read();
++  if (before.hidden === id && labelOk(before.text)) {
++    return { ok: true, already: true, ...before };
++  }
++
++  const journalNodeBefore = document.getElementById(JOURNAL_ID);
++  const sigBefore = journalSig();
++  let journalTouched = false;
++  let endRequestSeen = false;
++  let serverError = null;
++
++  const touches = (n) => n.nodeType === 1 && (n.id === JOURNAL_ID || !!n.querySelector?.("#" + JOURNAL_ID));
++  const mo = new MutationObserver((muts) => {
++    for (const m of muts) {
++      if (m.target?.id === JOURNAL_ID ||
++          Array.from(m.addedNodes).some(touches) ||
++          Array.from(m.removedNodes).some(touches)) { journalTouched = true; return; }
++    }
++  });
++  mo.observe(document.documentElement, { childList: true, subtree: true });
++
++  let prm = null;
++  const onEnd = (_sender, args) => {
++    endRequestSeen = true;
++    try { const err = args?.get_error?.(); if (err) serverError = err.message || String(err); } catch (_) { /* ignoré */ }
++  };
++  try {
++    prm = window.Sys?.WebForms?.PageRequestManager?.getInstance?.() || null;
++    prm?.add_endRequest(onEnd);
++  } catch (_) { prm = null; }
++
++  const cleanup = () => {
++    mo.disconnect();
++    try { prm?.remove_endRequest(onEnd); } catch (_) { /* ignoré */ }
++  };
++
++  try {
++    if (typeof ctrl.removeAllValues === "function") ctrl.removeAllValues();
++    ctrl.add(id, label); // remplit caché + texte, puis OnChange() → __doPostBack
++  } catch (e) {
++    cleanup();
++    return { ok: false, code: "CTRL_ERROR", error: "erreur du contrôle SIGEO : " + (e?.message || e) };
++  }
++
++  // Attente de la fin du postback : signal PageRequestManager, ou liste
++  // Journal remplacée / modifiée, ET plus d'indicateur de chargement.
++  const t0 = Date.now();
++  let finished = false;
++  while (Date.now() - t0 < timeoutMs) {
++    await sleep(100);
++    if (isBusy()) continue;
++    const changed = endRequestSeen || journalTouched ||
++      journalSig() !== sigBefore || document.getElementById(JOURNAL_ID) !== journalNodeBefore;
++    if (changed) {
++      await sleep(250); // laisse les scripts de fin de postback s'exécuter
++      if (!isBusy()) { finished = true; break; }
++    }
++  }
++  cleanup();
++
++  const after = read();
++  const j = document.getElementById(JOURNAL_ID);
++  const journalOptions = j ? Array.from(j.options).filter((o) => o.value && !/^(0|-1)$/.test(o.value)).length : null;
++  const base = { ...after, journalOptions, elapsedMs: Date.now() - t0 };
++
++  if (serverError) return { ok: false, code: "SERVER", error: "erreur serveur pendant le postback : " + serverError, ...base };
++  if (!finished) return { ok: false, code: "TIMEOUT", error: `postback non terminé après ${timeoutMs} ms (liste Journal non rechargée)`, ...base };
++  if (after.hidden !== id) {
++    return { ok: false, code: "MISMATCH", error: `valeur soumise « ${after.hidden || "(vide)"} » au lieu de « ${id} » — mandat inexistant ?`, ...base };
++  }
++  if (!labelOk(after.text)) {
++    return { ok: false, code: "MISMATCH", error: `libellé affiché « ${norm(after.text) || "(vide)"} » au lieu de « ${label} » — mandat inexistant ?`, ...base };
++  }
++  if (requireJournal && journalOptions === 0) {
++    return { ok: false, code: "NO_JOURNAL", error: `aucun journal chargé pour ${label} — mandat inexistant ?`, ...base };
++  }
++  return { ok: true, ...base };
++}
++
++// Vérification seule (si le postback s'est transformé en rechargement
++// complet de la page, l'injection précédente a été détruite).
++function mgPageVerify(ctrlId, id, label) {
++  const norm = (s) => String(s ?? "").replace(/[\u00a0\u202f\u2007]/g, " ").replace(/\s+/g, " ").trim().toUpperCase();
++  const hidden = String(document.getElementById(ctrlId)?.value ?? "").trim();
++  const text = document.getElementById(ctrlId + "_txt_x__ctl0")?.value ?? "";
++  const n = norm(text);
++  const ok = hidden === id && (n === label || (n.startsWith(label) && !/\d/.test(n.charAt(label.length))));
++  return ok
++    ? { ok: true, hidden, text, reloaded: true }
++    : { ok: false, code: "MISMATCH", hidden, text, error: `après rechargement : valeur « ${hidden || "(vide)"} », libellé « ${norm(text) || "(vide)"} » (attendu ${id} / ${label})` };
++}
++
++function waitTabComplete(tabId, timeoutMs) {
++  return new Promise((resolve) => {
++    const t0 = Date.now();
++    const tick = async () => {
++      try {
++        const tab = await chrome.tabs.get(tabId);
++        if (tab.status === "complete") return resolve(true);
++      } catch (_) { return resolve(false); }
++      if (Date.now() - t0 > timeoutMs) return resolve(false);
++      setTimeout(tick, 200);
++    };
++    setTimeout(tick, 300);
++  });
++}
++
++/**
++ * Sélectionne un mandat dans le champ « Mandat MG » de SIGEO et attend la
++ * fin du postback. Ne clique JAMAIS sur un bouton de validation.
++ * @param {number} tabId
++ * @param {string|number} mg - MG0396166 | mg396166 | 396166
++ * @param {{frameId?: number, ctrlId?: string, timeoutMs?: number}} [opts]
++ * @returns {Promise<{ok: boolean, id?: string, label?: string, error?: string, code?: string, detail?: object}>}
++ */
++async function setMandatMG(tabId, mg, opts = {}) {
++  const ctrlId = opts.ctrlId || MANDAT_MG.CTRL_ID;
++  const timeoutMs = opts.timeoutMs || MANDAT_MG.TIMEOUT_MS;
++  const target = { tabId, frameIds: [opts.frameId ?? 0] };
++
++  const n = normalizeMandatMG(mg);
++  if (n.error) {
++    console.warn("NoHands OSA [Mandat MG]:", n.error);
++    return { ok: false, code: "INVALID", error: n.error };
++  }
++  const { id, label } = n;
++  console.log(`NoHands OSA [Mandat MG]: ${label} (id ${id}) → onglet ${tabId}, frame ${target.frameIds[0]}`);
++
++  let res;
++  try {
++    const [inj] = await chrome.scripting.executeScript({
++      target, world: "MAIN",
++      func: mgPageSetAndWait,
++      args: [ctrlId, id, label, timeoutMs, MANDAT_MG.REQUIRE_JOURNAL]
++    });
++    res = inj?.result;
++  } catch (e) {
++    // Rechargement complet de la page pendant l'attente : on vérifie après.
++    if (!/frame|navigat|removed|context|closed/i.test(e.message || "")) {
++      console.error("NoHands OSA [Mandat MG]: injection impossible:", e);
++      return { ok: false, id, label, code: "INJECT", error: "injection impossible : " + e.message };
++    }
++    console.log("NoHands OSA [Mandat MG]: page rechargée pendant le postback, vérification…");
++    await waitTabComplete(tabId, timeoutMs);
++    try {
++      const [inj] = await chrome.scripting.executeScript({
++        target: { tabId, frameIds: [0] }, world: "MAIN",
++        func: mgPageVerify, args: [ctrlId, id, label]
++      });
++      res = inj?.result;
++    } catch (e2) {
++      return { ok: false, id, label, code: "INJECT", error: "vérification impossible après rechargement : " + e2.message };
++    }
++  }
++
++  if (!res) return { ok: false, id, label, code: "INJECT", error: "aucun résultat de la page" };
++  const { ok, error, code, ...detail } = res;
++  if (ok) {
++    console.log(`NoHands OSA [Mandat MG]: ✓ ${label}${detail.already ? " (déjà en place)" : ` (${detail.elapsedMs ?? "?"} ms, ${detail.journalOptions ?? "?"} journal(aux))`}`);
++    return { ok: true, id, label, detail };
++  }
++  console.warn(`NoHands OSA [Mandat MG]: ✗ ${label} — ${error}`, detail);
++  return { ok: false, id, label, code, error: `Mandat MG ${label} : ${error}`, detail };
++}
++
++/* ====================================================================
++ * SIGEO — moteur générique des sélecteurs (SelectorControl + AutoCompletion)
++ * --------------------------------------------------------------------
++ * Utilisé par l'étape de scénario « Sélecteur SIGEO » (sigeoSelector) :
++ *   - mode « direct »    : id connu → ctrl.add(id, libellé) (cas Mandat MG) ;
++ *   - mode « recherche » : frappe simulée dans l'input visible, attente des
++ *     suggestions AJAX, clic sur la bonne, attente de la sélection (cas Compte).
++ * Validation finale : SelectedValues.length === 1 ET texte visible qui
++ * commence par la valeur attendue. Aucun clic sur un bouton de validation.
++ * ==================================================================== */
++
++const SIGEO_SELECTOR = {
++  COMPTE_TIMEOUT_MS: 5000,
++  DEFAULT_TIMEOUT_MS: 5000,
++  // Mots-clés servant à repérer les contrôles « Compte » des lignes de
++  // contrepartie quand aucune clé explicite n'est fournie.
++  COMPTE_KEY_RE: "(cpt|compte|account)",
++  // Clés connues (format id, {n} = n° de ligne) — essayées avant la détection
++  // auto. Relevé sur « Saisie d'opérations diverses » (ventilation).
++  COMPTE_KEY_TEMPLATES: ["body_x_proxyTabSaisie_x__compte_ajax_selector_{n}_x_selCompte_x"]
++};
++
++// --- Injecté en world MAIN : autonome -----------------------------------
++// cfg : { ctrlKey?, compteAuto?: { ligne, template, keyRe }, mode, value,
++//         id?, label?, expectText, timeoutMs }
++async function sselPageRun(cfg) {
++  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++  const norm = (s) => String(s ?? "").replace(/[\u00a0\u202f\u2007]/g, " ").replace(/\s+/g, " ").trim().toUpperCase();
++  const t0 = Date.now();
++  const deadline = t0 + (cfg.timeoutMs || 5000);
++  const reg = () => window.__ivCtrl || {};
++  const allKeys = () => Object.keys(reg());
++  const hiddenEl = (k) => document.getElementById(k);
++  const textEl = (k) => document.getElementById(k + "_txt_x__ctl0") ||
++    document.querySelector(`input[id^="${CSS.escape(k)}"][type="text"], input[id^="${CSS.escape(k)}"]:not([type])`);
++  const isVisible = (el) => {
++    if (!el) return false;
++    const cs = getComputedStyle(el);
++    return cs.display !== "none" && cs.visibility !== "hidden" && el.getClientRects().length > 0;
++  };
++  const isBusy = () => {
++    try { if (window.Sys?.WebForms?.PageRequestManager?.getInstance?.()?.get_isInAsyncPostBack?.()) return true; } catch (_) { /* ignoré */ }
++    return isVisible(document.getElementById("progessUpdatePanel") || document.querySelector('[id$="progessUpdatePanel"]'));
++  };
++  const selCount = (ctrl, k) => {
++    try {
++      let sv = ctrl.SelectedValues;
++      if (typeof sv === "function") sv = sv.call(ctrl);
++      if (sv && typeof sv.length === "number") return sv.length;
++    } catch (_) { /* ignoré */ }
++    // Repli : valeur cachée soumise (une valeur, pas de séparateur)
++    const h = String(hiddenEl(k)?.value ?? "").trim();
++    return h ? h.split(/[,;|]/).filter(Boolean).length : 0;
++  };
++  const textOk = (k) => {
++    const want = norm(cfg.expectText);
++    return !!want && norm(textEl(k)?.value).startsWith(want);
++  };
++  const snapshot = (k) => ({
++    ctrlKey: k,
++    id: String(hiddenEl(k)?.value ?? "").trim(),
++    label: String(textEl(k)?.value ?? "").replace(/[\u00a0\u202f\u2007]/g, " ").trim()
++  });
++
++  // 1. Résolution de la clé __ivCtrl (attendue jusqu'au timeout : le
++  //    contrôle peut n'apparaître qu'après « Saisir les contreparties »).
++  // Clé normalisée : format name (body:x:…) → id (body_x_…), et clé de
++  // l'input texte (…_txt_x__ctl0, aussi présente dans __ivCtrl) → clé du
++  // contrôle lui-même (sinon le texte tapé passerait pour une sélection).
++  const canon = (raw) => {
++    const k = String(raw || "").trim().replace(/[:$]/g, "_");
++    const base = k.replace(/_txt_x__ctl0$/, "");
++    if (base !== k && reg()[base]) return base;
++    return reg()[k] ? k : null;
++  };
++  const resolveKey = () => {
++    if (cfg.ctrlKey) return canon(cfg.ctrlKey);
++    const ca = cfg.compteAuto;
++    if (!ca) return null;
++    const n = Math.max(1, parseInt(ca.ligne, 10) || 1);
++    // Modèle : accepte aussi le format name ASP.NET (body:x:… ou body$x$…),
++    // converti au format id utilisé par __ivCtrl (body_x_…).
++    const fromTpl = (tpl) => canon(String(tpl)
++      .replace(/\{n\}/g, n).replace(/\{n0\}/g, n - 1).replace(/\{ctl\}/g, String(n + 1).padStart(2, "0")));
++    if (ca.template) return fromTpl(ca.template);
++    for (const tpl of ca.knownTemplates || []) {
++      const k = fromTpl(tpl);
++      if (k) return k;
++    }
++    const re = new RegExp(ca.keyRe, "i");
++    let keys = allKeys().filter((k) => re.test(k) && !/selMan/i.test(k));
++    // « …_x_txt_x__ctl0 » est l'input texte d'un contrôle déjà listé : doublon.
++    keys = keys.filter((k) => !(k.endsWith("_txt_x__ctl0") && keys.includes(k.slice(0, -"_txt_x__ctl0".length))));
++    // N° de ligne intégré à la clé (…_selector_1_x_…) : on le préfère à l'ordre de la page.
++    const byNum = keys.filter((k) => { const m = k.match(/_(\d+)_x/); return m && parseInt(m[1], 10) === n; });
++    if (byNum.length === 1) return byNum[0];
++    const found = keys
++      .map((k) => ({ k, el: hiddenEl(k) || textEl(k) }))
++      .filter((x) => x.el);
++    found.sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
++    return found[n - 1]?.k || null;
++  };
++  let key = resolveKey();
++  while (!key && Date.now() < deadline) { await sleep(200); key = resolveKey(); }
++  if (!key) {
++    const keys = allKeys();
++    return {
++      ok: false, code: "NOT_FOUND",
++      error: (cfg.ctrlKey ? `contrôle « ${cfg.ctrlKey} » introuvable` : `contrôle Compte de la ligne ${cfg.compteAuto?.ligne} introuvable`) +
++        (keys.length ? ` — clés __ivCtrl présentes : ${keys.slice(0, 12).join(", ")}${keys.length > 12 ? "…" : ""}` : " — aucun __ivCtrl sur cette page"),
++      availableKeys: keys
++    };
++  }
++  const ctrl = reg()[key];
++
++  // 2. Idempotence : déjà la bonne sélection → rien à faire.
++  if (selCount(ctrl, key) === 1 && textOk(key) && (!cfg.id || snapshot(key).id === String(cfg.id))) {
++    return { ok: true, already: true, ...snapshot(key) };
++  }
++
++  // Suivi des postbacks déclenchés par la sélection
++  let prm = null, endSeen = false, serverError = null;
++  const onEnd = (_s, args) => {
++    endSeen = true;
++    try { const e = args?.get_error?.(); if (e) serverError = e.message || String(e); } catch (_) { /* ignoré */ }
++  };
++  try { prm = window.Sys?.WebForms?.PageRequestManager?.getInstance?.() || null; prm?.add_endRequest(onEnd); } catch (_) { prm = null; }
++  const cleanup = () => { try { prm?.remove_endRequest(onEnd); } catch (_) { /* ignoré */ } };
++  const settle = async () => {
++    // Laisse partir un éventuel postback, puis attend qu'il soit fini.
++    await sleep(150);
++    while (Date.now() < deadline && isBusy()) await sleep(100);
++    await sleep(200);
++  };
++
++  try {
++    if (typeof ctrl.removeAllValues === "function") ctrl.removeAllValues();
++
++    if (cfg.mode === "direct") {
++      if (typeof ctrl.add !== "function") return { ok: false, code: "CTRL_ERROR", error: `le contrôle « ${key} » n'a pas de méthode add() — essaie le mode « recherche »` };
++      ctrl.add(String(cfg.id), String(cfg.label));
++      await settle();
++    } else {
++      // --- mode recherche : frappe simulée -----------------------------
++      const txt = textEl(key);
++      if (!txt) return { ok: false, code: "NOT_FOUND", error: `input texte du contrôle « ${key} » introuvable` };
++      const typed = String(cfg.value);
++      const suggestSelect = () => {
++        const id = txt.id || "";
++        let sel = id ? document.querySelector(`select[name="searchResultSelect_${CSS.escape(id)}"]`) : null;
++        if (!sel && id) sel = document.getElementById("search:" + id)?.querySelector("select") || null;
++        return sel;
++      };
++      const prevSig = (() => { const s = suggestSelect(); return s ? Array.from(s.options).map((o) => o.text).join("|") : ""; })();
++      // Repli si la page n'utilise pas searchResultSelect_ : on collecte les
++      // éléments ajoutés au DOM pendant l'attente (liste AJAX quelconque).
++      const added = new Set();
++      const addObs = new MutationObserver((muts) => {
++        for (const m of muts) for (const nd of m.addedNodes) if (nd.nodeType === 1) added.add(nd);
++      });
++      addObs.observe(document.body || document.documentElement, { childList: true, subtree: true });
++      const genericSuggestions = () => {
++        const want = norm(typed);
++        const out = [];
++        for (const root of added) {
++          if (!root.isConnected) continue;
++          const nodes = [root, ...root.querySelectorAll("li, option, tr, a, div, span, td")];
++          for (const el of nodes) {
++            if (el === txt || el.contains(txt) || !isVisible(el)) continue;
++            const t = norm(el.textContent);
++            if (!t || t.length > 200 || !t.startsWith(want)) continue;
++            // Élément le plus « feuille » : pas d'enfant qui porte déjà le même texte
++            if (Array.from(el.children).some((c) => norm(c.textContent) === t)) continue;
++            if (!out.some((o) => o.el === el)) out.push({ el, text: el.textContent.replace(/\s+/g, " ").trim() });
++          }
++        }
++        // Un conteneur qui englobe d'autres suggestions n'en est pas une
++        const leaves = out.filter((o) => !out.some((x) => x !== o && o.el.contains(x.el)));
++        // Dédoublonne par texte (ex. <tr> et <td> identiques)
++        const seen = new Set();
++        return leaves.filter((o) => (seen.has(norm(o.text)) ? false : (seen.add(norm(o.text)), true)));
++      };
++      txt.focus();
++      txt.value = "";
++      for (const ch of typed) {
++        txt.value += ch;
++        const kc = ch.toUpperCase().charCodeAt(0);
++        txt.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: ch, keyCode: kc, which: kc }));
++        txt.dispatchEvent(new KeyboardEvent("keypress", { bubbles: true, cancelable: true, key: ch, keyCode: ch.charCodeAt(0), which: ch.charCodeAt(0) }));
++        txt.dispatchEvent(new Event("input", { bubbles: true }));
++        txt.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: ch, keyCode: kc, which: kc }));
++        await sleep(30);
++      }
++
++      // Attente : sélection automatique (match exact) OU liste de suggestions.
++      let picked = null;
++      while (Date.now() < deadline) {
++        await sleep(200);
++        if (selCount(ctrl, key) === 1 && textOk(key)) break; // auto-sélectionné
++        const sel = suggestSelect();
++        if (!sel) {
++          const gen = genericSuggestions();
++          if (!gen.length) continue;
++          const want = norm(typed);
++          const code = (t) => norm(t).split(/\s+-\s+|\s+/)[0];
++          const exact = gen.filter((o) => code(o.text) === want);
++          const choiceG = exact.length === 1 ? exact[0] : (exact.length === 0 && gen.length === 1 ? gen[0] : null);
++          if (!choiceG) {
++            addObs.disconnect();
++            const pool = exact.length ? exact : gen;
++            return {
++              ok: false, code: "AMBIGUOUS",
++              error: `plusieurs suggestions pour « ${typed} » : ${pool.slice(0, 5).map((o) => o.text).join(" / ")}${pool.length > 5 ? "…" : ""}`,
++              ...snapshot(key)
++            };
++          }
++          picked = choiceG.text;
++          for (const type of ["mouseover", "mousedown", "mouseup", "click"]) {
++            choiceG.el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
++          }
++          break;
++        }
++        const opts = Array.from(sel.options).filter((o) => norm(o.text));
++        if (!opts.length) continue;
++        const sig = opts.map((o) => o.text).join("|");
++        if (sig === prevSig && !isVisible(sel)) continue; // ancienne liste cachée
++        const want = norm(typed);
++        const code = (t) => norm(t).split(/\s+-\s+|\s+/)[0];
++        const exact = opts.filter((o) => code(o.text) === want);
++        const starts = opts.filter((o) => norm(o.text).startsWith(want));
++        const choice = exact.length === 1 ? exact[0] : (exact.length === 0 && starts.length === 1 ? starts[0] : null);
++        if (!choice) {
++          addObs.disconnect();
++          const pool = exact.length ? exact : (starts.length ? starts : opts);
++          return {
++            ok: false, code: exact.length || starts.length ? "AMBIGUOUS" : "NO_MATCH",
++            error: (exact.length || starts.length
++              ? `plusieurs suggestions pour « ${typed} »`
++              : `aucune suggestion ne commence par « ${typed} »`) +
++              ` : ${pool.slice(0, 5).map((o) => o.text.trim()).join(" / ")}${pool.length > 5 ? "…" : ""}`,
++            ...snapshot(key)
++          };
++        }
++        picked = choice.text.trim();
++        choice.selected = true;
++        sel.value = choice.value;
++        for (const type of ["mousedown", "mouseup", "click"]) {
++          choice.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
++        }
++        sel.dispatchEvent(new Event("change", { bubbles: true }));
++        break;
++      }
++      addObs.disconnect();
++      await settle();
++      if (picked) cfg._picked = picked;
++    }
++  } catch (e) {
++    cleanup();
++    return { ok: false, code: "CTRL_ERROR", error: "erreur du contrôle SIGEO : " + (e?.message || e), ...snapshot(key) };
++  }
++
++  // 3. Validation (attend la sélection jusqu'au timeout)
++  while (Date.now() < deadline && !(selCount(ctrl, key) === 1 && textOk(key))) await sleep(150);
++  while (Date.now() < deadline && isBusy()) await sleep(100);
++  cleanup();
++
++  const snap = snapshot(key);
++  const n = selCount(ctrl, key);
++  const base = { ...snap, selectedCount: n, picked: cfg._picked || null, elapsedMs: Date.now() - t0, postback: endSeen };
++  if (serverError) return { ok: false, code: "SERVER", error: "erreur serveur : " + serverError, ...base };
++  if (n !== 1) return { ok: false, code: n ? "MULTIPLE" : "NOT_SELECTED", error: n ? `${n} valeurs sélectionnées au lieu d'une` : `aucune valeur sélectionnée pour « ${cfg.value} » (délai ${cfg.timeoutMs} ms dépassé ?)`, ...base };
++  if (!textOk(key)) return { ok: false, code: "MISMATCH", error: `texte affiché « ${snap.label || "(vide)"} » ne commence pas par « ${cfg.expectText} »`, ...base };
++  if (cfg.id && snap.id !== String(cfg.id)) return { ok: false, code: "MISMATCH", error: `valeur soumise « ${snap.id || "(vide)"} » au lieu de « ${cfg.id} »`, ...base };
++  return { ok: true, ...base };
++}
++
++/**
++ * Sélecteur SIGEO générique.
++ * @param {number} tabId
++ * @param {{ctrlKey?: string, compteAuto?: object, mode: 'direct'|'recherche', value: string,
++ *          timeoutMs?: number, frameId?: number}} opts
++ * @returns {Promise<{ok: boolean, id?: string, label?: string, error?: string, code?: string, detail?: object}>}
++ */
++async function setSigeoSelector(tabId, opts) {
++  const mode = opts.mode === "direct" ? "direct" : "recherche";
++  const value = String(opts.value ?? "").replace(/[\u00a0\u202f\u2007]/g, " ").trim();
++  if (!value) return { ok: false, code: "INVALID", error: "valeur vide" };
++  if (!opts.ctrlKey && !opts.compteAuto) return { ok: false, code: "INVALID", error: "clé __ivCtrl manquante" };
++
++  // Mode direct générique : « id|libellé », sinon id = chiffres de la valeur.
++  let id = null, label = null, expectText = value;
++  if (mode === "direct") {
++    const pipe = value.split("|");
++    if (pipe.length >= 2) { id = pipe[0].trim(); label = pipe.slice(1).join("|").trim(); }
++    else {
++      const digits = value.replace(/\D/g, "");
++      id = digits ? String(parseInt(digits, 10)) : value;
++      label = value;
++    }
++    if (!id || !label) return { ok: false, code: "INVALID", error: `valeur « ${value} » : attendu « id|libellé » ou un code numérique` };
++    expectText = label;
++  }
++
++  const cfg = {
++    ctrlKey: opts.ctrlKey || null, compteAuto: opts.compteAuto || null,
++    mode, value, id, label, expectText,
++    timeoutMs: opts.timeoutMs || SIGEO_SELECTOR.DEFAULT_TIMEOUT_MS
++  };
++  const what = cfg.ctrlKey || `compte ligne ${cfg.compteAuto?.ligne}`;
++  console.log(`NoHands OSA [Sélecteur SIGEO]: ${what} ← « ${value} » (${mode})`);
++  try {
++    const [inj] = await chrome.scripting.executeScript({
++      target: { tabId, frameIds: [opts.frameId ?? 0] }, world: "MAIN",
++      func: sselPageRun, args: [cfg]
++    });
++    const res = inj?.result;
++    if (!res) return { ok: false, code: "INJECT", error: "aucun résultat de la page" };
++    const { ok, error, code, ...detail } = res;
++    if (ok) {
++      console.log(`NoHands OSA [Sélecteur SIGEO]: ✓ ${what} → id ${detail.id}, « ${detail.label} »${detail.already ? " (déjà en place)" : ""}`);
++      return { ok: true, id: detail.id, label: detail.label, detail };
++    }
++    console.warn(`NoHands OSA [Sélecteur SIGEO]: ✗ ${what} — ${error}`, detail);
++    return { ok: false, id: detail.id, label: detail.label, code, error, detail };
++  } catch (e) {
++    console.error("NoHands OSA [Sélecteur SIGEO]: injection impossible:", e);
++    return { ok: false, code: "INJECT", error: "injection impossible : " + e.message };
++  }
++}
++
++/**
++ * Compte d'une ligne de contrepartie (OD) — mode recherche.
++ * La clé __ivCtrl est trouvée automatiquement (N-ième contrôle dont la clé
++ * contient cpt/compte/account, dans l'ordre de la page), ou construite depuis
++ * un modèle : {n} = ligne, {n0} = ligne-1, {ctl} = ligne+1 sur 2 chiffres.
++ */
++async function setCompte(tabId, ligne, valeur, opts = {}) {
++  const n = Math.max(1, parseInt(ligne, 10) || 1);
++  return setSigeoSelector(tabId, {
++    compteAuto: {
++      ligne: n, template: (opts.keyTemplate || "").trim() || null,
++      knownTemplates: SIGEO_SELECTOR.COMPTE_KEY_TEMPLATES, keyRe: SIGEO_SELECTOR.COMPTE_KEY_RE
++    },
++    mode: opts.mode || "recherche",
++    value: valeur,
++    timeoutMs: opts.timeoutMs || SIGEO_SELECTOR.COMPTE_TIMEOUT_MS,
++    frameId: opts.frameId
++  });
++}
++
++chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
++  if (request?.action !== "setCompte" && request?.action !== "setSigeoSelector") return false;
++  const tabId = request.tabId ?? sender.tab?.id;
++  if (tabId == null) { sendResponse({ ok: false, code: "NO_TAB", error: "onglet inconnu" }); return false; }
++  const p = request.action === "setCompte"
++    ? setCompte(tabId, request.ligne, request.valeur, request)
++    : setSigeoSelector(tabId, request);
++  p.then(sendResponse).catch((e) => sendResponse({ ok: false, code: "INTERNAL", error: e.message }));
++  return true;
++});
++
++chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
++  if (request?.action !== "setMandatMG") return false;
++  const tabId = request.tabId ?? sender.tab?.id;
++  if (tabId == null) {
++    sendResponse({ ok: false, code: "NO_TAB", error: "onglet inconnu" });
++    return false;
++  }
++  setMandatMG(tabId, request.mg, {
++    frameId: request.frameId ?? sender.frameId ?? 0,
++    ctrlId: request.ctrlId,
++    timeoutMs: request.timeoutMs
++  })
++    .then(sendResponse)
++    .catch((e) => sendResponse({ ok: false, code: "INTERNAL", error: e.message }));
++  return true; // réponse asynchrone
++});
+diff --git a/content.js b/content.js
+index c44783c..5f22225 100755
+--- a/content.js
++++ b/content.js
+@@ -45,7 +45,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+     performFill(request.data, request.mapping, request.customFields, lastFillRowContext)
+       .then((result) => {
+         // Observe le contenu chargé dynamiquement (UpdatePanels ASP.NET, etc.)
+-        startFillObserver();
++        // — sauf échec bloquant (Mandat MG) : re-remplir relancerait le postback.
++        if (!result.fatal) startFillObserver();
+         sendResponse(result);
+       })
+       .catch((err) => {
+@@ -58,12 +59,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+     // Le message part vers toutes les frames et seule la PREMIÈRE réponse
+     // compte : une frame qui n'a pas le champ se tait, et la frame principale
+     // ne signale l'échec qu'après un court délai (laisse répondre les iframes).
+-    const { name: id } = parseInputIdentifier(request.identifier || '');
+-    if (!findFormInput(id)) {
++    const parsedId = parseInputIdentifier(request.identifier || '');
++    const id = parsedId.name;
++    const mandatCtrl = mandatCtrlIdFor(parsedId);
++    if (mandatCtrl ? !document.getElementById(mandatCtrl) : !findFormInput(id)) {
+       if (window !== window.top) return false;
+       setTimeout(() => sendResponse({
+         success: false, filledCount: 0, filled: [],
+-        errors: [`Input non trouvé (name/id/classe): ${id}`]
++        errors: [mandatCtrl ? `champ Mandat MG introuvable sur cette page (${mandatCtrl})` : `Input non trouvé (name/id/classe): ${id}`]
+       }), 400);
+       return true;
+     }
+@@ -153,21 +156,17 @@ function showRowBadge(label, state) {
+ 
+ /**
+  * Remplit avec data+mapping, plus les champs personnalisés éventuels.
+- * Asynchrone : les champs à autocomplétion sont attendus séquentiellement.
++ * Mapping et champs personnalisés passent par EXACTEMENT la même logique :
++ * ils sont convertis en une seule liste de saisies, remplie par fillEntries
++ * (marqueurs, autocomplétion, idempotence, postbacks, Mandat MG, erreurs).
++ * Seul l'ordre est réarrangé : les champs Mandat MG passent en tête, car
++ * leur postback recharge Journal & co et écraserait le reste.
+  */
+ async function performFill(data, mapping, customFields, rowContext) {
+-  const result = await fillFormFields(data, mapping, rowContext);
+-  if (customFields && typeof customFields === 'object') {
+-    const customResult = await fillCustomFields(customFields, rowContext);
+-    result.filledCount += customResult.filledCount;
+-    if (customResult.filled.length) result.filled.push(...customResult.filled);
+-    if (customResult.errors && customResult.errors.length) {
+-      result.errors = (result.errors || []).concat(customResult.errors);
+-      result.error = result.errors.slice(0, 3).join(', ');
+-    }
+-    result.success = result.filledCount > 0;
+-  }
+-  return result;
++  const entries = buildFillEntries(data, mapping, customFields);
++  const isMandat = (e) => !!mandatCtrlIdFor(parseInputIdentifier(e.raw));
++  const ordered = [...entries.filter(isMandat), ...entries.filter((e) => !isMandat(e))];
++  return fillEntries(ordered, rowContext);
+ }
+ 
+ /**
+@@ -329,20 +328,84 @@ const OSA_AC = {
+ //   « ac:nom » force le traitement autocomplétion (si la détection auto échoue) ;
+ //   « pb:nom » force un postback après remplissage : blur ciblé + attente du
+ //   rechargement partiel ASP.NET (champs « en cascade », ex. code postal, voie).
++//   « mg:nom » : champ SIGEO « Mandat MG » (SelectorControl) — voir plus bas ;
++//   « mg: » seul vise le contrôle par défaut body_x_selMan_x.
+ function parseInputIdentifier(raw) {
+   let name = String(raw).trim();
+   let forceAutocomplete = false;
+   let forcePostback = false;
+   let noBlur = false;
++  let forceMandat = false;
+   let m;
+-  while ((m = name.match(/^(ac|pb|nopb):/i)) !== null) {
++  while ((m = name.match(/^(ac|pb|nopb|mg):/i)) !== null) {
+     const tag = m[1].toLowerCase();
+     if (tag === 'ac') forceAutocomplete = true;
+     else if (tag === 'pb') forcePostback = true;
++    else if (tag === 'mg') forceMandat = true;
+     else noBlur = true;
+     name = name.slice(m[0].length).trim();
+   }
+-  return { name, forceAutocomplete, forcePostback, noBlur };
++  return { name, forceAutocomplete, forcePostback, noBlur, forceMandat };
++}
++
++/* ====================================================================
++ * SIGEO — champ « Mandat MG » (page Saisie d'opérations diverses)
++ * --------------------------------------------------------------------
++ * SelectorControl + AutoCompletion : écrire .value dans l'input texte ne
++ * suffit pas (input caché vide, Journal non rechargé). Il faut passer par
++ * window.__ivCtrl[id].add(), invisible depuis ce monde isolé : le service
++ * worker l'exécute en world 'MAIN' (setMandatMG dans background.js), attend
++ * la fin du postback et vérifie le résultat.
++ * Activé par le marqueur « mg: », ou automatiquement quand l'identifiant
++ * désigne le contrôle (input caché ou texte visible, ex. choisi avec 🎯).
++ * Un échec est BLOQUANT : le reste du remplissage est abandonné.
++ * ==================================================================== */
++
++const MANDAT_DEFAULT_CTRL = 'body_x_selMan_x';
++const MANDAT_TXT_SUFFIX = '_txt_x__ctl0';
++
++// id du contrôle Mandat MG visé par un identifiant parsé, ou null si ce
++// n'est pas un champ Mandat MG.
++function mandatCtrlIdFor(parsed) {
++  const name = parsed.name || '';
++  if (!parsed.forceMandat) {
++    if (!name) return null;
++    const el = findFormInput(name);
++    const elId = el && el.id ? el.id : '';
++    if (elId === MANDAT_DEFAULT_CTRL || elId === MANDAT_DEFAULT_CTRL + MANDAT_TXT_SUFFIX) return MANDAT_DEFAULT_CTRL;
++    return null;
++  }
++  if (!name) return MANDAT_DEFAULT_CTRL;
++  // name ASP.NET (body:x:selMan:x) ou id texte visible → id du contrôle
++  const el = findFormInput(name);
++  let id = (el && el.id) ? el.id : name.replace(/[:$]/g, '_');
++  if (id.endsWith(MANDAT_TXT_SUFFIX)) id = id.slice(0, -MANDAT_TXT_SUFFIX.length);
++  return id;
++}
++
++async function fillMandatMGField(ctrlId, value) {
++  if (!document.getElementById(ctrlId)) {
++    // Frame / onglet sans le champ : erreur simple, non bloquante (comme un
++    // input absent) — le remplissage est diffusé à toutes les frames.
++    return { success: false, identifier: ctrlId, error: `champ Mandat MG introuvable sur cette page (${ctrlId})` };
++  }
++  console.log(`NoHands OSA: Mandat MG « ${value} » → ${ctrlId}`);
++  let res;
++  try {
++    res = await chrome.runtime.sendMessage({ action: 'setMandatMG', mg: value, ctrlId });
++  } catch (e) {
++    res = { ok: false, error: 'service worker injoignable : ' + e.message };
++  }
++  if (res && res.ok) {
++    const d = res.detail || {};
++    return {
++      success: true, identifier: ctrlId,
++      detail: d.already ? `${res.label} déjà en place` : `${res.label}, id ${res.id} — postback terminé`
++    };
++  }
++  const error = (res && res.error) || 'Mandat MG : échec inconnu';
++  console.warn('NoHands OSA: ' + error, res);
++  return { success: false, fatal: true, identifier: ctrlId, error };
+ }
+ 
+ // Détection automatique d'un champ à autocomplétion :
+@@ -687,7 +750,13 @@ async function fillSelectWaiting(identifier, value) {
+  * @returns {Promise<{success: boolean, identifier?: string, detail?: string, warning?: string, error?: string}>}
+  */
+ async function fillOneField(rawIdentifier, value, rowContext) {
+-  const { name: identifier, forceAutocomplete, forcePostback, noBlur } = parseInputIdentifier(rawIdentifier);
++  const parsed = parseInputIdentifier(rawIdentifier);
++  const { name: identifier, forceAutocomplete, forcePostback, noBlur } = parsed;
++
++  // 0. Champ SIGEO « Mandat MG » : traitement dédié (world MAIN + postback)
++  const mandatCtrl = mandatCtrlIdFor(parsed);
++  if (mandatCtrl) return fillMandatMGField(mandatCtrl, value);
++
+   const input = findFormInput(identifier);
+   if (!input) {
+     return { success: false, identifier, error: `Input non trouvé (name/id/classe): ${identifier}` };
+@@ -747,79 +816,80 @@ async function fillOneField(rawIdentifier, value, rowContext) {
+ }
+ 
+ /**
+- * Remplit les champs du formulaire à partir des données et du mapping
+- * @param {Object} data - Données de la ligne (nomColonne -> valeur)
++ * Liste unique des saisies à effectuer, dans l'ordre : mapping (ordre des
++ * colonnes, chaque colonne pouvant viser plusieurs inputs), puis champs
++ * personnalisés. Les deux sources produisent le même format d'entrée.
++ * @param {Object} data - nomColonne -> valeur (déjà formatée par le panneau)
+  * @param {Object} mapping - nomColonne -> nom(s) d'input
+- * @param {Object|null} rowContext - toutes les colonnes de la ligne (désambiguïsation)
++ * @param {Object|null} customFields - nom d'input -> valeur (déjà résolue)
++ * @returns {Array<{source: string, raw: string, value: *}>}
+  */
+-async function fillFormFields(data, mapping, rowContext) {
+-  let filledCount = 0;
+-  const errors = [];
+-  const filled = [];
+-
+-  for (const [columnName, inputNames] of Object.entries(mapping)) {
+-    const value = data[columnName];
++function buildFillEntries(data, mapping, customFields) {
++  const entries = [];
++  for (const [columnName, inputNames] of Object.entries(mapping || {})) {
++    const value = data ? data[columnName] : undefined;
+     if (value === undefined || value === null) continue;
+-
+-    let inputNamesArray = inputNames;
+-    if (typeof inputNames === 'string') inputNamesArray = [inputNames];
+-    if (!Array.isArray(inputNamesArray)) continue;
+-
+-    for (const rawName of inputNamesArray) {
+-      if (!rawName || rawName.trim() === '') continue;
+-
+-      try {
+-        const res = await fillOneField(rawName, value, rowContext);
+-        const shownName = res.identifier || rawName;
+-        if (res.success) {
+-          filledCount++;
+-          filled.push(`${columnName} → ${shownName}${res.detail ? ` (${res.detail})` : ''}`);
+-          if (res.warning) errors.push(res.warning);
+-        } else {
+-          errors.push(res.error || `Échec pour ${columnName} → ${shownName}`);
+-        }
+-      } catch (error) {
+-        errors.push(`Erreur pour ${columnName} → ${rawName}: ${error.message}`);
+-      }
++    const names = typeof inputNames === 'string' ? [inputNames] : (Array.isArray(inputNames) ? inputNames : []);
++    for (const raw of names) {
++      if (raw && String(raw).trim()) entries.push({ source: columnName, raw: String(raw), value });
+     }
+   }
+-
+-  return {
+-    success: filledCount > 0,
+-    filledCount: filledCount,
+-    filled: filled,
+-    errors: errors.length > 0 ? errors : null,
+-    error: errors.length > 0 ? errors.slice(0, 3).join(', ') : null
+-  };
++  if (customFields && typeof customFields === 'object') {
++    for (const [raw, value] of Object.entries(customFields)) {
++      if (value === undefined || value === null) continue;
++      if (raw && String(raw).trim()) entries.push({ source: 'custom', raw: String(raw), value });
++    }
++  }
++  return entries;
+ }
+ 
+ /**
+- * Remplit des champs personnalisés (nom d'input -> valeur fixe).
+- * Gère aussi les champs à autocomplétion (auto ou marqueur « ac: »).
++ * Remplit une liste de saisies, séquentiellement (les autocomplétions et
++ * postbacks sont attendus un par un). S'arrête net sur un échec bloquant
++ * (ex. Mandat MG non posé) : { fatal: true, fatalError }.
++ * @param {Array<{source: string, raw: string, value: *}>} entries
++ * @param {Object|null} rowContext - toutes les colonnes de la ligne (désambiguïsation)
+  */
+-async function fillCustomFields(customFields, rowContext) {
++async function fillEntries(entries, rowContext) {
+   let filledCount = 0;
+-  const errors = [];
++  let errors = [];
+   const filled = [];
++  let fatalError = null;
+ 
+-  for (const [rawName, value] of Object.entries(customFields)) {
+-    if (!rawName || rawName.trim() === '') continue;
++  for (const { source, raw, value } of entries) {
+     try {
+-      const res = await fillOneField(rawName, value, rowContext);
+-      const shownName = res.identifier || rawName;
++      const res = await fillOneField(raw, value, rowContext);
++      const shownName = res.identifier || raw;
+       if (res.success) {
+         filledCount++;
+-        filled.push(`custom:${shownName}${res.detail ? ` (${res.detail})` : ''}`);
++        filled.push(`${source} → ${shownName}${res.detail ? ` (${res.detail})` : ''}`);
+         if (res.warning) errors.push(res.warning);
++      } else if (res.fatal) {
++        fatalError = res.error || `Échec bloquant pour ${source} → ${shownName}`;
++        errors = [fatalError];
++        break;
+       } else {
+-        errors.push(res.error || `Échec pour custom → ${shownName}`);
++        errors.push(res.error || `Échec pour ${source} → ${shownName}`);
+       }
+     } catch (error) {
+-      errors.push(`Erreur custom ${rawName}: ${error.message}`);
++      errors.push(`Erreur pour ${source} → ${raw}: ${error.message}`);
+     }
+   }
+ 
+-  return { filledCount, filled, errors };
++  const result = {
++    success: !fatalError && filledCount > 0,
++    filledCount: filledCount,
++    filled: filled,
++    errors: errors.length > 0 ? errors : null,
++    error: errors.length > 0 ? errors.slice(0, 3).join(', ') : null
++  };
++  if (fatalError) {
++    result.fatal = true;
++    result.fatalError = fatalError;
++    result.filledCount = 0;
++    result.filled = [];
++  }
++  return result;
+ }
+ 
+ /**
+diff --git a/manifest.json b/manifest.json
+index e5fb042..7b4a414 100755
+--- a/manifest.json
++++ b/manifest.json
+@@ -1,7 +1,7 @@
+ {
+   "manifest_version": 3,
+   "name": "NoHands OSA",
+-  "version": "2.8.2",
++  "version": "2.10.2",
+   "description": "Excel <-> formulaires web : remplissage automatique de formulaires (saisie) et récupération de résultats en boucle (extraction), avec colonnes configurables ou détectées automatiquement.",
+   "permissions": [
+     "sidePanel",
+diff --git a/sidepanel.css b/sidepanel.css
+index ded4b15..a556da9 100755
+--- a/sidepanel.css
++++ b/sidepanel.css
+@@ -546,6 +546,7 @@ input[type="file"]::file-selector-button {
+ .scn-step[data-type="pdfwrite"]  { --scn-c: #f87171; }
+ .scn-step[data-type="sigeo"]     { --scn-c: #4ade80; }
+ .scn-step[data-type="batchedit"] { --scn-c: #2dd4bf; }
++.scn-step[data-type="sigeoSelector"] { --scn-c: #a3e635; }
+ .scn-icon {
+   flex: none; width: 24px; height: 24px;
+   display: inline-flex; align-items: center; justify-content: center;
+@@ -576,6 +577,7 @@ input[type="file"]::file-selector-button {
+ .scn-step:not([data-type="sigeo"]) .scn-only-sigeo { display: none; }
+ .scn-step:not([data-type="batchedit"]) .scn-only-batchedit { display: none; }
+ .scn-step:not([data-type="input"]) .scn-only-input { display: none; }
++.scn-step:not([data-type="sigeoSelector"]) .scn-only-ssel { display: none; }
+ 
+ /* ---------- Toolbox PDF (bêta) ---------- */
+ .beta-badge {
+@@ -722,3 +724,22 @@ input[type="file"]::file-selector-button {
+ ::-webkit-scrollbar { width: 8px; height: 8px; }
+ ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+ ::-webkit-scrollbar-thumb:hover { background: #44445a; }
++
++/* ---------- Étape « Sélecteur SIGEO » ---------- */
++.btn-ssel { border-color: #a3e635; color: #a3e635; }
++.scn-ssel-result { font-size: 11.5px; color: var(--text-dim); word-break: break-word; }
++.scn-ssel-result.ok { color: var(--ok); }
++.scn-ssel-result.err { color: var(--err); }
++.scn-body .scn-row select.scn-ssel-mode:disabled { opacity: 0.6; }
++.scn-warnings {
++  margin: 6px 0; padding: 6px 8px; border: 1px solid var(--warn); border-radius: 6px;
++  color: var(--warn); font-size: 11.5px; background: rgba(251, 191, 36, 0.08);
++}
++.scn-warnings div + div { margin-top: 3px; }
++.ssel-journal { margin-top: 10px; }
++.ssel-journal summary { cursor: pointer; font-weight: 600; }
++.ssel-journal-wrap { max-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
++.ssel-journal-table { width: 100%; border-collapse: collapse; font-size: 11px; }
++.ssel-journal-table th, .ssel-journal-table td { padding: 3px 5px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
++.ssel-journal-table td.err { color: var(--err); white-space: normal; }
++.ssel-journal-table td.ok { color: var(--ok); }
+diff --git a/sidepanel.html b/sidepanel.html
+index 40f92ad..6bdb878 100755
+--- a/sidepanel.html
++++ b/sidepanel.html
+@@ -44,6 +44,7 @@
+       <symbol id="icon-step-pdfwrite" viewBox="0 0 24 24"><path d="M6 2h9l5 5v15a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M15 2v5h5"/><path d="M12 10.5v7M9 14.5l3 3 3-3"/></symbol>
+       <symbol id="icon-step-sigeo" viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></symbol>
+       <symbol id="icon-step-batchedit" viewBox="0 0 24 24"><rect x="3" y="4" width="6" height="6" rx="1.2"/><path d="M4.7 7l1.3 1.3L8 6"/><rect x="3" y="14" width="6" height="6" rx="1.2"/><path d="M4.7 17l1.3 1.3L8 16"/><path d="M12.5 7h8.5M12.5 17h8.5"/></symbol>
++      <symbol id="icon-step-sigeoSelector" viewBox="0 0 24 24"><rect x="2.5" y="6" width="13" height="9" rx="2"/><path d="M6 10.5h5"/><path d="M15.5 8.5h3.5a2 2 0 0 1 2 2v0a2 2 0 0 1-2 2h-3.5"/><path d="M9 15v3.5l2-1.3 2 1.3V15"/></symbol>
+       <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.5-4.5"/></symbol>
+     </defs>
+   </svg>
+@@ -212,8 +213,11 @@
+     <h2>Scénario de saisie <span class="h2-note">(automatisation multi-panels)</span></h2>
+     <p class="hint">Enchaîne des étapes pour saisir une ligne complète : remplir les champs mappés, cliquer sur des boutons/onglets du site, attendre qu'un élément s'affiche, ou poser des conditions (donnée Excel ou état de la page).</p>
+     <div id="scenarioSteps" class="scenario-steps"></div>
++    <div id="scnWarnings" class="scn-warnings" hidden></div>
+     <div class="field-row">
+       <button class="btn" id="addStepBtn" type="button"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter une étape</button>
++      <button class="btn btn-ssel" id="addSselStepBtn" type="button" title="Étape dédiée aux champs SIGEO à autocomplétion (Mandat MG, Compte…)"><svg class="icon icon-sm"><use href="#icon-step-sigeoSelector"/></svg> + Sélecteur SIGEO</button>
++      <button class="btn" id="addOdTemplateBtn" type="button" title="Ajoute le scénario modèle « OD – Saisie contrepartie » à la suite des étapes"><svg class="icon icon-sm"><use href="#icon-file"/></svg> Modèle OD</button>
+       <button class="btn" id="clearStepsBtn" type="button"><svg class="icon icon-sm"><use href="#icon-trash"/></svg> Tout effacer</button>
+     </div>
+ 
+@@ -259,6 +263,21 @@
+     <p class="progress-text" id="scnProgressText">0 / 0</p>
+     <p class="progress-timing" id="scnProgressTiming"></p>
+     <div id="scnLog" class="log"></div>
++
++    <details id="sselJournalBox" class="ssel-journal">
++      <summary>Journal des sélecteurs SIGEO <span id="sselJournalCount" class="h2-note"></span></summary>
++      <p class="hint">Chaque exécution d'une étape « Sélecteur SIGEO » (scénario ou « Tester l'étape ») : ligne du fichier, valeur demandée, id rattaché, libellé affiché et statut. Conservé entre les sessions (2000 entrées max).</p>
++      <div class="field-row">
++        <button class="btn sm" id="sselJournalExportBtn" type="button"><svg class="icon icon-sm"><use href="#icon-download"/></svg> Exporter CSV</button>
++        <button class="btn sm" id="sselJournalClearBtn" type="button"><svg class="icon icon-sm"><use href="#icon-trash"/></svg> Vider</button>
++      </div>
++      <div class="ssel-journal-wrap">
++        <table class="ssel-journal-table">
++          <thead><tr><th>Heure</th><th>Ligne</th><th>Champ</th><th>Valeur</th><th>Id</th><th>Libellé</th><th>Statut</th></tr></thead>
++          <tbody id="sselJournalBody"></tbody>
++        </table>
++      </div>
++    </details>
+   </section>
+ 
+   <!-- ================= ONGLET EXTRACTION ================= -->
+diff --git a/sidepanel.js b/sidepanel.js
+index e9311bb..e1f0d3a 100755
+--- a/sidepanel.js
++++ b/sidepanel.js
+@@ -1268,6 +1268,7 @@ async function sendFillToTabList(targetTabs, message) {
+ 
+   let totalFilled = 0;
+   const totalErrors = [];
++  const fatalErrors = []; // échecs bloquants (ex. Mandat MG) : la ligne doit s'arrêter
+   let tabsReached = 0;
+ 
+   await Promise.all(targetTabs.map(async (tab) => {
+@@ -1277,6 +1278,7 @@ async function sendFillToTabList(targetTabs, message) {
+         tabsReached++;
+         totalFilled += response.filledCount || 0;
+         if (response.errors) totalErrors.push(...response.errors);
++        if (response.fatal) fatalErrors.push(response.fatalError || response.error || "échec bloquant");
+       }
+     } catch (msgErr) {
+       // Secours : injecter le content script puis réessayer
+@@ -1290,6 +1292,7 @@ async function sendFillToTabList(targetTabs, message) {
+           tabsReached++;
+           totalFilled += response.filledCount || 0;
+           if (response.errors) totalErrors.push(...response.errors);
++          if (response.fatal) fatalErrors.push(response.fatalError || response.error || "échec bloquant");
+         }
+       } catch (retryErr) {
+         console.warn(`NoHands OSA: onglet ${tab.id} injoignable:`, retryErr.message);
+@@ -1297,7 +1300,8 @@ async function sendFillToTabList(targetTabs, message) {
+     }
+   }));
+ 
+-  return { totalFilled, totalErrors, tabsReached, tabCount: targetTabs.length };
++  if (fatalErrors.length) console.warn("NoHands OSA: remplissage interrompu :", fatalErrors);
++  return { totalFilled, totalErrors, fatalErrors, tabsReached, tabCount: targetTabs.length };
+ }
+ 
+ /**
+@@ -1371,19 +1375,20 @@ function buildFillPayload(rowIdx) {
+     for (const [colName, inputNames] of Object.entries(state.mapping)) {
+       const col = colByName[colName];
+       if (!col) continue;
+-      data[colName] = applyValueRules(formatValueForColumn(colName, getCellByIndex(row, col.index)));
++      data[colName] = mappedCellValue(row, col.index, colName);
+       mapping[colName] = inputNames;
+     }
+   }
+   const customFields = {};
+-  state.customFields.forEach(({ name, value }) => { if (name) customFields[name] = resolveRowTemplate(value, activeRow); });
++  // Même traitement de valeur que le mapping (formatage + règles de valeurs).
++  state.customFields.forEach(({ name, value }) => { if (name) customFields[name] = resolveFieldTemplate(value, activeRow); });
+   // Contexte de ligne complet (toutes les colonnes) : sert au content script
+   // à départager les suggestions des champs à autocomplétion asynchrone
+   // (ex. CP tapé → choisit « 70600 - ARGILLIERES » si la ligne contient la ville).
+   const rowContext = {};
+   if (activeRow) {
+     getColumns().forEach((c) => {
+-      const v = applyValueRules(formatValueForColumn(c.name, getCellByIndex(activeRow, c.index)));
++      const v = mappedCellValue(activeRow, c.index, c.name);
+       if (v !== undefined && v !== null && String(v).trim() !== "") rowContext[c.name] = String(v);
+     });
+   }
+@@ -1408,9 +1413,11 @@ $("fillBtn").addEventListener("click", async () => {
+       customFields: Object.keys(customFields).length ? customFields : undefined,
+       rowContext
+     };
+-    const { totalFilled, totalErrors, tabsReached, tabCount } = await sendFillToAllTabs(message);
++    const { totalFilled, totalErrors, fatalErrors, tabsReached, tabCount } = await sendFillToAllTabs(message);
+ 
+-    if (totalFilled > 0) {
++    if (fatalErrors.length) {
++      showStatus(`Remplissage interrompu : ${fatalErrors[0]}`, "error");
++    } else if (totalFilled > 0) {
+       const tabInfo = tabCount > 1 ? ` (${tabsReached} onglet${tabsReached > 1 ? "s" : ""})` : "";
+       showStatus(`✓ ${totalFilled} champ${totalFilled > 1 ? "s" : ""} rempli${totalFilled > 1 ? "s" : ""}${tabInfo} !`, "success");
+     } else if (totalErrors.length) {
+@@ -2585,6 +2592,30 @@ function resolveRowTemplate(str, row) {
+   });
+ }
+ 
++// Valeur d'une cellule telle que le MAPPING l'envoie au site : formatage
++// selon le nom de colonne (IBAN, trimestre…) puis règles de valeurs
++// (female → Mme…). Point unique, partagé par le mapping, les champs
++// personnalisés, l'étape « Saisir un champ » et le contexte de ligne.
++function mappedCellValue(row, idx, colName) {
++  const name = colName ?? (getColumns().find((c) => c.index === idx)?.name || "");
++  return applyValueRules(formatValueForColumn(name, getCellByIndex(row, idx)));
++}
++
++// Comme resolveRowTemplate, mais chaque {Colonne} est remplacée par la
++// valeur que le mapping enverrait pour cette colonne (mappedCellValue).
++// « {IBAN} » dans un champ personnalisé donne donc exactement la même
++// saisie que la colonne IBAN mappée. Le texte fixe autour reste tel quel.
++function resolveFieldTemplate(str, row) {
++  if (str === null || str === undefined) return str;
++  if (!row) return String(str);
++  return String(str).replace(/\{([^{}]+)\}/g, (whole, name) => {
++    const idx = colIndexByName(name.trim());
++    if (idx < 0) return whole;
++    const v = mappedCellValue(row, idx);
++    return v === undefined || v === null ? "" : String(v);
++  });
++}
++
+ /* ---------- Autocomplétion {Colonne} dans les champs texte ----------
+    Façon VSCode : taper « { » dans un champ compatible ouvre un petit menu
+    avec les noms de colonnes du fichier ; on filtre en tapant, ↑/↓ pour
+@@ -3118,6 +3149,7 @@ function estimateScenarioStepMs(s) {
+     case "cond": return 250;
+     case "pdfcheck": case "pdfwrite": return 50; // local, quasi instantané
+     case "sigeo": return (s.sigeoNav === false ? 300 : 2500) + 4500; // nav + remplissage + résolution ville + postback
++    case "sigeoSelector": return (s.sselChamp || "mandatMG") === "mandatMG" ? 1500 : 1200; // sélection + postback
+     // Le nombre de lots n'est connu qu'à l'exécution : on table sur 3.
+     case "batchedit": {
+       const dl = s.batchWaitMode === "start" || s.batchWaitMode === "complete";
+@@ -3181,6 +3213,7 @@ function addScenarioStep(step = {}) {
+         <option value="pdfwrite">PDF β : écrire un champ</option>
+         <option value="sigeo">SIGEO : saisir une adresse</option>
+         <option value="batchedit">Éditer par lots (cocher N → cliquer)</option>
++        <option value="sigeoSelector">Sélecteur SIGEO (Mandat MG, Compte…)</option>
+       </select>
+       <button class="btn icon-only scn-move-up" title="Monter" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-up"/></svg></button>
+       <button class="btn icon-only scn-move-down" title="Descendre" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-down"/></svg></button>
+@@ -3226,7 +3259,7 @@ function addScenarioStep(step = {}) {
+       <div class="scn-row scn-only-input">
+         <label class="checkbox-row" title="Envoie la touche Entrée au champ une fois rempli (valide une recherche, un formulaire…)"><input type="checkbox" class="scn-input-enter" ${step.inputEnter ? "checked" : ""} /> puis appuyer sur Entrée</label>
+       </div>
+-      <p class="hint scn-only-input">Remplit <strong>un seul</strong> champ, sans toucher au mapping ni aux autres champs personnalisés. Mêmes préfixes que les champs personnalisés (<code>ac:</code> pour forcer l'autocomplétion…). <code>{Nom de colonne}</code> (ou <code>{A}</code>) est remplacé par la valeur de la ligne active.</p>
++      <p class="hint scn-only-input">Remplit <strong>un seul</strong> champ, sans toucher au mapping ni aux autres champs personnalisés. Mêmes préfixes que les champs personnalisés (<code>ac:</code> pour forcer l'autocomplétion, <code>mg:</code> pour le champ SIGEO « Mandat MG »…). <code>{Nom de colonne}</code> (ou <code>{A}</code>) est remplacé par la valeur de la ligne active.</p>
+ 
+       <div class="scn-row scn-only-wait">
+         <select class="scn-wait-mode">
+@@ -3395,6 +3428,49 @@ function addScenarioStep(step = {}) {
+       </div>
+       <p class="hint scn-only-batchedit">« Début du téléchargement » enchaîne dès que le navigateur commence à recevoir le fichier ; « fin » attend qu'il soit complet — plus sûr si le serveur est lent. Ces deux modes demandent l'accès aux téléchargements (Chrome l'invite à la sélection). En délai fixe, prévois large : la génération + le téléchargement. Le filtre permet d'exclure certaines lignes (ex. une clé dont le total est nul).</p>
+ 
++      <p class="hint scn-only-ssel">Champs SIGEO à autocomplétion (<code>SelectorControl</code>) : écrire la valeur ne suffit pas, l'étape passe par le contrôle de la page, attend la sélection (et le postback), puis vérifie qu'<strong>une seule</strong> valeur est retenue. Ne clique jamais sur un bouton d'enregistrement.</p>
++      <div class="scn-row scn-only-ssel">
++        <label>champ :</label>
++        <select class="scn-ssel-champ">
++          <option value="mandatMG">Mandat MG</option>
++          <option value="compte">Compte (contrepartie)</option>
++          <option value="custom">Personnalisé</option>
++        </select>
++        <span class="scn-inline scn-ssel-ligne-wrap">
++          <label>ligne :</label>
++          <input type="number" class="scn-ssel-ligne" min="1" step="1" style="max-width:60px" value="${escapeAttr(step.sselLigne ?? 1)}" />
++        </span>
++      </div>
++      <div class="scn-row scn-only-ssel">
++        <label>valeur :</label>
++        <input type="text" class="scn-ssel-valeur" placeholder="ex : {Mandat MG} ou MG0396166" title="Valeur fixe, ou {Nom de colonne} / {A} remplacé par la valeur de la ligne (même traitement que le mapping). Mode direct personnalisé : « id|libellé »." value="${escapeAttr(step.sselValeur ?? "")}" />
++      </div>
++      <div class="scn-row scn-only-ssel scn-ssel-ctrlkey-wrap">
++        <label class="scn-ssel-ctrlkey-label">clé __ivCtrl :</label>
++        <input type="text" class="scn-ssel-ctrlkey" placeholder="ex : body_x_selMan_x" value="${escapeAttr(step.sselCtrlKey ?? "")}" />
++      </div>
++      <div class="scn-row scn-only-ssel">
++        <label>mode :</label>
++        <select class="scn-ssel-mode" title="direct : id connu → ctrl.add(id, libellé) ; recherche : frappe simulée puis choix de la suggestion">
++          <option value="direct">direct (id + ctrl.add)</option>
++          <option value="recherche">recherche (frappe + suggestion)</option>
++        </select>
++        <label>timeout (ms) :</label>
++        <input type="number" class="scn-ssel-timeout" min="500" step="500" style="max-width:80px" value="${escapeAttr(step.sselTimeout ?? 8000)}" />
++      </div>
++      <div class="scn-row scn-only-ssel">
++        <label>si erreur :</label>
++        <select class="scn-ssel-onerror">
++          <option value="stop">stopper le scénario</option>
++          <option value="skip">ignorer la ligne du batch et continuer</option>
++        </select>
++      </div>
++      <div class="scn-row scn-only-ssel">
++        <button class="btn sm scn-ssel-test" type="button" title="Exécute cette étape seule sur l'onglet actif (ligne active pour les {Colonne})"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester l'étape</button>
++        <span class="scn-ssel-result"></span>
++      </div>
++      <p class="hint scn-only-ssel scn-ssel-hint"></p>
++
+       <p class="hint scn-only-sigeo">La simulation est activée par défaut : décoche-la pour enregistrer réellement. Le ViewState est géré par le navigateur (aucune requête forgée).</p>
+     </div>
+   `;
+@@ -3555,6 +3631,8 @@ function addScenarioStep(step = {}) {
+     persistWorkingConfig();
+   });
+ 
++  wireSigeoSelectorStepUI(div, step);
++
+   $("scenarioSteps").appendChild(div);
+ }
+ 
+@@ -3615,7 +3693,14 @@ function getScenarioSteps() {
+     batchDlTimeoutMs: parseInt(el.querySelector(".scn-batch-dltimeout").value, 10) || 30000,
+     batchDlSettleMs: parseInt(el.querySelector(".scn-batch-dlsettle").value, 10) || 0,
+     batchFilter: el.querySelector(".scn-batch-filter").value.trim(),
+-    batchMaxRounds: parseInt(el.querySelector(".scn-batch-max").value, 10) || 50
++    batchMaxRounds: parseInt(el.querySelector(".scn-batch-max").value, 10) || 50,
++    sselChamp: el.querySelector(".scn-ssel-champ").value,
++    sselLigne: Math.max(1, parseInt(el.querySelector(".scn-ssel-ligne").value, 10) || 1),
++    sselValeur: el.querySelector(".scn-ssel-valeur").value,
++    sselCtrlKey: el.querySelector(".scn-ssel-ctrlkey").value.trim(),
++    sselMode: el.querySelector(".scn-ssel-mode").value,
++    sselTimeout: parseInt(el.querySelector(".scn-ssel-timeout").value, 10) || sselDefaults(el.querySelector(".scn-ssel-champ").value).timeoutMs,
++    sselOnError: el.querySelector(".scn-ssel-onerror").value
+   }));
+ }
+ 
+@@ -3663,6 +3748,398 @@ $("clearStepsBtn").addEventListener("click", () => {
+ $("scenarioSteps").addEventListener("input", updateScenarioEstimate);
+ $("scenarioSteps").addEventListener("change", updateScenarioEstimate);
+ 
++/* ---------- Étape « Sélecteur SIGEO » (sigeoSelector) ----------
++   Champs SIGEO à autocomplétion (SelectorControl + AutoCompletion) : la
++   valeur réellement soumise est un id caché, posé par le contrôle JS de la
++   page (window.__ivCtrl). L'exécution se fait dans le service worker
++   (background.js : setMandatMG / setCompte / setSigeoSelector), en world
++   MAIN. Cette étape ne clique JAMAIS sur un bouton d'enregistrement. */
++
++// Réglages par défaut selon le champ (fonction : pas de TDZ à l'init).
++function sselDefaults(champ) {
++  switch (champ) {
++    case "compte": return { mode: "recherche", timeoutMs: 5000 };
++    case "custom": return { mode: "recherche", timeoutMs: 5000 };
++    default: return { mode: "direct", timeoutMs: 8000 }; // mandatMG : postback
++  }
++}
++
++function sselChampLabel(s) {
++  const champ = s.sselChamp || "mandatMG";
++  if (champ === "compte") return `Compte ligne ${s.sselLigne || 1}`;
++  if (champ === "custom") return s.sselCtrlKey || "personnalisé";
++  return "Mandat MG";
++}
++
++// Étape qui pose le Mandat MG (pour le garde-fou des étapes Compte).
++function isMandatScenarioStep(s) {
++  return (s.type === "sigeoSelector" && (s.sselChamp || "mandatMG") === "mandatMG") ||
++    (s.type === "input" && /^\s*(?:[a-z]+:)*mg:/i.test(s.inputField || ""));
++}
++
++function wireSigeoSelectorStepUI(div, step) {
++  const champSel = div.querySelector(".scn-ssel-champ");
++  const modeSel = div.querySelector(".scn-ssel-mode");
++  const timeoutIn = div.querySelector(".scn-ssel-timeout");
++  const ligneWrap = div.querySelector(".scn-ssel-ligne-wrap");
++  const keyWrap = div.querySelector(".scn-ssel-ctrlkey-wrap");
++  const keyLabel = div.querySelector(".scn-ssel-ctrlkey-label");
++  const keyIn = div.querySelector(".scn-ssel-ctrlkey");
++  const hint = div.querySelector(".scn-ssel-hint");
++  const valIn = div.querySelector(".scn-ssel-valeur");
++
++  champSel.value = step.sselChamp || "mandatMG";
++  modeSel.value = step.sselMode || sselDefaults(champSel.value).mode;
++  div.querySelector(".scn-ssel-onerror").value = step.sselOnError || "stop";
++  if (step.sselTimeout == null) timeoutIn.value = sselDefaults(champSel.value).timeoutMs;
++
++  const sync = () => {
++    const champ = champSel.value;
++    ligneWrap.hidden = champ !== "compte";
++    keyWrap.hidden = champ === "mandatMG";
++    // Mode imposé pour Mandat MG (direct) et Compte (recherche).
++    if (champ !== "custom") modeSel.value = sselDefaults(champ).mode;
++    modeSel.disabled = champ !== "custom";
++    if (champ === "compte") {
++      keyLabel.textContent = "modèle de clé :";
++      keyIn.placeholder = "vide = auto (body_x_proxyTabSaisie_x__compte_ajax_selector_{n}_x_selCompte_x)";
++      keyIn.title = "{n} = n° de ligne, {n0} = ligne-1, {ctl} = ligne+1 sur 2 chiffres. Format id (body_x_…) ou name (body:x:…), converti automatiquement.";
++      valIn.placeholder = "ex : {Compte} ou 411000";
++      hint.innerHTML = "Compte de la ligne de contrepartie N, en mode recherche (frappe + suggestion). Nécessite qu'une étape <strong>Mandat MG</strong> ait réussi plus tôt dans le scénario. Clé détectée automatiquement (N-ième contrôle « cpt/compte » de la page) si le modèle est vide.";
++    } else if (champ === "custom") {
++      keyLabel.textContent = "clé __ivCtrl :";
++      keyIn.placeholder = "ex : body_x_selMan_x";
++      keyIn.title = "Clé du contrôle dans window.__ivCtrl (souvent l'id de l'input caché)";
++      valIn.placeholder = modeSel.value === "direct" ? "id|libellé (ex : 396166|MG0396166) ou code numérique" : "texte à taper (ex : {Code})";
++      hint.innerHTML = "Moteur générique : vérifie que <code>__ivCtrl[clé]</code> existe, applique le mode choisi, puis valide <code>SelectedValues.length === 1</code> et que le texte affiché commence par la valeur.";
++    } else {
++      valIn.placeholder = "ex : {Mandat MG} ou MG0396166";
++      hint.innerHTML = "Accepte <code>MG0396166</code>, <code>mg396166</code> ou <code>396166</code>. Attend la fin du postback (rechargement du Journal) et vérifie l'id soumis. À placer <strong>avant</strong> Journal, Date, Libellé…";
++    }
++  };
++  champSel.addEventListener("change", () => {
++    // Nouveau champ : on repart des valeurs par défaut (mode, timeout).
++    const d = sselDefaults(champSel.value);
++    modeSel.value = d.mode;
++    timeoutIn.value = d.timeoutMs;
++    sync();
++    persistWorkingConfig();
++  });
++  modeSel.addEventListener("change", sync);
++  sync();
++
++  // « Tester l'étape » : exécute cette étape seule sur l'onglet actif.
++  const testBtn = div.querySelector(".scn-ssel-test");
++  const out = div.querySelector(".scn-ssel-result");
++  testBtn.addEventListener("click", async () => {
++    if (scnRunning) { showStatus("Un scénario est en cours d'exécution.", "error"); return; }
++    const idx = Array.from($("scenarioSteps").children).indexOf(div);
++    const s = getScenarioSteps()[idx];
++    out.className = "scn-ssel-result";
++    out.textContent = "test en cours…";
++    testBtn.disabled = true;
++    try {
++      const tabId = await getActiveTabId();
++      const res = await execSigeoSelectorStep(s, state.selectedRowIdx, tabId, { testMode: true });
++      if (res.ok) {
++        out.className = "scn-ssel-result ok";
++        out.textContent = "✓ " + res.info;
++        showStatus("Sélecteur SIGEO : " + res.info, "success");
++      } else {
++        out.className = "scn-ssel-result err";
++        out.textContent = "✗ " + res.error;
++        showStatus("Sélecteur SIGEO : " + res.error, "error");
++      }
++    } catch (e) {
++      out.className = "scn-ssel-result err";
++      out.textContent = "✗ " + e.message;
++    } finally {
++      testBtn.disabled = false;
++    }
++  });
++}
++
++// Appel au service worker.
++async function sselCallBackground(msg) {
++  try {
++    const res = await chrome.runtime.sendMessage(msg);
++    return res || { ok: false, error: "aucune réponse du service worker" };
++  } catch (e) {
++    return { ok: false, error: "service worker injoignable : " + e.message };
++  }
++}
++
++// Le Mandat MG est-il posé sur la page ? Renvoie son libellé/id, ou "".
++// Deux cas SIGEO : champ encore éditable (input caché body_x_selMan_x), ou
++// en-tête figé après « Saisir les contreparties » (texte « Mandat MG MG0396789 »).
++async function sselPageHasMandat(tabId) {
++  try {
++    const [{ result }] = await chrome.scripting.executeScript({
++      target: { tabId },
++      func: () => {
++        const nb = (s) => String(s || "").replace(/[\u00a0\u202f\u2007]/g, " ");
++        const hidden = String(document.getElementById("body_x_selMan_x")?.value || "").trim();
++        if (hidden) {
++          const txt = nb(document.getElementById("body_x_selMan_x_txt_x__ctl0")?.value).trim();
++          return txt || hidden;
++        }
++        const m = nb(document.body?.innerText).match(/Mandat\s+MG\s*:?\s*(MG\d{5,})/i);
++        return m ? m[1].toUpperCase() : "";
++      }
++    });
++    return result || "";
++  } catch (_) { return ""; }
++}
++
++// Exécute une étape sigeoSelector. Retourne { ok, info?, error?, abortRun?, id?, label? }.
++async function execSigeoSelectorStep(step, rowIdx, tabId, opts = {}) {
++  const champ = step.sselChamp || "mandatMG";
++  const row = (rowIdx !== null && rowIdx !== undefined && state.rows.length) ? (state.rows[rowIdx] || []) : null;
++  const raw = step.sselValeur ?? "";
++  const timeoutMs = step.sselTimeout || sselDefaults(champ).timeoutMs;
++  const what = sselChampLabel(step);
++
++  const finish = (res, valeur) => {
++    sselJournalAdd({
++      row: opts.testMode ? "test" : (row ? rowIdx + 1 : "—"),
++      champ: what, valeur, id: res.id || "", label: res.label || "",
++      ok: !!res.ok, error: res.ok ? "" : (res.error || "échec")
++    });
++    if (res.ok) {
++      const info = `${what} « ${valeur} » → id ${res.id || "?"} — « ${res.label || "?"} »${res.detail?.already ? " (déjà en place)" : ""}`;
++      return { ok: true, info, id: res.id, label: res.label };
++    }
++    const error = `${what} « ${valeur} » : ${res.error || "échec"}`;
++    if (opts.testMode) return { ok: false, error };
++    return step.sselOnError === "skip"
++      ? { ok: false, error: error + " — ligne ignorée, on continue" }
++      : { ok: false, error, abortRun: true };
++  };
++
++  if (/\{[^{}]+\}/.test(raw) && !row) return finish({ ok: false, error: "aucune ligne active pour résoudre la valeur" }, raw);
++  const valeur = String(resolveFieldTemplate(raw, row) ?? "").trim();
++  const missing = valeur.match(/\{[^{}]+\}/g);
++  if (missing) return finish({ ok: false, error: "colonne(s) introuvable(s) : " + missing.join(", ") }, valeur);
++  if (!valeur) return finish({ ok: false, error: "valeur vide" }, valeur);
++
++  let res;
++  if (champ === "mandatMG") {
++    res = await sselCallBackground({ action: "setMandatMG", tabId, frameId: 0, mg: valeur, timeoutMs });
++  } else if (champ === "compte") {
++    // Garde-fou : un Mandat MG doit être en place avant le compte. Soit une
++    // étape Mandat MG a réussi plus tôt dans ce déroulé, soit la page en a
++    // déjà un (posé à la main, par une étape « Remplir » avec mg:, ou en-tête
++    // figé après « Saisir les contreparties »).
++    if (!opts.ctx?.mandatOk) {
++      const pageMandat = await sselPageHasMandat(tabId);
++      if (!pageMandat) {
++        return finish({
++          ok: false,
++          error: "aucun Mandat MG sur la page (et aucune étape Mandat MG réussie avant celle-ci) — sélectionne le mandat d'abord"
++        }, valeur);
++      }
++      if (opts.ctx) opts.ctx.mandatOk = true;
++      console.log(`NoHands OSA [Sélecteur SIGEO]: mandat déjà présent sur la page (${pageMandat})`);
++    }
++    res = await sselCallBackground({
++      action: "setCompte", tabId, frameId: 0, ligne: step.sselLigne || 1, valeur,
++      keyTemplate: step.sselCtrlKey || "", timeoutMs
++    });
++  } else {
++    if (!step.sselCtrlKey) return finish({ ok: false, error: "clé __ivCtrl manquante" }, valeur);
++    res = await sselCallBackground({
++      action: "setSigeoSelector", tabId, frameId: 0, ctrlKey: step.sselCtrlKey,
++      mode: step.sselMode || "recherche", value: valeur, timeoutMs
++    });
++  }
++  // setMandatMG renvoie le libellé calculé : on préfère le texte réellement affiché.
++  if (res && res.detail && res.detail.text) res.label = String(res.detail.text).replace(/[\u00a0\u202f\u2007]/g, " ").trim() || res.label;
++  if (res && res.detail && res.detail.hidden && !res.id) res.id = res.detail.hidden;
++  return finish(res || { ok: false, error: "aucun résultat" }, valeur);
++}
++
++/* --- Journal des sélecteurs (contrôle a posteriori des id rattachés) --- */
++
++function sselJournal() {
++  if (!Array.isArray(state.sselJournal)) state.sselJournal = [];
++  return state.sselJournal;
++}
++
++function sselJournalAdd(entry) {
++  const j = sselJournal();
++  j.push({ ts: Date.now(), ...entry });
++  if (j.length > 2000) j.splice(0, j.length - 2000);
++  try { chrome.storage.local.set({ sselJournal: j }); } catch (_) { /* ignoré */ }
++  console.log("NoHands OSA [Sélecteur SIGEO] journal:", entry);
++  renderSselJournal();
++}
++
++function renderSselJournal() {
++  const body = $("sselJournalBody");
++  if (!body) return;
++  const j = sselJournal();
++  $("sselJournalCount").textContent = j.length ? `(${j.length})` : "";
++  body.innerHTML = "";
++  // Les plus récentes en haut ; affichage limité, l'export CSV contient tout.
++  j.slice(-300).reverse().forEach((e) => {
++    const tr = document.createElement("tr");
++    const cells = [
++      new Date(e.ts).toLocaleTimeString(), String(e.row), e.champ, e.valeur, e.id, e.label,
++      e.ok ? "OK" : "ERREUR : " + e.error
++    ];
++    cells.forEach((c, i) => {
++      const td = document.createElement("td");
++      td.textContent = c ?? "";
++      if (i === cells.length - 1) td.className = e.ok ? "ok" : "err";
++      tr.appendChild(td);
++    });
++    body.appendChild(tr);
++  });
++}
++
++$("sselJournalExportBtn").addEventListener("click", () => {
++  const j = sselJournal();
++  if (!j.length) { showStatus("Journal vide.", "error"); return; }
++  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
++  const lines = [["Date", "Ligne", "Champ", "Valeur", "Id", "Libellé", "Statut", "Erreur"].map(esc).join(";")];
++  j.forEach((e) => lines.push([
++    new Date(e.ts).toLocaleString(), e.row, e.champ, e.valeur, e.id, e.label, e.ok ? "OK" : "ERREUR", e.error
++  ].map(esc).join(";")));
++  // BOM UTF-8 : accents corrects à l'ouverture dans Excel.
++  const blob = new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
++  const url = URL.createObjectURL(blob);
++  const a = document.createElement("a");
++  a.href = url;
++  a.download = `journal-selecteurs-sigeo-${new Date().toISOString().slice(0, 10)}.csv`;
++  document.body.appendChild(a);
++  a.click();
++  a.remove();
++  URL.revokeObjectURL(url);
++});
++
++$("sselJournalClearBtn").addEventListener("click", () => {
++  if (!sselJournal().length) return;
++  if (!confirm("Vider le journal des sélecteurs SIGEO ?")) return;
++  state.sselJournal = [];
++  chrome.storage.local.remove("sselJournal");
++  renderSselJournal();
++});
++
++chrome.storage.local.get("sselJournal").then((st) => {
++  if (Array.isArray(st.sselJournal)) state.sselJournal = st.sselJournal;
++  renderSselJournal();
++}).catch(() => { /* ignoré */ });
++
++/* --- Garde-fous à l'enregistrement du scénario ---
++   Le scénario est sauvegardé en continu : les avertissements sont donc
++   recalculés à chaque modification (ajout, suppression, déplacement, saisie)
++   et rappelés dans le journal au démarrage d'une exécution. */
++
++// Montant (Débit / Crédit / TVA) saisi par une étape « Saisir un champ ».
++function scnAmountKind(s) {
++  if (s.type !== "input") return null;
++  const t = `${s.inputField || ""} ${s.inputValue || ""}`;
++  if (/d[ée]bit/i.test(t)) return "Débit";
++  if (/cr[ée]dit/i.test(t)) return "Crédit";
++  if (/tva/i.test(t)) return "TVA";
++  return null;
++}
++
++// N° de ligne de contrepartie d'une étape montant : « ligne 2 », « l2 »,
++// « row_2 »… dans le champ ou la valeur ; à défaut, ligne 1.
++function scnGuessLine(s) {
++  const t = `${s.inputField || ""} ${s.inputValue || ""}`.replace(/[:$]/g, "_");
++  const m = t.match(/(?<![a-z])(?:ligne|line|row|lig|l)[\s_-]?0*(\d+)\b/i) ||
++    t.match(/_[a-z]+_(\d+)_x/i); // grille SIGEO : body_x_proxyTabSaisie_x__tva_2_x…
++  return m ? parseInt(m[1], 10) : 1;
++}
++
++function scnValidateScenario(steps) {
++  const warns = [];
++  const firstMandat = steps.findIndex(isMandatScenarioStep);
++  const compteAt = {}; // ligne -> index de la 1re étape Compte
++  steps.forEach((s, i) => {
++    if (s.type !== "sigeoSelector") return;
++    const champ = s.sselChamp || "mandatMG";
++    if (!String(s.sselValeur || "").trim()) warns.push(`Étape ${i + 1} (${sselChampLabel(s)}) : valeur vide.`);
++    if (champ === "custom" && !s.sselCtrlKey) warns.push(`Étape ${i + 1} (Sélecteur personnalisé) : clé __ivCtrl manquante.`);
++    if (champ === "compte") {
++      if (firstMandat < 0 || firstMandat > i) {
++        warns.push(`Étape ${i + 1} (${sselChampLabel(s)}) : aucune étape Mandat MG avant — elle échouera à l'exécution si le mandat n'est pas déjà posé sur la page.`);
++      }
++      const n = s.sselLigne || 1;
++      if (compteAt[n] === undefined) compteAt[n] = i;
++    }
++  });
++  steps.forEach((s, i) => {
++    const kind = scnAmountKind(s);
++    if (!kind) return;
++    const n = scnGuessLine(s);
++    const ci = compteAt[n];
++    if (ci !== undefined && ci > i) {
++      warns.push(`Étape ${i + 1} (${kind} ligne ${n}) placée avant l'étape ${ci + 1} (Compte ligne ${n}) : choisis le compte d'abord, son postback peut effacer le montant.`);
++    }
++  });
++  return warns;
++}
++
++function refreshScenarioWarnings() {
++  const box = $("scnWarnings");
++  if (!box) return;
++  const warns = scnValidateScenario(getScenarioSteps());
++  box.hidden = !warns.length;
++  box.innerHTML = "";
++  warns.forEach((w) => {
++    const d = document.createElement("div");
++    d.textContent = "⚠ " + w;
++    box.appendChild(d);
++  });
++}
++
++function scnLogScenarioWarnings() {
++  scnValidateScenario(getScenarioSteps()).forEach((w) => scnLog("⚠ " + w, "skip"));
++}
++
++{
++  let warnTimer = null;
++  const schedule = () => { clearTimeout(warnTimer); warnTimer = setTimeout(refreshScenarioWarnings, 150); };
++  $("scenarioSteps").addEventListener("input", schedule);
++  $("scenarioSteps").addEventListener("change", schedule);
++  // Ajout, suppression, déplacement, glisser-déposer, chargement de profil
++  new MutationObserver(schedule).observe($("scenarioSteps"), { childList: true });
++}
++
++/* --- Boutons « + Sélecteur SIGEO » et modèle « OD – Saisie contrepartie » --- */
++
++$("addSselStepBtn").addEventListener("click", () => {
++  addScenarioStep({ type: "sigeoSelector", sselChamp: "mandatMG", sselValeur: "{Mandat MG}" });
++  persistWorkingConfig();
++  updateScenarioEstimate();
++});
++
++$("addOdTemplateBtn").addEventListener("click", () => {
++  const steps = [
++    { type: "sigeoSelector", sselChamp: "mandatMG", sselValeur: "{Mandat MG}", sselTimeout: 8000, sselOnError: "stop" },
++    // Clic sur « Saisir les contreparties » : sélecteur à désigner avec 🎯
++    // (ou supprimer l'étape et cliquer à la main — voir le message).
++    { type: "click", clickSelector: "", clickMode: "click", clickTimeout: 5000 },
++    { type: "sigeoSelector", sselChamp: "compte", sselLigne: 1, sselValeur: "{Compte}", sselTimeout: 5000, sselOnError: "stop" },
++    { type: "input", inputField: "", inputValue: "{Débit}" },
++    { type: "input", inputField: "", inputValue: "{Crédit}" },
++    { type: "input", inputField: "", inputValue: "{Libellé}" }
++  ];
++  const first = $("scenarioSteps").children.length + 1;
++  steps.forEach((s) => addScenarioStep(s));
++  persistWorkingConfig();
++  updateScenarioEstimate();
++  showStatus(
++    `Modèle « OD – Saisie contrepartie » ajouté (étapes ${first} à ${first + steps.length - 1}). ` +
++    `À compléter : 🎯 sur le bouton « Saisir les contreparties » (étape ${first + 1}) — ou remplace-la par « Attendre qu'un élément apparaisse » si tu cliques à la main — ` +
++    `et 🎯 sur les champs Débit, Crédit, Libellé.`,
++    "info"
++  );
++});
++
+ /* ---------- Fonctions injectées (autonomes) ---------- */
+ 
+ // Attend qu'un élément apparaisse (visible) ou disparaisse, avec timeout.
+@@ -3705,7 +4182,7 @@ function scnWaitInjected(cfg) {
+ // Icône affichée à côté du numéro de l'étape (symboles #icon-step-* du HTML).
+ function scnStepIconId(type, clickMode) {
+   if (type === "click" && clickMode === "enter") return "icon-step-enter";
+-  const known = ["fill", "input", "goto", "click", "wait", "cond", "pdfcheck", "pdfwrite", "sigeo", "batchedit"];
++  const known = ["fill", "input", "goto", "click", "wait", "cond", "pdfcheck", "pdfwrite", "sigeo", "batchedit", "sigeoSelector"];
+   return "icon-step-" + (known.includes(type) ? type : "fill");
+ }
+ 
+@@ -4543,6 +5020,7 @@ function scnStepLabel(s) {
+     case "sigeo":
+       return `SIGEO : adresse ${scnTrunc(s.sigeoAddressId || "?", 20)}${s.sigeoDryRun !== false ? " (simulation)" : ""}`;
+     case "batchedit": return `Éditer par lots de ${s.batchSize || 10}`;
++    case "sigeoSelector": return `Sélecteur SIGEO : ${sselChampLabel(s)} = « ${scnTrunc(s.sselValeur, 25)} »`;
+   }
+   return s.type;
+ }
+@@ -4678,15 +5156,18 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
+           customFields: Object.keys(customFields).length ? customFields : undefined,
+           rowContext
+         };
+-        const { totalFilled } = opts.soloTab
++        const { totalFilled, fatalErrors } = opts.soloTab
+           ? await sendFillToOneTab(tabId, fillMsg)
+           : await sendFillToAllTabs(fillMsg);
++        // Échec bloquant (ex. Mandat MG non posé) : on n'enchaîne pas les
++        // étapes suivantes sur un formulaire incohérent.
++        if (fatalErrors && fatalErrors.length) return { ok: false, error: fatalErrors[0] };
+         return { ok: true, info: `${totalFilled} champ(s) rempli(s)`, warn: totalFilled === 0 };
+       }
+       case "input": {
+         if (!step.inputField) return { ok: false, error: "champ (name/id) manquant" };
+         const { rowContext } = buildFillPayload(rowIdx);
+-        const value = resolveRowTemplate(step.inputValue ?? "", stepRow);
++        const value = resolveFieldTemplate(step.inputValue ?? "", stepRow);
+         const msg = { action: "fillOne", identifier: step.inputField, value, rowContext };
+         const { totalFilled, totalErrors } = opts.soloTab
+           ? await sendFillToOneTab(tabId, msg)
+@@ -4701,6 +5182,8 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
+         if (!res.ok) return { ok: false, error: shown + " — mais " + res.error };
+         return { ok: true, info: shown + " — " + res.info };
+       }
++      case "sigeoSelector":
++        return await execSigeoSelectorStep(step, rowIdx, tabId, opts);
+       case "goto": {
+         if (!step.gotoUrl) return { ok: false, error: "URL manquante" };
+         let url = step.gotoUrl;
+@@ -4969,6 +5452,9 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
+ 
+ // Exécute toutes les étapes pour une ligne. prefix = préfixe de log (mode boucle).
+ async function runScenarioForRow(rowIdx, tabId, steps, prefix = "", opts = {}) {
++  // Contexte propre à la ligne : garde-fous inter-étapes (ex. une étape
++  // Compte exige qu'un Mandat MG ait réussi plus tôt dans CE déroulé).
++  opts = { ...opts, ctx: { mandatOk: false } };
+   for (let i = 0; i < steps.length; i++) {
+     if (scnStopRequested) return { stopped: true };
+     const step = steps[i];
+@@ -4976,8 +5462,14 @@ async function runScenarioForRow(rowIdx, tabId, steps, prefix = "", opts = {}) {
+     const res = await execScenarioStep(step, rowIdx, tabId, opts);
+     if (!res.ok) {
+       scnLog(`✗ ${label} : ${res.error}`, "err");
++      if (res.abortRun) {
++        // « si erreur : stopper » — toute la boucle s'arrête (multi-onglets compris).
++        scnStopRequested = true;
++        scnLog(`${prefix}Scénario stoppé (étape ${i + 1} réglée sur « stopper »).`, "err");
++      }
+       return { ok: false };
+     }
++    if (isMandatScenarioStep(step)) opts.ctx.mandatOk = true;
+     scnLog(
+       `${res.stop || res.skip ? "→" : "✓"} ${label}${res.info ? " : " + res.info : ""}`,
+       res.stop || res.skip || res.warn ? "skip" : "ok"
+@@ -4999,6 +5491,7 @@ function scenarioNeedsRow(steps) {
+     (s.type === "goto" && /\{[^{}]+\}/.test(s.gotoUrl || "")) ||
+     (s.type === "input" && /\{[^{}]+\}/.test(s.inputValue || "")) ||
+     (s.type === "pdfwrite") ||
++    (s.type === "sigeoSelector" && /\{[^{}]+\}/.test(s.sselValeur || "")) ||
+     (s.type === "pdfcheck" && (/\{[^{}]+\}/.test(s.pdfVal || "") ||
+       (s.pdfDocMode === "match" && /\{[^{}]+\}/.test(s.pdfDocMatch || "")))) ||
+     (s.type === "sigeo" && ([s.sigeoAddressId, s.sigeoTable, s.sigeoPays, s.sigeoCp, s.sigeoVille,
+@@ -5015,8 +5508,11 @@ function scnBegin() {
+   $("runScenarioMultiBtn").disabled = true;
+   $("mtStartBtn").disabled = true;
+   $("addStepBtn").disabled = true;
++  $("addSselStepBtn").disabled = true;
++  $("addOdTemplateBtn").disabled = true;
+   $("stopScenarioBtn").disabled = false;
+   $("scnLog").innerHTML = "";
++  scnLogScenarioWarnings();
+ }
+ 
+ function scnFinish() {
+@@ -5026,6 +5522,8 @@ function scnFinish() {
+   $("runScenarioMultiBtn").disabled = false;
+   if (!mtState.active) $("mtStartBtn").disabled = false;
+   $("addStepBtn").disabled = false;
++  $("addSselStepBtn").disabled = false;
++  $("addOdTemplateBtn").disabled = false;
+   $("stopScenarioBtn").disabled = true;
+   persistSession();
+ }
