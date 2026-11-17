@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>SIGEO (simulation) — Recherche d'immeubles</title>
+<!--
+  Page de test de l'étape « SIGEO : rechercher un IM ».
+  Simule la recherche d'immeubles SIGEO (ASP.NET WebForms) :
+    - mode par défaut : postback PARTIEL (UpdatePanel remplacé, overlay
+      « Chargement en cours… », Sys.WebForms.PageRequestManager) ;
+    - ?full=1          : postback COMPLET (rechargement de la page).
+  Données : 66 résultats pour « LAMARCK » (5 pages de 15), etc.
+-->
+<style>
+  body { font: 13px Arial, sans-serif; }
+  #progessUpdatePanel { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.2); }
+  #progessUpdatePanel div { margin: 120px auto; width: 200px; background: #fff; padding: 10px; }
+  .header td { font-weight: bold; background: #ddd; }
+  .aspNetDisabled { color: #999; }
+  fieldset.hidden { display: none; }
+</style>
+</head>
+<body>
+<form id="aspnetForm" method="get" action="">
+  <input type="hidden" name="full" id="fullFlag" value="">
+  <input type="hidden" name="page" id="pageFlag" value="1">
+  <table class="layout"><tr><td>
+    <table id="body_x_tabCriteres">
+      <tr>
+        <td><label><input type="radio" name="mode" id="rbNom" value="nom" checked onclick="toggleMode()"> Par nom</label></td>
+        <td><input type="radio" name="mode" id="rbAdr" value="adresse" onclick="toggleMode()"><label for="rbAdr">Par adresse</label></td>
+      </tr>
+      <tr>
+        <td>Site :</td>
+        <td><select id="body_x_selSite_x_Site" name="body:x:selSite:x:Site"
+                    onchange="javascript:setTimeout('__doPostBack(\'ddlSite\',\'\')', 0)">
+          <option value="">&nbsp;</option>
+          <option value="01" selected>01 - PARIS</option>
+          <option value="18">18 - BOURGES</option>
+        </select></td>
+      </tr>
+    </table>
+    <fieldset id="fsNom"><legend>Par nom</legend>
+      <table><tr><td>Nom :</td><td><input type="text" id="body_x_txtNom_x_Nom" name="body:x:txtNom:x:Nom" onchange="javascript:setTimeout('__doPostBack(\'txtNom\',\'\')', 0)"></td></tr></table>
+    </fieldset>
+    <fieldset id="fsAdr" class="hidden"><legend>Par adresse</legend>
+      <table>
+        <tr><td>Adresse :</td><td><input type="text" id="body_x_txtAdr_x_Adresse" name="body:x:txtAdr:x:Adresse"></td></tr>
+        <tr><td>Code postal :</td><td><input type="text" id="body_x_txtCP_x_CP" name="body:x:txtCP:x:CP"></td></tr>
+      </table>
+    </fieldset>
+    <input type="submit" id="body_x_cmdSearch" name="body:x:cmdSearch" value="Rechercher" onclick="return doSearch(event)">
+  </td></tr></table>
+
+  <div id="body_x_upResult"></div>
+</form>
+<div id="progessUpdatePanel"><div>Chargement en cours...</div></div>
+
+<script>
+// ---------------------------------------------------------------- données
+const DATA = [];
+function add(im, nom, adresse) { DATA.push({ im, nom, adresse }); }
+// LAMARCK : 66 lignes dont celles des cas de test
+const noms = (i) => [`LAMARCK "${100 + i}"`, `${i} LAMARCK`, `*${90 + i} LAMARCK***30/03/06****`, `RES LAMARCK ${i}`][i % 4];
+const lam = [];
+lam.push(["IM0038854", "137 RUE LAMARCK 18000 BOURGES"]);
+lam.push(["IM0398636", "129 RUE LAMARCK 75018 PARIS"]);
+lam.push(["IM0101010", "8 BOULEVARD LAMARCK 18000 BOURGES"]);
+lam.push(["IM0158160", "158/160 RUE LAMARCK 75018 PARIS"]);
+lam.push(["IM0222222", "158 RUE LAMARCK 18000 BOURGES"]);
+let n = 1, k = 0;
+while (lam.length < 64) {
+  const num = n; n += 2;
+  if ([129, 137, 8, 158, 160, 131].includes(num)) continue;
+  const ville = k % 3 === 0 ? "18000 BOURGES" : "75018 PARIS";
+  lam.push([`IM0${String(500000 + k).padStart(6, "0")}`, `${num} RUE LAMARCK ${ville}`]);
+  k++;
+}
+lam.splice(50, 0, ["IM0069522", "137 RUE LAMARCK 18000 BOURGES"]);     // doublon, page 4
+lam.splice(40, 0, ["IM0101011", "8 BOULEVARD LAMARCK 18000 BOURGES"]); // doublon, page 3
+lam.forEach(([im, a], i) => add(im, noms(i), a));
+// Un immeuble dont le Nom ne contient pas LAMARCK : seulement trouvé par adresse
+add("IM0555555", "LES TILLEULS", "131 RUE LAMARCK 75018 PARIS");
+// Autres voies
+add("IM0128128", "CHARONNE 128", "128 RUE DE CHARONNE 75011 PARIS");
+add("IM0128128", "CHARONNE 128BIS", "128 BIS RUE DE CHARONNE 75011 PARIS");
+add("IM0130130", "130 CHARONNE", "130 RUE DE CHARONNE 75011 PARIS");
+add("IM0280028", "ST SULPICE 28", "28 RUE SAINT SULPICE 75006 PARIS");
+add("IM0260026", "SAINT-SULPICE 26", "26 RUE SAINT SULPICE 75006 PARIS");
+add("IM0730073", "SEBASTOPOL 73", "73 BOULEVARD DE SEBASTOPOL 75001 PARIS");
+add("IM0750075", "75 SEBASTOPOL", "75 BOULEVARD DE SEBASTOPOL 75001 PARIS");
+
+// ---------------------------------------------------------------- moteur
+const FULL = new URLSearchParams(location.search).get("full") === "1";
+const PAGE_SIZE = 15;
+let q = null, page = 1, inAsync = false;
+window.Sys = { WebForms: { PageRequestManager: { getInstance: () => ({ get_isInAsyncPostBack: () => inAsync }) } } };
+window.__log = [];
+
+function toggleMode() {
+  const adr = document.getElementById("rbAdr").checked;
+  document.getElementById("fsNom").classList.toggle("hidden", adr);
+  document.getElementById("fsAdr").classList.toggle("hidden", !adr);
+}
+const fold = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase().trim();
+function readCriteria() {
+  return {
+    mode: document.getElementById("rbAdr").checked ? "adresse" : "nom",
+    nom: document.getElementById("body_x_txtNom_x_Nom").value,
+    adr: document.getElementById("body_x_txtAdr_x_Adresse").value,
+    cp: document.getElementById("body_x_txtCP_x_CP").value,
+    site: document.getElementById("body_x_selSite_x_Site").value
+  };
+}
+function filter(c) {
+  return DATA.filter((d) => {
+    if (c.site === "01" && !/ 75\d{3} /.test(" " + d.adresse + " ")) return false;
+    if (c.site === "18" && !/ 18\d{3} /.test(" " + d.adresse + " ")) return false;
+    if (c.mode === "adresse") {
+      if (c.adr && !fold(d.adresse).includes(fold(c.adr))) return false;
+      if (c.cp && !d.adresse.includes(" " + c.cp + " ")) return false;
+      return !!(c.adr || c.cp);
+    }
+    return !!c.nom && fold(d.nom).includes(fold(c.nom));
+  });
+}
+function render() {
+  const up = document.getElementById("body_x_upResult");
+  if (!q) { up.innerHTML = ""; return; }
+  const rows = filter(q);
+  if (!rows.length) { up.innerHTML = `<span id="body_x_lblCount">Aucun résultat</span>`; return; }
+  const pages = Math.ceil(rows.length / PAGE_SIZE);
+  page = Math.min(Math.max(1, page), pages);
+  const slice = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const link = (p, label) => FULL
+    ? `<a href="${pageUrl(p)}">${label}</a>`
+    : `<a href="javascript:__doPostBack('grid','Page$${p}')">${label}</a>`;
+  let pager = page > 1 ? link(page - 1, "&lt;&lt; Page précédente") : `<a class="aspNetDisabled">&lt;&lt; Page précédente</a>`;
+  for (let p = 1; p <= pages; p++) pager += " " + (p === page ? `<span>${p}</span>` : link(p, p));
+  pager += " " + (page < pages ? link(page + 1, "Page suivante &gt;&gt;") : `<a class="aspNetDisabled">Page suivante &gt;&gt;</a>`);
+  up.innerHTML = `
+    <span id="body_x_lblCount">${rows.length} Résultat(s)</span>
+    <table id="body_x_tabResult_x_grid" border="1">
+      <tr class="header"><td>N° E.I.</td><td>Nom E.I.</td><td>Adresse</td><td>Site</td></tr>
+      ${slice.map((d) => `<tr><td><a href="#">${d.im}</a></td><td>${d.nom.replace(/</g, "&lt;")}</td><td>${d.adresse}</td><td>${/ 75\d{3} /.test(" " + d.adresse + " ") ? "01" : "18"}</td></tr>`).join("")}
+      <tr class="pager"><td colspan="4">${pager}</td></tr>
+    </table>`;
+}
+function pageUrl(p) {
+  const c = q;
+  const u = new URLSearchParams({ full: "1", page: String(p), mode: c.mode, "body:x:txtNom:x:Nom": c.nom,
+    "body:x:txtAdr:x:Adresse": c.adr, "body:x:txtCP:x:CP": c.cp, "body:x:selSite:x:Site": c.site });
+  return "?" + u.toString();
+}
+function asyncPostback(fn) {
+  inAsync = true;
+  document.getElementById("progessUpdatePanel").style.display = "block";
+  setTimeout(() => {
+    fn();
+    inAsync = false;
+    document.getElementById("progessUpdatePanel").style.display = "none";
+  }, 300 + Math.floor(Math.random() * 400));
+}
+window.__doPostBack = function (target, arg) {
+  window.__log.push(target + ":" + arg);
+  if (FULL) {
+    if (target === "ddlSite" || target === "txtNom") { document.getElementById("aspnetForm").submit(); }
+    return;
+  }
+  if (target === "grid") {
+    asyncPostback(() => { page = parseInt(String(arg).replace("Page$", ""), 10); render(); });
+  } else if (target === "ddlSite" || target === "txtNom") {
+    asyncPostback(() => { /* rien ne change à l'écran */ });
+  }
+};
+function doSearch(ev) {
+  if (FULL) {
+    document.getElementById("fullFlag").value = "1";
+    document.getElementById("pageFlag").value = "1";
+    return true; // soumission GET normale → rechargement complet
+  }
+  ev.preventDefault();
+  window.__searches = (window.__searches || 0) + 1;
+  const c = readCriteria();
+  asyncPostback(() => { q = c; page = 1; render(); });
+  return false;
+}
+// Mode complet : restitution de l'état depuis l'URL
+if (FULL) {
+  const sp = new URLSearchParams(location.search);
+  document.getElementById("fullFlag").value = "1";
+  if (sp.get("mode") === "adresse") document.getElementById("rbAdr").checked = true;
+  toggleMode();
+  document.getElementById("body_x_txtNom_x_Nom").value = sp.get("body:x:txtNom:x:Nom") || "";
+  document.getElementById("body_x_txtAdr_x_Adresse").value = sp.get("body:x:txtAdr:x:Adresse") || "";
+  document.getElementById("body_x_txtCP_x_CP").value = sp.get("body:x:txtCP:x:CP") || "";
+  if (sp.has("body:x:selSite:x:Site")) document.getElementById("body_x_selSite_x_Site").value = sp.get("body:x:selSite:x:Site");
+  if (sp.has("page")) {
+    q = readCriteria();
+    page = parseInt(sp.get("page"), 10) || 1;
+    // Rendu légèrement différé, comme une page lourde
+    setTimeout(render, 150);
+  }
+}
+</script>
+</body>
+</html>

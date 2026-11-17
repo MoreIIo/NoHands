@@ -3150,6 +3150,8 @@ function estimateScenarioStepMs(s) {
     case "pdfcheck": case "pdfwrite": return 50; // local, quasi instantané
     case "sigeo": return (s.sigeoNav === false ? 300 : 2500) + 4500; // nav + remplissage + résolution ville + postback
     case "sigeoSelector": return (s.sselChamp || "mandatMG") === "mandatMG" ? 1500 : 1200; // sélection + postback
+    // Recherche + pagination ; le cache rend les lignes suivantes de la même voie quasi instantanées.
+    case "sigeoIm": return (s.imMode === "both" ? 2 : 1) * 2500;
     // Le nombre de lots n'est connu qu'à l'exécution : on table sur 3.
     case "batchedit": {
       const dl = s.batchWaitMode === "start" || s.batchWaitMode === "complete";
@@ -3214,6 +3216,7 @@ function addScenarioStep(step = {}) {
         <option value="sigeo">SIGEO : saisir une adresse</option>
         <option value="batchedit">Éditer par lots (cocher N → cliquer)</option>
         <option value="sigeoSelector">Sélecteur SIGEO (Mandat MG, Compte…)</option>
+        <option value="sigeoIm">SIGEO : rechercher un IM (adresse → N° E.I.)</option>
       </select>
       <button class="btn icon-only scn-move-up" title="Monter" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-up"/></svg></button>
       <button class="btn icon-only scn-move-down" title="Descendre" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-down"/></svg></button>
@@ -3472,6 +3475,73 @@ function addScenarioStep(step = {}) {
       <p class="hint scn-only-ssel scn-ssel-hint"></p>
 
       <p class="hint scn-only-sigeo">La simulation est activée par défaut : décoche-la pour enregistrer réellement. Le ViewState est géré par le navigateur (aucune requête forgée).</p>
+
+      <p class="hint scn-only-im">Retrouve le <strong>N° E.I. (IM)</strong> d'une adresse dans la recherche d'immeubles SIGEO : recherche sur le <strong>nom de voie seul</strong> (Site vide), lecture de <strong>toutes les pages</strong>, puis correspondance sur la colonne <strong>Adresse</strong> (numéro + BIS/TER exacts, voie, CP/ville si fournis). Jamais de choix arbitraire : 1 IM → OK, plusieurs → Multiple, aucun → Introuvable. Ouvre d'abord la page de recherche dans l'onglet cible.</p>
+      <div class="scn-row scn-only-im">
+        <label>adresse :</label>
+        <input type="text" class="scn-im-adresse" placeholder="ex : {Adresse} ou {N°} {Voie}" title="Adresse source : « 158/160 RUE LAMARCK », « CHARONNE 128 128BIS », « 129 rue Lamarck 75018 Paris »… {Nom de colonne} (ou {A}) est remplacé par la valeur de la ligne." value="${escapeAttr(step.imAdresse ?? "{Adresse}")}" />
+      </div>
+      <div class="scn-row scn-only-im">
+        <label>CP :</label>
+        <input type="text" class="scn-im-cp" placeholder="(optionnel) ex : {CP}" value="${escapeAttr(step.imCp ?? "")}" />
+        <label>ville :</label>
+        <input type="text" class="scn-im-ville" placeholder="(optionnel) ex : {Ville}" value="${escapeAttr(step.imVille ?? "")}" />
+      </div>
+      <div class="scn-row scn-only-im">
+        <label>rechercher par :</label>
+        <select class="scn-im-mode" title="Nom : le mot de la voie est tapé dans « Nom » (recherche « contient »). Adresse : il est tapé dans « Par adresse » (+ code postal si connu). Les deux : lance les deux recherches, fusionne, et indique dans le journal combien de correspondances chacune apporte.">
+          <option value="nom">Nom (nom de voie seul)</option>
+          <option value="adresse">Par adresse (voie + CP)</option>
+          <option value="both">les deux (comparer)</option>
+        </select>
+        <label>terme :</label>
+        <input type="text" class="scn-im-term" placeholder="auto (mot le plus distinctif)" title="Vide = mot le plus distinctif de la voie (LAMARCK, SULPICE, CHARONNE…). Sinon valeur fixe ou {Colonne}." value="${escapeAttr(step.imTerm ?? "")}" />
+      </div>
+      <div class="scn-row scn-only-im">
+        <label class="checkbox-row" title="Sélectionne l'option vide de la liste « Site » avant de rechercher (sinon seuls les immeubles du site courant remontent)"><input type="checkbox" class="scn-im-siteempty" ${step.imSiteEmpty === false ? "" : "checked"} /> forcer Site = (vide)</label>
+      </div>
+      <div class="scn-row scn-only-im">
+        <label>URL de la recherche :</label>
+        <input type="text" class="scn-im-url" placeholder="(optionnel) ouverte si le formulaire n'est pas trouvé dans l'onglet" value="${escapeAttr(step.imUrl ?? "")}" />
+      </div>
+      <div class="scn-row scn-only-im">
+        <label>timeout / postback (ms) :</label>
+        <input type="number" class="scn-im-timeout" min="2000" step="500" style="max-width:80px" value="${escapeAttr(step.imTimeout ?? 20000)}" />
+        <label>pages max :</label>
+        <input type="number" class="scn-im-maxpages" min="1" step="1" style="max-width:60px" value="${escapeAttr(step.imMaxPages ?? 30)}" />
+      </div>
+      <div class="scn-row scn-only-im">
+        <label>statut → colonne :</label>
+        <input type="text" class="new-col-input scn-im-resultcol" placeholder="ex : Résultat IM (vide = ne pas écrire)" title="OK — IM… / Multiple — IM…, IM… / Introuvable — proches : … / ERREUR — … (colonne créée si besoin)" value="${escapeAttr(step.imResultCol ?? "Résultat IM")}" />
+        <label>IM → colonne :</label>
+        <input type="text" class="new-col-input scn-im-imcol" placeholder="ex : N° E.I. (vide = ne pas écrire)" title="Reçoit l'IM seulement si le statut est OK (vide sinon). Attention : un nom de 1 à 3 lettres (ex. « IM ») est lu comme une lettre de colonne Excel." value="${escapeAttr(step.imImCol ?? "N° E.I.")}" />
+      </div>
+      <div class="scn-row scn-only-im">
+        <label>si Multiple / Introuvable :</label>
+        <select class="scn-im-onmiss">
+          <option value="warn">avertir et continuer</option>
+          <option value="error">erreur (interrompt la ligne)</option>
+          <option value="skip">sauter les étapes suivantes</option>
+        </select>
+        <span class="scn-inline scn-im-skip-wrap">
+          <input type="number" class="scn-im-missskip" min="1" value="${escapeAttr(step.imMissSkip ?? 1)}" />
+          <label>étape(s)</label>
+        </span>
+      </div>
+      <details class="scn-only-im scn-im-adv">
+        <summary>Sélecteurs avancés (vide = détection automatique)</summary>
+        ${[["nom", "champ Nom"], ["site", "liste Site"], ["adresse", "champ Adresse"], ["cp", "champ Code postal"],
+    ["submit", "bouton Rechercher"], ["toggle", "bascule « Par adresse »"], ["table", "tableau de résultats"]]
+    .map(([k, lbl]) => `<div class="scn-row">
+          <label style="min-width:130px">${lbl} :</label>
+          <input type="text" class="scn-im-sel" data-k="${k}" placeholder="auto" value="${escapeAttr((step.imSel || {})[k] ?? "")}" />
+          <button class="btn pick icon-only scn-im-pick" data-k="${k}" title="Choisir sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+        </div>`).join("")}
+      </details>
+      <div class="scn-row scn-only-im">
+        <button class="btn sm scn-im-test" type="button" title="Exécute cette étape seule sur l'onglet actif (ligne active), sans cache"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester l'étape</button>
+        <span class="scn-ssel-result scn-im-result"></span>
+      </div>
     </div>
   `;
 
@@ -3632,6 +3702,7 @@ function addScenarioStep(step = {}) {
   });
 
   wireSigeoSelectorStepUI(div, step);
+  wireSigeoImStepUI(div, step);
 
   $("scenarioSteps").appendChild(div);
 }
@@ -3700,7 +3771,22 @@ function getScenarioSteps() {
     sselCtrlKey: el.querySelector(".scn-ssel-ctrlkey").value.trim(),
     sselMode: el.querySelector(".scn-ssel-mode").value,
     sselTimeout: parseInt(el.querySelector(".scn-ssel-timeout").value, 10) || sselDefaults(el.querySelector(".scn-ssel-champ").value).timeoutMs,
-    sselOnError: el.querySelector(".scn-ssel-onerror").value
+    sselOnError: el.querySelector(".scn-ssel-onerror").value,
+    imAdresse: el.querySelector(".scn-im-adresse").value.trim(),
+    imCp: el.querySelector(".scn-im-cp").value.trim(),
+    imVille: el.querySelector(".scn-im-ville").value.trim(),
+    imMode: el.querySelector(".scn-im-mode").value,
+    imTerm: el.querySelector(".scn-im-term").value.trim(),
+    imSiteEmpty: el.querySelector(".scn-im-siteempty").checked,
+    imUrl: el.querySelector(".scn-im-url").value.trim(),
+    imTimeout: parseInt(el.querySelector(".scn-im-timeout").value, 10) || 20000,
+    imMaxPages: parseInt(el.querySelector(".scn-im-maxpages").value, 10) || 30,
+    imResultCol: el.querySelector(".scn-im-resultcol").value.trim(),
+    imImCol: el.querySelector(".scn-im-imcol").value.trim(),
+    imOnMiss: el.querySelector(".scn-im-onmiss").value,
+    imMissSkip: parseInt(el.querySelector(".scn-im-missskip").value, 10) || 1,
+    imSel: Object.fromEntries(Array.from(el.querySelectorAll(".scn-im-sel"))
+      .map((i) => [i.dataset.k, i.value.trim()]).filter(([, v]) => v))
   }));
 }
 
@@ -4182,7 +4268,7 @@ function scnWaitInjected(cfg) {
 // Icône affichée à côté du numéro de l'étape (symboles #icon-step-* du HTML).
 function scnStepIconId(type, clickMode) {
   if (type === "click" && clickMode === "enter") return "icon-step-enter";
-  const known = ["fill", "input", "goto", "click", "wait", "cond", "pdfcheck", "pdfwrite", "sigeo", "batchedit", "sigeoSelector"];
+  const known = ["fill", "input", "goto", "click", "wait", "cond", "pdfcheck", "pdfwrite", "sigeo", "batchedit", "sigeoSelector", "sigeoIm"];
   return "icon-step-" + (known.includes(type) ? type : "fill");
 }
 
@@ -4993,6 +5079,176 @@ async function execSigeoStep(step, rowIdx, tabId) {
   return { ok: true, info: "enregistré — " + idsTxt + dur() };
 }
 
+/* ---------- Étape « SIGEO : rechercher un IM » (sigeoIm) ----------
+   Logique (parsing, recherche, pagination, filtrage, cache) dans
+   sigeo-im.js ; ici : l'interface de l'étape, l'adaptateur chrome.* et
+   l'écriture des résultats dans le fichier. */
+
+function wireSigeoImStepUI(div, step) {
+  div.querySelector(".scn-im-mode").value = step.imMode || "nom";
+  const onMiss = div.querySelector(".scn-im-onmiss");
+  const skipWrap = div.querySelector(".scn-im-skip-wrap");
+  onMiss.value = step.imOnMiss || "warn";
+  const sync = () => { skipWrap.hidden = onMiss.value !== "skip"; };
+  onMiss.addEventListener("change", sync);
+  sync();
+  if (step.imSel && Object.keys(step.imSel).length) div.querySelector(".scn-im-adv").open = true;
+
+  div.querySelectorAll(".scn-im-pick").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const picked = await pickTargetOnActiveTab();
+      if (!picked) return;
+      const v = picked.selector || picked.name || picked.id;
+      if (!v) return;
+      div.querySelector(`.scn-im-sel[data-k="${btn.dataset.k}"]`).value = v;
+      persistWorkingConfig();
+    });
+  });
+
+  const testBtn = div.querySelector(".scn-im-test");
+  const out = div.querySelector(".scn-im-result");
+  testBtn.addEventListener("click", async () => {
+    if (scnRunning) { showStatus("Un scénario est en cours d'exécution.", "error"); return; }
+    const idx = Array.from($("scenarioSteps").children).indexOf(div);
+    const s = getScenarioSteps()[idx];
+    out.className = "scn-ssel-result scn-im-result";
+    out.textContent = "recherche en cours…";
+    testBtn.disabled = true;
+    try {
+      const tabId = await resolveTargetTabId();
+      scnStopRequested = false; // un « Arrêter » précédent ne doit pas couper le test
+      imClearCache();
+      const res = await execSigeoImStep(s, state.selectedRowIdx, tabId, { testMode: true });
+      let txt = (res.ok ? "✓ " : "✗ ") + (res.ok ? res.info : res.error);
+      if (!res.ok || res.warn) {
+        const diag = await imDiagnose(tabId, s);
+        if (diag) txt += " — " + diag;
+      }
+      out.className = "scn-ssel-result scn-im-result " + (res.ok && !res.warn ? "ok" : "err");
+      out.textContent = txt;
+      showStatus("Recherche IM : " + (res.ok ? res.info : res.error), res.ok ? "success" : "error");
+    } catch (e) {
+      out.className = "scn-ssel-result scn-im-result err";
+      out.textContent = "✗ " + e.message;
+    } finally {
+      testBtn.disabled = false;
+    }
+  });
+}
+
+// Adaptateur chrome.scripting pour l'orchestrateur de sigeo-im.js.
+// world MAIN : imPageOp lit Sys.WebForms.PageRequestManager (postback en cours ?).
+function imChromeAdapter(tabId, timeoutMs) {
+  return {
+    execAll: async (cfg) => {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true }, world: "MAIN", func: imPageOp, args: [cfg]
+      });
+      return (res || []).map((r) => ({ frameId: r.frameId, result: r.result }));
+    },
+    exec: async (frameId, cfg) => {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [frameId] }, world: "MAIN", func: imPageOp, args: [cfg]
+      });
+      if (!res || !res[0]) throw new Error("frame injoignable");
+      return res[0].result;
+    },
+    navigate: (url) => navigateTabAndWait(tabId, url, true, timeoutMs),
+    sleep: (ms) => scnSleep(ms),
+    stopped: () => scnStopRequested,
+    log: (t, c) => scnLog(t, c)
+  };
+}
+
+// Diagnostic court (bouton « Tester l'étape ») : ce que la page expose.
+async function imDiagnose(tabId, s) {
+  try {
+    const res = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true }, world: "MAIN", func: imPageOp,
+      args: [{ op: "probe", mode: s.imMode === "adresse" ? "adresse" : "nom", sel: s.imSel || {} }]
+    });
+    const pr = (res || []).map((r) => r.result).filter(Boolean)
+      .sort((a, b) => (b.ok ? 1 : 0) - (a.ok ? 1 : 0))[0];
+    if (!pr) return "";
+    const f = pr.fields;
+    return `page : Nom ${f.nom || "✗"} · Site ${f.site || "✗"} · Adresse ${f.adresse || "✗"} · CP ${f.cp || "✗"} · ` +
+      `Rechercher ${pr.submit || "✗"} · tableau ${pr.table || "✗"}${pr.count !== null ? ` (${pr.count} résultat(s))` : ""}` +
+      `${pr.next ? ` · page suivante ${pr.next}` : ""}`;
+  } catch (e) {
+    return "diagnostic impossible : " + (e.message || e);
+  }
+}
+
+// Écrit une valeur dans une colonne (existante, lettre ou nouvelle) de la ligne.
+function scnWriteColumn(ref, rowIdx, text) {
+  ref = String(ref || "").trim();
+  if (!ref || rowIdx === null || rowIdx === undefined || !state.rows.length) return;
+  const row = state.rows[rowIdx] = state.rows[rowIdx] || [];
+  const existed = colIndexByName(ref) >= 0;
+  const idx = resolveOutputTarget(ref, {});
+  if (idx < 0) return;
+  setCellByIndex(row, idx, text);
+  persistSession();
+  if (existed) { renderPreview(); renderSelectedRowFields(); }
+  else renderColumns();
+}
+
+async function execSigeoImStep(step, rowIdx, tabId, opts = {}) {
+  const t0 = Date.now();
+  const row = (rowIdx !== null && rowIdx !== undefined) ? (state.rows[rowIdx] || []) : null;
+  const rt = (v) => String(resolveRowTemplate(v ?? "", row) ?? "").trim();
+  const dur = () => ` — ${((Date.now() - t0) / 1000).toFixed(1)} s`;
+  const timeoutMs = Math.max(2000, step.imTimeout || 20000);
+  const write = (status, im) => {
+    scnWriteColumn(step.imResultCol, rowIdx, status);
+    scnWriteColumn(step.imImCol, rowIdx, im || "");
+  };
+  const adresse = rt(step.imAdresse);
+  if (!adresse) {
+    write("ERREUR — adresse source vide", "");
+    return { ok: false, error: `adresse source vide (« ${step.imAdresse || ""} » sur cette ligne)` };
+  }
+  const sel = {};
+  Object.entries(step.imSel || {}).forEach(([k, v]) => { if (v) sel[k] = rt(v); });
+
+  const res = await imLookupAddress(imChromeAdapter(tabId, timeoutMs), {
+    adresse, cp: rt(step.imCp), ville: rt(step.imVille), term: rt(step.imTerm),
+    mode: step.imMode || "nom", siteEmpty: step.imSiteEmpty !== false, sel,
+    url: rt(step.imUrl), timeoutMs, maxPages: step.imMaxPages || 30
+  });
+
+  // Journal : une ligne par recherche (total annoncé, lignes lues, pages, cache).
+  for (const sr of res.searches || []) {
+    scnLog(`   recherche ${sr.mode === "nom" ? "Nom" : "par adresse"} « ${res.term} » : ` +
+      `${sr.cached ? "(cache) " : ""}${sr.total === null ? "?" : sr.total} résultat(s), ` +
+      `${sr.rows} ligne(s) lue(s) sur ${sr.pages} page(s) → ${sr.matches} correspondance(s)` +
+      (sr.ims && sr.ims.length ? ` [${sr.ims.join(", ")}]` : ""), "");
+    (sr.warnings || []).forEach((w) => scnLog("   ⚠ " + w, "skip"));
+  }
+  const text = imStatusText(res);
+  if (res.status === "ERREUR") {
+    write(text, "");
+    return { ok: false, error: res.error + dur() };
+  }
+  write(text, res.status === "OK" ? res.ims[0] : "");
+  if (res.status === "Introuvable" && res.closest.length) {
+    scnLog("   adresses les plus proches : " + res.closest.map((r) => `${r.adresse} (${r.im})`).join(" ; "), "skip");
+  }
+  const what = `${adresse} → ${text}`;
+  if (res.status === "OK") {
+    const m = res.matches.find((r) => r.im === res.ims[0]);
+    return { ok: true, info: `${adresse} → ${res.ims[0]}${m ? ` (${m.adresse})` : ""}` + dur() };
+  }
+  switch (step.imOnMiss || "warn") {
+    case "error": return { ok: false, error: what + dur() };
+    case "skip": {
+      const n = Math.max(1, step.imMissSkip || 1);
+      return { ok: true, skip: n, info: what + ` → saut de ${n} étape(s)` + dur() };
+    }
+    default: return { ok: true, warn: true, info: what + dur() };
+  }
+}
+
 /* ---------- Moteur d'exécution ---------- */
 
 function scnTrunc(s, n = 45) {
@@ -5021,6 +5277,7 @@ function scnStepLabel(s) {
       return `SIGEO : adresse ${scnTrunc(s.sigeoAddressId || "?", 20)}${s.sigeoDryRun !== false ? " (simulation)" : ""}`;
     case "batchedit": return `Éditer par lots de ${s.batchSize || 10}`;
     case "sigeoSelector": return `Sélecteur SIGEO : ${sselChampLabel(s)} = « ${scnTrunc(s.sselValeur, 25)} »`;
+    case "sigeoIm": return `SIGEO : IM de « ${scnTrunc(s.imAdresse || "?", 30)} »${s.imMode === "adresse" ? " (par adresse)" : s.imMode === "both" ? " (nom + adresse)" : ""}`;
   }
   return s.type;
 }
@@ -5299,6 +5556,7 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
         };
       }
       case "sigeo": return await execSigeoStep(step, rowIdx, tabId);
+      case "sigeoIm": return await execSigeoImStep(step, rowIdx, tabId);
 
       case "batchedit": {
         if (!step.batchButton) return { ok: false, error: "sélecteur du bouton « Éditer » manquant — à renseigner dans la configuration de l'étape (champ « bouton à cliquer »)" };
@@ -5492,6 +5750,7 @@ function scenarioNeedsRow(steps) {
     (s.type === "input" && /\{[^{}]+\}/.test(s.inputValue || "")) ||
     (s.type === "pdfwrite") ||
     (s.type === "sigeoSelector" && /\{[^{}]+\}/.test(s.sselValeur || "")) ||
+    (s.type === "sigeoIm") ||
     (s.type === "pdfcheck" && (/\{[^{}]+\}/.test(s.pdfVal || "") ||
       (s.pdfDocMode === "match" && /\{[^{}]+\}/.test(s.pdfDocMatch || "")))) ||
     (s.type === "sigeo" && ([s.sigeoAddressId, s.sigeoTable, s.sigeoPays, s.sigeoCp, s.sigeoVille,
@@ -5503,6 +5762,7 @@ function scenarioNeedsRow(steps) {
 function scnBegin() {
   scnRunning = true;
   scnStopRequested = false;
+  imClearCache(); // cache des recherches IM : propre à une exécution
   $("runScenarioBtn").disabled = true;
   $("runScenarioLoopBtn").disabled = true;
   $("runScenarioMultiBtn").disabled = true;
