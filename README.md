@@ -19,8 +19,9 @@ deux modes :
 3. **Charger l'extension non empaquetée** → sélectionne ce dossier.
 4. Clique sur l'icône : le panneau latéral s'ouvre (raccourci `Ctrl+Shift+N`).
 
-> Le dossier `_backup_avant_fusion/` contient l'ancienne version OSA telle
-> qu'elle était avant la fusion. Tu peux le supprimer quand tout te convient.
+> Le dossier `backup_avant_fusion/` (local, non publié) contient l'ancienne
+> version OSA telle qu'elle était avant la fusion. Tu peux le supprimer quand
+> tout te convient.
 
 ## 1. Onglet Données
 
@@ -307,9 +308,10 @@ configuration OSA sauvegardée est migrée automatiquement dans le profil
 
 ## Test local
 
-Ouvre `test.html` dans Chrome : la page contient un formulaire complet pour
-tester la Saisie (avec IBAN découpé) et une recherche simulée avec tableau de
-résultats pour tester l'Extraction.
+Ouvre `test.html` dans Chrome (fichier local, non publié sur GitHub) : la page
+contient un formulaire complet pour tester la Saisie (avec IBAN découpé) et
+une recherche simulée avec tableau de résultats pour tester l'Extraction.
+Pour l'étape IM, ouvre `tests/fixtures/sigeo-im-mock.html`.
 
 ## Limites et vigilance
 
@@ -362,7 +364,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── lib/pdf.worker.min.js  Worker pdf.js
 ├── lib/ocr/           Tesseract.js (OCR local) : lib, worker, cœur wasm, langue fra
 ├── icons/             Icônes de l'extension
-├── test.html          Page de test locale des deux modes
+├── test.html          Page de test locale des deux modes (non publiée)
 └── tests/             Tests de l'étape IM (page SIGEO simulée, Playwright)
 ```
 

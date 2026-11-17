@@ -25,3 +25,9 @@ node_modules/
 MOCK_DATA*.xlsx
 MOCK_DATA*.csv
 test.html
+
+# Patchs déjà appliqués / restes de manipulations
+*.patch
+*.orig
+*.rej
+.probe_dir/
