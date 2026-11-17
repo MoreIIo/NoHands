@@ -202,57 +202,10 @@ deux modes :
    (Mandat MG → clic « Saisir les contreparties » → Compte ligne 1 → Débit →
    Crédit → Libellé), à compléter avec 🎯.
 
-12. **Étape de scénario « SIGEO : rechercher un IM »** : retrouve le
-   **N° E.I. (IM)** d'une adresse du fichier dans la recherche d'immeubles
-   SIGEO. Ouvre d'abord la page de recherche dans l'onglet cible (ou renseigne
-   son URL dans l'étape).
-
-   Pourquoi pas une simple recherche « Nom = adresse » : le champ **Nom** est
-   un « contient » sur un libellé libre, saisi de façon incohérente
-   (`LAMARCK "112"`, `14 LAMARCK`, `*98 LAMARCK***30/03/06****`) — la colonne
-   **Nom E.I.** n'est donc jamais utilisée pour la correspondance. En
-   revanche la colonne **Adresse** est normalisée
-   (`<num>[ BIS|TER] <TYPE VOIE> <NOM VOIE> <CP> <VILLE>`) : c'est elle qui
-   sert.
-
-   Déroulé pour chaque ligne :
-   1. **Parsing** de l'adresse source : numéros (`158/160` → 158 et 160,
-      `128 128BIS` → 128 et 128BIS), suffixe BIS/TER, type de voie (RUE, BD,
-      AV… abréviations comprises), nom de voie, CP/ville (dans l'adresse ou
-      dans des colonnes à part).
-   2. **Recherche** avec le seul **mot le plus distinctif** de la voie
-      (`LAMARCK`, `SULPICE`, `CHARONNE`, `GAULLE`…) dans le champ Nom, **Site
-      forcé à vide**. Variante : « Par adresse » (Adresse = ce mot, Code
-      postal si connu), ou **les deux** — le journal indique alors combien de
-      correspondances chaque mode apporte, pour choisir le meilleur.
-   3. Attente de la fin du postback (partiel ou rechargement complet), puis
-      **lecture de toutes les pages** (« Page suivante >> » jusqu'à ce qu'il
-      soit désactivé). Le total lu est comparé à « N Résultat(s) » (écart
-      signalé dans le journal).
-   4. **Filtrage** sur la colonne Adresse : numéro **et** suffixe exacts
-      (128 ≠ 128 BIS), type de voie s'il est donné des deux côtés, nom de
-      voie, CP/ville si fournis. Pour une plage `158/160`, l'adresse qui
-      contient les deux numéros est préférée.
-   5. **Statut** (colonne « Résultat IM » par défaut) :
-      `OK — IM0398636` (l'IM est aussi écrit dans la colonne « N° E.I. ») ;
-      `Multiple — IM0038854, IM0069522` (doublons : **jamais** de choix
-      arbitraire) ; `Introuvable — proches : …` (les 3 adresses les plus
-      proches, aussi dans le journal) ; `ERREUR — …`.
-   6. **Cache** : une voie déjà cherchée (ex. « LAMARCK ») n'est pas
-      relancée pour les lignes suivantes ; le cache est vidé au début de
-      chaque exécution.
-
-   Réglages : adresse / CP / ville (`{Colonne}`), mode de recherche, terme
-   forcé (vide = auto), Site vide, URL de la page, timeout par postback,
-   pages max, colonnes de sortie, comportement si Multiple / Introuvable
-   (avertir, erreur, ou sauter N étapes). Les champs du formulaire, le bouton
-   « Rechercher », la bascule « Par adresse » et le tableau sont détectés
-   automatiquement (libellés « Nom », « Site », « Adresse », « Code postal »,
-   en-têtes « N° E.I. » / « Adresse ») ; en cas d'échec, désigne-les avec 🎯
-   dans **Sélecteurs avancés**. **Tester l'étape** l'exécute seule sur la
-   ligne active et affiche ce qui a été trouvé sur la page.
-
 ## 3. Onglet Extraction (ex-OSA)
+
+**Type d'extraction** : *Standard* (ci-dessous) ou **Recherche IM SIGEO**
+(voir plus bas).
 
 1. **Conditions** : ignorer certaines lignes (ex : colonne X = "NON").
 2. **Champs de recherche** : sélecteur CSS (bouton 🎯) + colonne à taper.
@@ -263,6 +216,51 @@ deux modes :
    ou **nouvelle colonne** créée à droite du tableau.
 5. **Exécution** : plage de lignes, ▶ Démarrer / ■ Arrêter, journal et
    récapitulatif détaillé.
+
+### Recherche IM SIGEO (adresse → N° E.I.)
+
+Choisis **Recherche IM SIGEO** dans *Type d'extraction*, ouvre la recherche
+d'immeubles SIGEO dans l'onglet cible (ou renseigne son URL), indique la
+**colonne adresse** (et éventuellement CP / ville), puis **Démarrer**.
+
+Pourquoi pas une simple recherche « Nom = adresse » : le champ **Nom** est
+un « contient » sur un libellé libre, saisi de façon incohérente
+(`LAMARCK "112"`, `14 LAMARCK`, `*98 LAMARCK***30/03/06****`) — la colonne
+**Nom E.I.** n'est donc jamais utilisée pour la correspondance. La colonne
+**Adresse** est normalisée (`<num>[ BIS|TER] <TYPE VOIE> <NOM VOIE> <CP> <VILLE>`) :
+c'est elle qui sert.
+
+Pour chaque ligne :
+1. **Parsing** de l'adresse : numéros (`158/160` → 158 et 160, `128 128BIS` →
+   128 et 128BIS), suffixe BIS/TER, type de voie (RUE, BD, AV…), nom de
+   voie, CP/ville (dans l'adresse ou dans des colonnes à part).
+2. **Recherche** avec le seul **mot le plus distinctif** de la voie
+   (`LAMARCK`, `SULPICE`, `CHARONNE`…) dans le champ Nom, **Site forcé à
+   vide**. Variante : « Par adresse » (Adresse = ce mot, Code postal si
+   connu), ou **les deux** — le journal indique alors combien de
+   correspondances chaque mode apporte.
+3. Attente de la fin du postback (partiel ou complet), puis **lecture de
+   toutes les pages** (« Page suivante >> » jusqu'à désactivation) ; le total
+   lu est comparé à « N Résultat(s) ».
+4. **Filtrage** sur la colonne Adresse : numéro **et** suffixe exacts
+   (128 ≠ 128 BIS), type de voie s'il est donné des deux côtés, voie,
+   CP/ville si fournis. Plage `158/160` : l'adresse contenant les deux
+   numéros est préférée.
+5. **Résultat** : colonne *IM* (par défaut nouvelle colonne « N° E.I. »,
+   remplie seulement si OK) et colonne *Statut* (« Résultat IM ») :
+   `OK — IM0398636`, `Multiple — IM0038854, IM0069522` (doublons : **jamais**
+   de choix arbitraire), `Introuvable — proches : …` (3 adresses les plus
+   proches), `ERREUR — …`. Le récapitulatif compte les lignes « à vérifier ».
+   Si la colonne IM est la colonne adresse elle-même, une adresse non
+   résolue n'est jamais effacée.
+6. **Cache** : une voie déjà cherchée n'est pas relancée ; le cache est vidé
+   à chaque démarrage. L'estimation affiche le nombre de voies différentes.
+
+Les champs du formulaire (Nom — `#body_x_txtLabel_x_Label` —, Site,
+Adresse, Code postal), le bouton « Rechercher », la bascule « Par adresse »
+et le tableau sont détectés automatiquement ; sinon, désigne-les avec 🎯
+dans **Sélecteurs avancés**. **Tester sur la ligne de départ** lance la
+recherche sans rien écrire et affiche ce qui a été trouvé sur la page.
 
 ## 4. Onglet Export
 
@@ -311,7 +309,7 @@ configuration OSA sauvegardée est migrée automatiquement dans le profil
 Ouvre `test.html` dans Chrome (fichier local, non publié sur GitHub) : la page
 contient un formulaire complet pour tester la Saisie (avec IBAN découpé) et
 une recherche simulée avec tableau de résultats pour tester l'Extraction.
-Pour l'étape IM, ouvre `tests/fixtures/sigeo-im-mock.html`.
+Pour la recherche IM, ouvre `tests/fixtures/sigeo-im-mock.html`.
 
 ## Limites et vigilance
 
@@ -357,7 +355,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── sidepanel.html     Interface (Données / Saisie / Extraction / Export / Toolbox)
 ├── sidepanel.css      Styles
 ├── sidepanel.js       Logique complète
-├── sigeo-im.js        Étape « SIGEO : rechercher un IM » (parsing, recherche, pagination, filtrage)
+├── sigeo-im.js        Extraction « Recherche IM SIGEO » (parsing, recherche, pagination, filtrage)
 ├── update-check.js    Vérification de mise à jour via GitHub
 ├── lib/xlsx.full.min.js  SheetJS (lecture/écriture Excel)
 ├── lib/pdf.min.js     pdf.js (Mozilla) — analyse PDF de la Toolbox
@@ -365,18 +363,20 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── lib/ocr/           Tesseract.js (OCR local) : lib, worker, cœur wasm, langue fra
 ├── icons/             Icônes de l'extension
 ├── test.html          Page de test locale des deux modes (non publiée)
-└── tests/             Tests de l'étape IM (page SIGEO simulée, Playwright)
+└── tests/             Tests de la recherche IM (page SIGEO simulée, Playwright)
 ```
 
-Tests de l'étape IM (Node + Playwright + Chrome) :
+Tests de la recherche IM (Node + Playwright + Chrome) :
 `node tests/sigeo-im.e2e.js` (logique + page simulée en postback partiel
-et complet) et `node tests/sigeo-im.panel.e2e.js` (étape créée et exécutée
-dans le vrai panneau). Ouvrir `tests/fixtures/sigeo-im-mock.html` dans
-Chrome permet aussi d'essayer l'étape à la main.
+et complet) et `node tests/sigeo-im.panel.e2e.js` (onglet Extraction du
+vrai panneau). Ouvrir `tests/fixtures/sigeo-im-mock.html` dans Chrome
+permet aussi d'essayer la recherche à la main.
 
-**Version** : 2.11.0 — étape **SIGEO : rechercher un IM** (adresse →
-N° E.I. : recherche par nom de voie, toutes les pages, correspondance sur la
-colonne Adresse, statuts OK / Multiple / Introuvable, cache par voie).
+**Version** : 2.11.1 — la **Recherche IM SIGEO** passe dans l'onglet
+**Extraction** (type d'extraction dédié) au lieu du scénario de Saisie.
+2.11.0 — recherche IM SIGEO (adresse → N° E.I. : recherche par nom de voie,
+toutes les pages, correspondance sur la colonne Adresse, statuts OK /
+Multiple / Introuvable, cache par voie).
 2.8.0 — scénario : nouvelle étape **Saisir un champ** (un seul
 champ name/id/classe, valeur fixe ou `{Colonne}`, option « puis appuyer sur
 Entrée ») ; l'étape **Cliquer sur un élément** peut **appuyer sur Entrée** au

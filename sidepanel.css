@@ -547,7 +547,6 @@ input[type="file"]::file-selector-button {
 .scn-step[data-type="sigeo"]     { --scn-c: #4ade80; }
 .scn-step[data-type="batchedit"] { --scn-c: #2dd4bf; }
 .scn-step[data-type="sigeoSelector"] { --scn-c: #a3e635; }
-.scn-step[data-type="sigeoIm"]   { --scn-c: #34d399; }
 .scn-icon {
   flex: none; width: 24px; height: 24px;
   display: inline-flex; align-items: center; justify-content: center;
@@ -579,7 +578,6 @@ input[type="file"]::file-selector-button {
 .scn-step:not([data-type="batchedit"]) .scn-only-batchedit { display: none; }
 .scn-step:not([data-type="input"]) .scn-only-input { display: none; }
 .scn-step:not([data-type="sigeoSelector"]) .scn-only-ssel { display: none; }
-.scn-step:not([data-type="sigeoIm"]) .scn-only-im { display: none; }
 
 /* ---------- Toolbox PDF (bêta) ---------- */
 .beta-badge {
@@ -746,8 +744,12 @@ input[type="file"]::file-selector-button {
 .ssel-journal-table td.err { color: var(--err); white-space: normal; }
 .ssel-journal-table td.ok { color: var(--ok); }
 
-/* Étape « SIGEO : rechercher un IM » — sélecteurs avancés repliables */
-.scn-im-adv { margin: 4px 0 6px; font-size: 12px; }
-.scn-im-adv > summary { cursor: pointer; color: var(--text-dim); padding: 2px 0; }
-.scn-im-adv[open] > summary { margin-bottom: 4px; }
-.scn-im-adv .scn-row { margin-top: 3px; }
+/* Extraction « Recherche IM SIGEO » */
+.radio-row.radio-col { flex-direction: column; align-items: flex-start; gap: 6px; }
+.imx-adv { margin: 6px 0 8px; font-size: 12px; }
+.imx-adv > summary { cursor: pointer; color: var(--text-dim); padding: 2px 0; }
+.imx-adv .field-row { margin-top: 4px; }
+.imx-sel-label { min-width: 135px; }
+.imx-test-result { word-break: break-word; }
+.imx-test-result.ok { color: var(--ok); }
+.imx-test-result.err { color: var(--err); }

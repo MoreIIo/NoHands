@@ -41,7 +41,7 @@
       </tr>
     </table>
     <fieldset id="fsNom"><legend>Par nom</legend>
-      <table><tr><td>Nom :</td><td><input type="text" id="body_x_txtNom_x_Nom" name="body:x:txtNom:x:Nom" onchange="javascript:setTimeout('__doPostBack(\'txtNom\',\'\')', 0)"></td></tr></table>
+      <table><tr><td>Nom :</td><td><input type="text" id="body_x_txtLabel_x_Label" name="body:x:txtLabel:x:Label" onchange="javascript:setTimeout('__doPostBack(\'txtNom\',\'\')', 0)"></td></tr></table>
     </fieldset>
     <fieldset id="fsAdr" class="hidden"><legend>Par adresse</legend>
       <table>
@@ -106,7 +106,7 @@ const fold = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toU
 function readCriteria() {
   return {
     mode: document.getElementById("rbAdr").checked ? "adresse" : "nom",
-    nom: document.getElementById("body_x_txtNom_x_Nom").value,
+    nom: document.getElementById("body_x_txtLabel_x_Label").value,
     adr: document.getElementById("body_x_txtAdr_x_Adresse").value,
     cp: document.getElementById("body_x_txtCP_x_CP").value,
     site: document.getElementById("body_x_selSite_x_Site").value
@@ -148,7 +148,7 @@ function render() {
 }
 function pageUrl(p) {
   const c = q;
-  const u = new URLSearchParams({ full: "1", page: String(p), mode: c.mode, "body:x:txtNom:x:Nom": c.nom,
+  const u = new URLSearchParams({ full: "1", page: String(p), mode: c.mode, "body:x:txtLabel:x:Label": c.nom,
     "body:x:txtAdr:x:Adresse": c.adr, "body:x:txtCP:x:CP": c.cp, "body:x:selSite:x:Site": c.site });
   return "?" + u.toString();
 }
@@ -191,7 +191,7 @@ if (FULL) {
   document.getElementById("fullFlag").value = "1";
   if (sp.get("mode") === "adresse") document.getElementById("rbAdr").checked = true;
   toggleMode();
-  document.getElementById("body_x_txtNom_x_Nom").value = sp.get("body:x:txtNom:x:Nom") || "";
+  document.getElementById("body_x_txtLabel_x_Label").value = sp.get("body:x:txtLabel:x:Label") || "";
   document.getElementById("body_x_txtAdr_x_Adresse").value = sp.get("body:x:txtAdr:x:Adresse") || "";
   document.getElementById("body_x_txtCP_x_CP").value = sp.get("body:x:txtCP:x:CP") || "";
   if (sp.has("body:x:selSite:x:Site")) document.getElementById("body_x_selSite_x_Site").value = sp.get("body:x:selSite:x:Site");

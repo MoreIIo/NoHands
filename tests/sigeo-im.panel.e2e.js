@@ -1,7 +1,6 @@
-// Test d'intégration du panneau : l'étape « SIGEO : rechercher un IM »
-// est créée dans la vraie interface (sidepanel.html), exécutée par le vrai
-// moteur de scénario, chrome.scripting étant redirigé vers la page SIGEO
-// simulée (tests/fixtures/sigeo-im-mock.html).
+// Test d'intégration du panneau : onglet Extraction, type « Recherche IM
+// SIGEO ». Le vrai sidepanel.html est chargé, chrome.scripting étant
+// redirigé vers la page SIGEO simulée (tests/fixtures/sigeo-im-mock.html).
 //   NODE_PATH=… node tests/sigeo-im.panel.e2e.js
 const path = require("path");
 const assert = require("assert");
@@ -47,7 +46,11 @@ window.chrome = {
   await panel.goto(PANEL);
   await panel.waitForTimeout(500);
 
-  // Données + étape
+  // L'étape n'existe plus dans le scénario de Saisie
+  const inScenario = await panel.evaluate(() => { addScenarioStep({}); const r = !!document.querySelector('.scn-type option[value="sigeoIm"]'); $("scenarioSteps").innerHTML = ""; return r; });
+  assert.strictEqual(inScenario, false, "plus d'étape IM dans la Saisie");
+
+  // Données (avant le choix du type : les listes se remplissent avec les colonnes)
   await panel.evaluate(() => {
     state.headerMode = "yes";
     state.rows = [
@@ -60,45 +63,42 @@ window.chrome = {
       ["", ""]
     ];
     renderColumns();
-    addScenarioStep({ type: "sigeoIm", imAdresse: "{Adresse}", imVille: "{Ville}", imTimeout: 15000 });
+    showTab("extraction");
   });
-  // Visibilité : seuls les champs de l'étape IM sont affichés
-  const vis = await panel.evaluate(() => {
-    const st = document.querySelector(".scn-step");
-    // Visible à l'intérieur de l'étape (le panneau « Saisie » peut être masqué).
-    const v = (sel) => {
-      for (let e = st.querySelector(sel); e && e !== st; e = e.parentElement) {
-        if (e.hidden || getComputedStyle(e).display === "none") return false;
-      }
-      return !!st.querySelector(sel);
-    };
-    return { im: v(".scn-im-adresse"), test: v(".scn-im-test"), sigeo: v(".scn-sigeo-cp"), goto: v(".scn-goto-url"),
-             icon: st.querySelector(".scn-icon use").getAttribute("href"), label: scnStepLabel(getScenarioSteps()[0]) };
-  });
+  // Valeurs par défaut : IM et statut vers de NOUVELLES colonnes (jamais la colonne A)
+  const defaults = await panel.evaluate(() => getImxConfig());
+  console.log("défauts :", JSON.stringify(defaults));
+  assert.strictEqual(defaults.imCol, "N° E.I.");
+  assert.strictEqual(defaults.statusCol, "Résultat IM");
+  assert.strictEqual(defaults.adrCol, "Adresse");
+
+  // Choix du type « Recherche IM SIGEO » via l'interface
+  await panel.check('input[name="extractKind"][value="sigeoIm"]');
+  await panel.selectOption("#imxVilleCol", "Ville");
+  const vis = await panel.evaluate(() => ({ im: !$("imExtractBox").hidden, std: !$("stdExtractBox").hidden, est: $("extractEstimate").textContent }));
   console.log("UI :", JSON.stringify(vis));
-  assert.ok(vis.im && vis.test && !vis.sigeo && !vis.goto, "visibilité des champs");
-  assert.strictEqual(vis.icon, "#icon-step-sigeoIm");
+  assert.ok(vis.im && !vis.std, "bloc IM visible, bloc standard masqué");
+  assert.ok(/2 voies différentes/.test(vis.est), "estimation par voie");
 
-  const step = await panel.evaluate(() => getScenarioSteps()[0]);
-  assert.strictEqual(step.type, "sigeoIm");
-  assert.strictEqual(step.imResultCol, "Résultat IM");
-  assert.strictEqual(step.imImCol, "N° E.I.");
-  assert.strictEqual(step.imMode, "nom");
+  // Bouton « Tester sur la ligne de départ » (n'écrit rien)
+  await panel.fill("#startRow", "2");
+  await panel.click("#imxTestBtn");
+  await panel.waitForFunction(() => !$("imxTestBtn").disabled && /→/.test($("imxTestResult").textContent), null, { timeout: 60000 });
+  const testTxt = await panel.textContent("#imxTestResult");
+  console.log("test :", testTxt);
+  assert.ok(testTxt.includes("OK — IM0398636"));
+  assert.strictEqual(await panel.evaluate(() => state.rows[0].length), 2, "le test n'écrit rien");
 
-  // Exécution en boucle via le moteur réel
-  await panel.evaluate(async () => {
-    const steps = getScenarioSteps();
-    scnBegin();
-    for (let i = 1; i < state.rows.length; i++) await runScenarioForRow(i, 1, steps, `L${i + 1} · `);
-    scnFinish();
-  });
-  const out = await panel.evaluate(() => ({ rows: state.rows, log: $("scnLog").innerText, calls: window.__calls }));
+  // Démarrer
+  await panel.click("#startBtn");
+  await panel.waitForFunction(() => !isRunning && !$("startBtn").disabled && /Terminé/.test($("log").textContent), null, { timeout: 120000 });
+  const out = await panel.evaluate(() => ({ rows: state.rows, log: $("log").innerText, recap: $("resultSummary").innerText }));
   console.log(out.rows.map((r) => r.join(" | ")).join("\n"));
-  assert.ok(out.rows.every((r) => r.length <= 4), "pas de colonne parasite");
-  console.log("--- journal ---\n" + out.log);
+  console.log("--- journal ---\n" + out.log + "\n--- récap ---\n" + out.recap);
   const H = out.rows[0];
   const ri = H.indexOf("Résultat IM"), ii = H.indexOf("N° E.I.");
-  assert.ok(ri > 0 && ii > 0, "colonnes créées");
+  assert.ok(ri > 1 && ii > 1, "colonnes créées à droite");
+  assert.ok(out.rows.every((r) => r.length <= 4), "pas de colonne parasite");
   assert.strictEqual(out.rows[1][ii], "IM0398636");
   assert.strictEqual(out.rows[1][ri], "OK — IM0398636");
   assert.strictEqual(out.rows[2][ri], "Multiple — IM0038854, IM0069522");
@@ -106,10 +106,32 @@ window.chrome = {
   assert.ok(out.rows[3][ri].startsWith("Introuvable — proches : 8 BOULEVARD LAMARCK 18000 BOURGES"));
   assert.strictEqual(out.rows[4][ii], "IM0280028");
   assert.strictEqual(out.rows[5][ii], "IM0158160");
-  assert.strictEqual(out.rows[6][ri], "ERREUR — adresse source vide");
+  assert.ok(/3 OK · 0 erreur\(s\) · 2 à vérifier · 1 ignorée/.test(out.recap), "récap : " + out.recap);
   const searches = await mock.evaluate(() => window.__searches);
-  assert.strictEqual(searches, 2, "LAMARCK + SULPICE seulement (cache)");
+  // test (LAMARCK) + exécution (LAMARCK, SULPICE) : le cache est vidé au démarrage
+  assert.strictEqual(searches, 3);
+
+  // Colonne IM = colonne adresse : un statut non OK n'efface pas l'adresse
+  await panel.evaluate(() => {
+    state.rows = [["Adresse"], ["129 RUE LAMARCK"], ["137 RUE LAMARCK"]];
+    renderColumns();
+    imxSetTarget("imxImCol", "imxImColNew", "Adresse", "target");
+    imxSetTarget("imxStatusCol", "imxStatusColNew", "", "targetopt");
+    fillColumnSelect($("imxVilleCol"), "", colSelectExtras("optional"));
+    $("log").innerHTML = "";
+  });
+  await panel.click("#startBtn");
+  await panel.waitForFunction(() => !isRunning && /Terminé/.test($("log").textContent), null, { timeout: 120000 });
+  const same = await panel.evaluate(() => state.rows);
+  console.log("même colonne :", JSON.stringify(same));
+  assert.deepStrictEqual(same, [["Adresse"], ["IM0398636"], ["137 RUE LAMARCK"]]);
+
+  // Profil : la configuration IM est sauvegardée / restaurée
+  const prof = await panel.evaluate(() => { const c = buildProfileConfig(); applyProfileConfig(c); return { kind: c.extraction.kind, im: c.extraction.im, after: extractKind() }; });
+  assert.strictEqual(prof.kind, "sigeoIm");
+  assert.strictEqual(prof.after, "sigeoIm");
+
   assert.deepStrictEqual(errors, [], "erreurs JS du panneau");
-  console.log(`\n✓ panneau OK (${searches} recherches lancées, ${out.calls} injections)`);
+  console.log("\n✓ onglet Extraction OK");
   await browser.close();
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -1,7 +1,7 @@
 /* ====================================================================
  * NoHands OSA — Recherche d'immeuble (IM) dans SIGEO à partir d'une adresse
  * --------------------------------------------------------------------
- * Étape de scénario « SIGEO : rechercher un IM ».
+ * Onglet Extraction, type « Recherche IM SIGEO » (adresse → N° E.I.).
  *
  * Constat (test manuel, recherche Nom = « LAMARCK », Site vide → 66
  * résultats sur 5 pages de 15) :
@@ -409,7 +409,7 @@ function imPageOp(cfg) {
   }
 
   const FIELD_RULES = {
-    nom: { tags: "text", label: /^NOM\b(?!.*PRENOM)/, id: /(^|[_:$])(TXT)?(NOM|NAME|LIBELLE)([_:$]|$)/ },
+    nom: { tags: "text", label: /^NOM\b(?!.*PRENOM)/, id: /(^|[_:$])(TXT)?(NOM|NAME|LIBELLE|LABEL)([_:$]|$)/ }, // SIGEO : #body_x_txtLabel_x_Label
     site: { tags: "select", label: /^SITE\b/, id: /(^|[_:$])(SEL|DDL|LST|CBO|CMB)?SITES?([_:$]|$)/ },
     adresse: { tags: "text", label: /^(ADRESSE|VOIE)\b/, id: /(^|[_:$])(TXT)?(ADRESSE|ADR|VOIE|RUE)([_:$]|$)/ },
     cp: { tags: "text", label: /^(CODE\s*POSTAL|C\.?\s*P\.?)$|^CODE\s*POSTAL\b/, id: /(^|[_:$])(TXT)?(CP|CODEPOSTAL|CODE_POSTAL|ZIP)([_:$]|$)/ }

@@ -472,14 +472,25 @@ function fillColumnSelect(sel, current, extra = []) {
       sel.appendChild(opt);
     }
     sel.value = current;
+  } else if (extra.some((e) => e.value === "")) {
+    sel.value = ""; // listes optionnelles : « aucune » par défaut
   }
+}
+
+// Options ajoutées selon le genre de liste de colonnes (data-colselect).
+function colSelectExtras(kind) {
+  const other = { value: "__other__", label: "➕ Autre (lettre ou nouvelle colonne)…" };
+  if (kind === "target") return [other];
+  if (kind === "targetopt") return [{ value: "", label: "— ne pas écrire —" }, other];
+  if (kind === "optional") return [{ value: "", label: "— aucune —" }];
+  return [];
 }
 
 function refreshAllColumnSelects() {
   document.querySelectorAll("select[data-colselect]").forEach((sel) => {
-    const extra = sel.dataset.colselect === "target" ? [{ value: "__other__", label: "➕ Autre (lettre ou nouvelle colonne)…" }] : [];
-    fillColumnSelect(sel, sel.value, extra);
-    if (sel.dataset.colselect === "target") {
+    const kind = sel.dataset.colselect;
+    fillColumnSelect(sel, sel.value, colSelectExtras(kind));
+    if (kind === "target" || kind === "targetopt") {
       const inp = sel.parentElement.querySelector(".new-col-input");
       if (inp) inp.style.display = sel.value === "__other__" ? "block" : "none";
     }
@@ -2804,6 +2815,7 @@ function estimateExtractionMs() {
 function updateExtractEstimate() {
   const el = $("extractEstimate");
   if (!el || isRunning) return;
+  if (extractKind() === "sigeoIm") { el.textContent = imxEstimateText(); return; }
   const est = estimateExtractionMs();
   if (!est || !est.total) { el.textContent = ""; return; }
   el.textContent = `Estimation : ~${formatDuration(est.totalMs)} pour ${est.total} ligne${est.total > 1 ? "s" : ""} (~${formatDuration(est.perRowMs)}/ligne).`;
@@ -2831,6 +2843,7 @@ function resolveOutputTarget(ref, createdCols) {
 
 async function runAutomation() {
   if (!state.rows.length) { logLine("Charge d'abord des données (onglet Données).", "err"); return; }
+  if (extractKind() === "sigeoIm") return runImExtraction();
 
   const conditions = getConditions();
   const outputs = getOutputs();
@@ -3061,6 +3074,313 @@ async function runAutomation() {
   updateDoneMarkers();
 }
 
+/* ---------- Extraction « Recherche IM SIGEO » (adresse → N° E.I.) ----------
+   Logique (parsing, recherche, pagination, filtrage, cache) : sigeo-im.js.
+   Ici : l'interface de l'onglet Extraction, l'adaptateur chrome.* et la
+   boucle sur les lignes. */
+
+function extractKind() {
+  const r = document.querySelector('input[name="extractKind"]:checked');
+  return r ? r.value : "standard";
+}
+
+function syncExtractKindUI() {
+  const im = extractKind() === "sigeoIm";
+  $("imExtractBox").hidden = !im;
+  $("stdExtractBox").hidden = im;
+  updateExtractEstimate();
+}
+
+// Valeur d'une liste de colonnes cible (+ champ « nouvelle colonne »).
+function imxTargetValue(selId, newId) {
+  const v = $(selId).value;
+  return v === "__other__" ? $(newId).value.trim() : v;
+}
+function imxSetTarget(selId, newId, value, kind) {
+  const known = !value || getColumns().some((c) => c.name === value);
+  fillColumnSelect($(selId), known ? value : "__other__", colSelectExtras(kind));
+  if (!known) $(newId).value = value;
+  $(newId).style.display = $(selId).value === "__other__" ? "block" : "none";
+}
+
+function getImxConfig() {
+  return {
+    adrCol: $("imxAdrCol").value,
+    cpCol: $("imxCpCol").value,
+    villeCol: $("imxVilleCol").value,
+    mode: $("imxMode").value,
+    term: $("imxTerm").value.trim(),
+    siteEmpty: $("imxSiteEmpty").checked,
+    url: $("imxUrl").value.trim(),
+    timeout: parseInt($("imxTimeout").value, 10) || 20000,
+    maxPages: parseInt($("imxMaxPages").value, 10) || 30,
+    imCol: imxTargetValue("imxImCol", "imxImColNew"),
+    statusCol: imxTargetValue("imxStatusCol", "imxStatusColNew"),
+    sel: Object.fromEntries(Array.from(document.querySelectorAll(".imx-sel"))
+      .map((i) => [i.dataset.k, i.value.trim()]).filter(([, v]) => v))
+  };
+}
+
+let imxConfigApplied = false;
+function applyImxConfig(im, kind) {
+  imxConfigApplied = true;
+  const r = document.querySelector(`input[name="extractKind"][value="${kind === "sigeoIm" ? "sigeoIm" : "standard"}"]`);
+  if (r) r.checked = true;
+  const cols = getColumns();
+  const guessAdr = (cols.find((c) => /adresse/i.test(c.name)) || cols[0] || {}).name || "";
+  fillColumnSelect($("imxAdrCol"), im.adrCol || guessAdr);
+  fillColumnSelect($("imxCpCol"), im.cpCol || "", colSelectExtras("optional"));
+  fillColumnSelect($("imxVilleCol"), im.villeCol || "", colSelectExtras("optional"));
+  $("imxMode").value = im.mode || "nom";
+  $("imxTerm").value = im.term || "";
+  $("imxSiteEmpty").checked = im.siteEmpty !== false;
+  $("imxUrl").value = im.url || "";
+  $("imxTimeout").value = im.timeout || 20000;
+  $("imxMaxPages").value = im.maxPages || 30;
+  imxSetTarget("imxImCol", "imxImColNew", im.imCol ?? "N° E.I.", "target");
+  imxSetTarget("imxStatusCol", "imxStatusColNew", im.statusCol ?? "Résultat IM", "targetopt");
+  document.querySelectorAll(".imx-sel").forEach((i) => { i.value = (im.sel || {})[i.dataset.k] || ""; });
+  if (im.sel && Object.keys(im.sel).length) $("imxAdv").open = true;
+  syncExtractKindUI();
+}
+
+// Estimation : une recherche (≈ pages × postback) par voie différente ;
+// les lignes suivantes de la même voie sortent du cache.
+function imxEstimateText() {
+  if (!state.rows.length) return "";
+  const cfg = getImxConfig();
+  const adrIdx = colIndexByName(cfg.adrCol);
+  if (adrIdx < 0) return "";
+  const startIdx = Math.max(0, (parseInt($("startRow").value, 10) || (dataStartIdx() + 1)) - 1);
+  const endRowInput = $("endRow").value.trim();
+  const endIdx = Math.min(state.rows.length - 1, endRowInput ? parseInt(endRowInput, 10) - 1 : state.rows.length - 1);
+  const terms = new Set();
+  let n = 0;
+  for (let i = startIdx; i <= endIdx; i++) {
+    const row = state.rows[i] || [];
+    const a = getCellByIndex(row, adrIdx);
+    if (!a.trim()) continue;
+    n++;
+    const t = cfg.term ? imFold(resolveRowTemplate(cfg.term, row)) : imPickSearchTerm(imParseSource(a));
+    if (t) terms.add(t);
+  }
+  if (!n) return "";
+  const perSearch = (cfg.mode === "both" ? 2 : 1) * 4000; // ~3 pages × postback
+  return `Estimation : ${n} ligne${n > 1 ? "s" : ""}, ${terms.size} voie${terms.size > 1 ? "s" : ""} différente${terms.size > 1 ? "s" : ""} à chercher → ~${formatDuration(terms.size * perSearch)} (selon le nombre de pages de résultats).`;
+}
+
+// Adaptateur chrome.scripting pour l'orchestrateur de sigeo-im.js.
+// world MAIN : imPageOp lit Sys.WebForms.PageRequestManager (postback en cours ?).
+function imChromeAdapter(tabId, timeoutMs) {
+  return {
+    execAll: async (cfg) => {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true }, world: "MAIN", func: imPageOp, args: [cfg]
+      });
+      return (res || []).map((r) => ({ frameId: r.frameId, result: r.result }));
+    },
+    exec: async (frameId, cfg) => {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [frameId] }, world: "MAIN", func: imPageOp, args: [cfg]
+      });
+      if (!res || !res[0]) throw new Error("frame injoignable");
+      return res[0].result;
+    },
+    navigate: (url) => navigateTabAndWait(tabId, url, true, timeoutMs),
+    sleep: (ms) => sleep(ms),
+    stopped: () => stopRequested,
+    log: (t, c) => logLine(t, c)
+  };
+}
+
+// Diagnostic court : ce que la page de recherche expose.
+async function imDiagnose(tabId, cfg) {
+  try {
+    const res = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true }, world: "MAIN", func: imPageOp,
+      args: [{ op: "probe", mode: cfg.mode === "adresse" ? "adresse" : "nom", sel: cfg.sel || {} }]
+    });
+    const pr = (res || []).map((r) => r.result).filter(Boolean)
+      .sort((a, b) => (b.ok ? 1 : 0) - (a.ok ? 1 : 0))[0];
+    if (!pr) return "";
+    const f = pr.fields;
+    return `Page : Nom ${f.nom || "✗"} · Site ${f.site || "✗"} · Adresse ${f.adresse || "✗"} · CP ${f.cp || "✗"} · ` +
+      `Rechercher ${pr.submit || "✗"} · tableau ${pr.table || "✗"}${pr.count !== null ? ` (${pr.count} résultat(s))` : ""}` +
+      `${pr.next ? ` · page suivante ${pr.next}` : ""}`;
+  } catch (e) {
+    return "diagnostic impossible : " + (e.message || e);
+  }
+}
+
+// Paramètres de recherche pour une ligne.
+function imxLookupParams(cfg, row) {
+  const cell = (name) => (name ? getCellByIndex(row, colIndexByName(name)) : "");
+  const sel = {};
+  Object.entries(cfg.sel || {}).forEach(([k, v]) => { if (v) sel[k] = resolveRowTemplate(v, row); });
+  return {
+    adresse: cell(cfg.adrCol).trim(),
+    cp: cell(cfg.cpCol), ville: cell(cfg.villeCol),
+    term: cfg.term ? resolveRowTemplate(cfg.term, row) : "",
+    mode: cfg.mode, siteEmpty: cfg.siteEmpty, sel,
+    url: resolveRowTemplate(cfg.url, row), timeoutMs: Math.max(2000, cfg.timeout), maxPages: cfg.maxPages
+  };
+}
+
+function imxLogSearches(rowNum, res) {
+  for (const sr of res.searches || []) {
+    logLine(`Ligne ${rowNum} : recherche ${sr.mode === "nom" ? "Nom" : "par adresse"} « ${res.term} » — ` +
+      `${sr.cached ? "(cache) " : ""}${sr.total === null ? "?" : sr.total} résultat(s), ` +
+      `${sr.rows} ligne(s) lue(s) sur ${sr.pages} page(s) → ${sr.matches} correspondance(s)` +
+      (sr.ims && sr.ims.length ? ` [${sr.ims.join(", ")}]` : ""), "");
+    (sr.warnings || []).forEach((w) => logLine(`Ligne ${rowNum} : ⚠ ${w}`, "skip"));
+  }
+}
+
+async function runImExtraction() {
+  const cfg = getImxConfig();
+  const conditions = getConditions();
+  const adrIdx = colIndexByName(cfg.adrCol);
+  if (adrIdx < 0) { logLine("Recherche IM : choisis la colonne qui contient l'adresse.", "err"); return; }
+  if (!cfg.imCol && !cfg.statusCol) { logLine("Recherche IM : choisis au moins une colonne où écrire (IM ou statut).", "err"); return; }
+  for (const c of [cfg.cpCol, cfg.villeCol]) {
+    if (c && colIndexByName(c) < 0) { logLine(`Recherche IM : colonne introuvable : ${c}`, "err"); return; }
+  }
+
+  const startRowInput = parseInt($("startRow").value, 10) || (dataStartIdx() + 1);
+  const endRowInput = $("endRow").value.trim();
+  const startIdx = Math.max(0, startRowInput - 1);
+  const endIdx = Math.min(state.rows.length - 1, endRowInput ? parseInt(endRowInput, 10) - 1 : state.rows.length - 1);
+
+  let tabId;
+  try { tabId = await resolveTargetTabId(); }
+  catch (err) { logLine(err.message, "err"); return; }
+
+  const createdCols = {};
+  const imIdx = cfg.imCol ? resolveOutputTarget(cfg.imCol, createdCols) : -1;
+  const stIdx = cfg.statusCol ? resolveOutputTarget(cfg.statusCol, createdCols) : -1;
+  if (Object.keys(createdCols).length) renderColumns();
+
+  isRunning = true;
+  hasStartedRun = true;
+  stopRequested = false;
+  imClearCache(); // une voie n'est cherchée qu'une fois PAR exécution
+  $("startBtn").disabled = true;
+  $("stopBtn").disabled = false;
+  $("log").innerHTML = "";
+  runLog = [];
+  lastRunOutputs = [{ col: cfg.statusCol || "Statut" }, { col: cfg.imCol || "IM" }];
+  const total = Math.max(0, endIdx - startIdx + 1);
+  let done = 0;
+  const runStart = Date.now();
+  runDurationMs = 0;
+  setProgress(0, total);
+  $("extractEstimate").textContent = "";
+  updateRunTiming(0, total, runStart);
+  updateDoneMarkers();
+  const ad = imChromeAdapter(tabId, Math.max(2000, cfg.timeout));
+  const tick = () => { done++; setProgress(done, total); updateRunTiming(done, total, runStart); };
+
+  for (let idx = startIdx; idx <= endIdx; idx++) {
+    if (stopRequested) { logLine("Arrêté par l'utilisateur.", "skip"); break; }
+    const row = state.rows[idx] = state.rows[idx] || [];
+    const rowNum = idx + 1;
+    if (rowMatchesSkipCondition(row, conditions)) {
+      logLine(`Ligne ${rowNum} : ignorée (condition).`, "skip");
+      runLog.push({ row: rowNum, search: "", values: [], status: "skip", note: "Condition" });
+      tick(); continue;
+    }
+    const p = imxLookupParams(cfg, row);
+    if (!p.adresse) {
+      logLine(`Ligne ${rowNum} : ignorée (adresse vide).`, "skip");
+      runLog.push({ row: rowNum, search: "", values: [], status: "skip", note: "Adresse vide" });
+      tick(); continue;
+    }
+    let res;
+    try { res = await imLookupAddress(ad, p); }
+    catch (e) { res = { status: "ERREUR", ims: [], closest: [], error: e.message || String(e) }; }
+    if (stopRequested && res.status === "ERREUR") { logLine("Arrêté par l'utilisateur.", "skip"); break; }
+    imxLogSearches(rowNum, res);
+    const text = imStatusText(res);
+    const im = res.status === "OK" ? res.ims[0] : "";
+    if (stIdx >= 0) setCellByIndex(row, stIdx, text);
+    if (imIdx >= 0 && (im || imIdx !== adrIdx)) setCellByIndex(row, imIdx, im); // ne jamais effacer l'adresse source
+    if (res.status === "OK") {
+      const m = (res.matches || []).find((r) => r.im === im);
+      logLine(`Ligne ${rowNum} (${p.adresse}) : OK — ${im}${m ? ` (${m.adresse})` : ""}`, "ok");
+      runLog.push({ row: rowNum, search: p.adresse, values: [text, im], status: "ok" });
+    } else if (res.status === "ERREUR") {
+      logLine(`Ligne ${rowNum} (${p.adresse}) : erreur — ${res.error}`, "err");
+      runLog.push({ row: rowNum, search: p.adresse, values: [text, ""], status: "err", note: res.error });
+    } else {
+      logLine(`Ligne ${rowNum} (${p.adresse}) : ${text}`, "skip");
+      // Multiple / Introuvable : à vérifier à la main (libellé dédié dans le récap).
+      runLog.push({ row: rowNum, search: p.adresse, values: [text, ""], status: "skip", label: res.status, check: true });
+    }
+    tick();
+  }
+
+  runDurationMs = Date.now() - runStart;
+  isRunning = false;
+  $("startBtn").disabled = false;
+  $("stopBtn").disabled = true;
+  $("progressTiming").textContent = `Terminé en ${formatDuration(runDurationMs)}`;
+  logLine(`Terminé en ${formatDuration(runDurationMs)}.`, "ok");
+  renderResultSummary();
+  updateExtractEstimate();
+  renderPreview();
+  persistSession();
+  updateDoneMarkers();
+}
+
+// Interface : type d'extraction, listes « nouvelle colonne », 🎯, test.
+document.querySelectorAll('input[name="extractKind"]').forEach((r) => r.addEventListener("change", syncExtractKindUI));
+[["imxImCol", "imxImColNew"], ["imxStatusCol", "imxStatusColNew"]].forEach(([s, n]) => {
+  $(s).addEventListener("change", () => { $(n).style.display = $(s).value === "__other__" ? "block" : "none"; });
+});
+["imxAdrCol", "imxTerm", "imxMode"].forEach((id) => $(id).addEventListener("change", updateExtractEstimate));
+document.querySelectorAll(".imx-pick").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const picked = await pickTargetOnActiveTab();
+    if (!picked) return;
+    const v = picked.selector || picked.name || picked.id;
+    if (!v) return;
+    document.querySelector(`.imx-sel[data-k="${btn.dataset.k}"]`).value = v;
+    persistWorkingConfig();
+  });
+});
+$("imxTestBtn").addEventListener("click", async () => {
+  const out = $("imxTestResult");
+  if (isRunning) { showStatus("Une extraction est en cours.", "error"); return; }
+  const cfg = getImxConfig();
+  const idx = Math.max(0, (parseInt($("startRow").value, 10) || (dataStartIdx() + 1)) - 1);
+  const row = state.rows[idx];
+  if (!row) { out.className = "hint imx-test-result err"; out.textContent = "✗ Charge d'abord des données."; return; }
+  const p = imxLookupParams(cfg, row);
+  if (!p.adresse) { out.className = "hint imx-test-result err"; out.textContent = `✗ Ligne ${idx + 1} : adresse vide (colonne « ${cfg.adrCol} »).`; return; }
+  out.className = "hint imx-test-result";
+  out.textContent = `Recherche pour la ligne ${idx + 1} (« ${p.adresse} »)…`;
+  $("imxTestBtn").disabled = true;
+  try {
+    const tabId = await resolveTargetTabId();
+    stopRequested = false;
+    imClearCache();
+    const res = await imLookupAddress(imChromeAdapter(tabId, p.timeoutMs), p);
+    const s = (res.searches || []).map((x) => `${x.mode === "nom" ? "Nom" : "adresse"} « ${res.term} » : ${x.rows}/${x.total ?? "?"} ligne(s) sur ${x.pages} page(s), ${x.matches} correspondance(s)`).join(" ; ");
+    let txt = `${res.status === "OK" ? "✓" : res.status === "ERREUR" ? "✗" : "⚠"} Ligne ${idx + 1} « ${p.adresse} » → ${imStatusText(res)}${s ? " — " + s : ""}`;
+    if (res.status !== "OK") {
+      const diag = await imDiagnose(tabId, cfg);
+      if (diag) txt += " — " + diag;
+    }
+    out.className = "hint imx-test-result " + (res.status === "OK" ? "ok" : "err");
+    out.textContent = txt;
+  } catch (e) {
+    out.className = "hint imx-test-result err";
+    out.textContent = "✗ " + (e.message || e);
+  } finally {
+    $("imxTestBtn").disabled = false;
+  }
+});
+
 /* ---------- Récapitulatif ---------- */
 
 function renderResultSummary() {
@@ -3077,13 +3397,16 @@ function renderResultSummary() {
   if (runDurationMs > 0) {
     html += `<p class="recap-time"><strong>Temps passé :</strong> ${formatDuration(runDurationMs)} pour ${n} ligne${n > 1 ? "s" : ""} · ~${formatDuration(runDurationMs / Math.max(1, n))}/ligne</p>`;
   }
-  html += `<p class="recap-counts"><span class="status-ok">${counts.ok || 0} OK</span> · <span class="status-err">${counts.err || 0} erreur(s)</span> · <span class="status-skip">${counts.skip || 0} ignorée(s)</span></p>`;
+  const toCheck = runLog.filter((e) => e.check).length;
+  html += `<p class="recap-counts"><span class="status-ok">${counts.ok || 0} OK</span> · <span class="status-err">${counts.err || 0} erreur(s)</span>` +
+    (toCheck ? ` · <span class="status-skip">${toCheck} à vérifier</span>` : "") +
+    ` · <span class="status-skip">${(counts.skip || 0) - toCheck} ignorée(s)</span></p>`;
   html += '</div>';
   html += '<div class="summary-table-wrap"><table class="summary-table"><thead><tr><th>Ligne</th><th>Recherche</th>';
   html += headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
   html += "<th>Statut</th></tr></thead><tbody>";
   runLog.forEach((entry) => {
-    const statusLabel = statusLabels[entry.status] || entry.status;
+    const statusLabel = entry.label || statusLabels[entry.status] || entry.status;
     const note = entry.note ? ` — ${escapeHtml(entry.note)}` : "";
     html += `<tr class="status-${entry.status}"><td>${entry.row}</td><td>${escapeHtml(entry.search)}</td>`;
     html += lastRunOutputs.map((_, i) => `<td>${escapeHtml(entry.values[i] || "")}</td>`).join("");
@@ -3150,8 +3473,6 @@ function estimateScenarioStepMs(s) {
     case "pdfcheck": case "pdfwrite": return 50; // local, quasi instantané
     case "sigeo": return (s.sigeoNav === false ? 300 : 2500) + 4500; // nav + remplissage + résolution ville + postback
     case "sigeoSelector": return (s.sselChamp || "mandatMG") === "mandatMG" ? 1500 : 1200; // sélection + postback
-    // Recherche + pagination ; le cache rend les lignes suivantes de la même voie quasi instantanées.
-    case "sigeoIm": return (s.imMode === "both" ? 2 : 1) * 2500;
     // Le nombre de lots n'est connu qu'à l'exécution : on table sur 3.
     case "batchedit": {
       const dl = s.batchWaitMode === "start" || s.batchWaitMode === "complete";
@@ -3216,7 +3537,6 @@ function addScenarioStep(step = {}) {
         <option value="sigeo">SIGEO : saisir une adresse</option>
         <option value="batchedit">Éditer par lots (cocher N → cliquer)</option>
         <option value="sigeoSelector">Sélecteur SIGEO (Mandat MG, Compte…)</option>
-        <option value="sigeoIm">SIGEO : rechercher un IM (adresse → N° E.I.)</option>
       </select>
       <button class="btn icon-only scn-move-up" title="Monter" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-up"/></svg></button>
       <button class="btn icon-only scn-move-down" title="Descendre" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-down"/></svg></button>
@@ -3475,73 +3795,6 @@ function addScenarioStep(step = {}) {
       <p class="hint scn-only-ssel scn-ssel-hint"></p>
 
       <p class="hint scn-only-sigeo">La simulation est activée par défaut : décoche-la pour enregistrer réellement. Le ViewState est géré par le navigateur (aucune requête forgée).</p>
-
-      <p class="hint scn-only-im">Retrouve le <strong>N° E.I. (IM)</strong> d'une adresse dans la recherche d'immeubles SIGEO : recherche sur le <strong>nom de voie seul</strong> (Site vide), lecture de <strong>toutes les pages</strong>, puis correspondance sur la colonne <strong>Adresse</strong> (numéro + BIS/TER exacts, voie, CP/ville si fournis). Jamais de choix arbitraire : 1 IM → OK, plusieurs → Multiple, aucun → Introuvable. Ouvre d'abord la page de recherche dans l'onglet cible.</p>
-      <div class="scn-row scn-only-im">
-        <label>adresse :</label>
-        <input type="text" class="scn-im-adresse" placeholder="ex : {Adresse} ou {N°} {Voie}" title="Adresse source : « 158/160 RUE LAMARCK », « CHARONNE 128 128BIS », « 129 rue Lamarck 75018 Paris »… {Nom de colonne} (ou {A}) est remplacé par la valeur de la ligne." value="${escapeAttr(step.imAdresse ?? "{Adresse}")}" />
-      </div>
-      <div class="scn-row scn-only-im">
-        <label>CP :</label>
-        <input type="text" class="scn-im-cp" placeholder="(optionnel) ex : {CP}" value="${escapeAttr(step.imCp ?? "")}" />
-        <label>ville :</label>
-        <input type="text" class="scn-im-ville" placeholder="(optionnel) ex : {Ville}" value="${escapeAttr(step.imVille ?? "")}" />
-      </div>
-      <div class="scn-row scn-only-im">
-        <label>rechercher par :</label>
-        <select class="scn-im-mode" title="Nom : le mot de la voie est tapé dans « Nom » (recherche « contient »). Adresse : il est tapé dans « Par adresse » (+ code postal si connu). Les deux : lance les deux recherches, fusionne, et indique dans le journal combien de correspondances chacune apporte.">
-          <option value="nom">Nom (nom de voie seul)</option>
-          <option value="adresse">Par adresse (voie + CP)</option>
-          <option value="both">les deux (comparer)</option>
-        </select>
-        <label>terme :</label>
-        <input type="text" class="scn-im-term" placeholder="auto (mot le plus distinctif)" title="Vide = mot le plus distinctif de la voie (LAMARCK, SULPICE, CHARONNE…). Sinon valeur fixe ou {Colonne}." value="${escapeAttr(step.imTerm ?? "")}" />
-      </div>
-      <div class="scn-row scn-only-im">
-        <label class="checkbox-row" title="Sélectionne l'option vide de la liste « Site » avant de rechercher (sinon seuls les immeubles du site courant remontent)"><input type="checkbox" class="scn-im-siteempty" ${step.imSiteEmpty === false ? "" : "checked"} /> forcer Site = (vide)</label>
-      </div>
-      <div class="scn-row scn-only-im">
-        <label>URL de la recherche :</label>
-        <input type="text" class="scn-im-url" placeholder="(optionnel) ouverte si le formulaire n'est pas trouvé dans l'onglet" value="${escapeAttr(step.imUrl ?? "")}" />
-      </div>
-      <div class="scn-row scn-only-im">
-        <label>timeout / postback (ms) :</label>
-        <input type="number" class="scn-im-timeout" min="2000" step="500" style="max-width:80px" value="${escapeAttr(step.imTimeout ?? 20000)}" />
-        <label>pages max :</label>
-        <input type="number" class="scn-im-maxpages" min="1" step="1" style="max-width:60px" value="${escapeAttr(step.imMaxPages ?? 30)}" />
-      </div>
-      <div class="scn-row scn-only-im">
-        <label>statut → colonne :</label>
-        <input type="text" class="new-col-input scn-im-resultcol" placeholder="ex : Résultat IM (vide = ne pas écrire)" title="OK — IM… / Multiple — IM…, IM… / Introuvable — proches : … / ERREUR — … (colonne créée si besoin)" value="${escapeAttr(step.imResultCol ?? "Résultat IM")}" />
-        <label>IM → colonne :</label>
-        <input type="text" class="new-col-input scn-im-imcol" placeholder="ex : N° E.I. (vide = ne pas écrire)" title="Reçoit l'IM seulement si le statut est OK (vide sinon). Attention : un nom de 1 à 3 lettres (ex. « IM ») est lu comme une lettre de colonne Excel." value="${escapeAttr(step.imImCol ?? "N° E.I.")}" />
-      </div>
-      <div class="scn-row scn-only-im">
-        <label>si Multiple / Introuvable :</label>
-        <select class="scn-im-onmiss">
-          <option value="warn">avertir et continuer</option>
-          <option value="error">erreur (interrompt la ligne)</option>
-          <option value="skip">sauter les étapes suivantes</option>
-        </select>
-        <span class="scn-inline scn-im-skip-wrap">
-          <input type="number" class="scn-im-missskip" min="1" value="${escapeAttr(step.imMissSkip ?? 1)}" />
-          <label>étape(s)</label>
-        </span>
-      </div>
-      <details class="scn-only-im scn-im-adv">
-        <summary>Sélecteurs avancés (vide = détection automatique)</summary>
-        ${[["nom", "champ Nom"], ["site", "liste Site"], ["adresse", "champ Adresse"], ["cp", "champ Code postal"],
-    ["submit", "bouton Rechercher"], ["toggle", "bascule « Par adresse »"], ["table", "tableau de résultats"]]
-    .map(([k, lbl]) => `<div class="scn-row">
-          <label style="min-width:130px">${lbl} :</label>
-          <input type="text" class="scn-im-sel" data-k="${k}" placeholder="auto" value="${escapeAttr((step.imSel || {})[k] ?? "")}" />
-          <button class="btn pick icon-only scn-im-pick" data-k="${k}" title="Choisir sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
-        </div>`).join("")}
-      </details>
-      <div class="scn-row scn-only-im">
-        <button class="btn sm scn-im-test" type="button" title="Exécute cette étape seule sur l'onglet actif (ligne active), sans cache"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester l'étape</button>
-        <span class="scn-ssel-result scn-im-result"></span>
-      </div>
     </div>
   `;
 
@@ -3702,7 +3955,6 @@ function addScenarioStep(step = {}) {
   });
 
   wireSigeoSelectorStepUI(div, step);
-  wireSigeoImStepUI(div, step);
 
   $("scenarioSteps").appendChild(div);
 }
@@ -3771,22 +4023,7 @@ function getScenarioSteps() {
     sselCtrlKey: el.querySelector(".scn-ssel-ctrlkey").value.trim(),
     sselMode: el.querySelector(".scn-ssel-mode").value,
     sselTimeout: parseInt(el.querySelector(".scn-ssel-timeout").value, 10) || sselDefaults(el.querySelector(".scn-ssel-champ").value).timeoutMs,
-    sselOnError: el.querySelector(".scn-ssel-onerror").value,
-    imAdresse: el.querySelector(".scn-im-adresse").value.trim(),
-    imCp: el.querySelector(".scn-im-cp").value.trim(),
-    imVille: el.querySelector(".scn-im-ville").value.trim(),
-    imMode: el.querySelector(".scn-im-mode").value,
-    imTerm: el.querySelector(".scn-im-term").value.trim(),
-    imSiteEmpty: el.querySelector(".scn-im-siteempty").checked,
-    imUrl: el.querySelector(".scn-im-url").value.trim(),
-    imTimeout: parseInt(el.querySelector(".scn-im-timeout").value, 10) || 20000,
-    imMaxPages: parseInt(el.querySelector(".scn-im-maxpages").value, 10) || 30,
-    imResultCol: el.querySelector(".scn-im-resultcol").value.trim(),
-    imImCol: el.querySelector(".scn-im-imcol").value.trim(),
-    imOnMiss: el.querySelector(".scn-im-onmiss").value,
-    imMissSkip: parseInt(el.querySelector(".scn-im-missskip").value, 10) || 1,
-    imSel: Object.fromEntries(Array.from(el.querySelectorAll(".scn-im-sel"))
-      .map((i) => [i.dataset.k, i.value.trim()]).filter(([, v]) => v))
+    sselOnError: el.querySelector(".scn-ssel-onerror").value
   }));
 }
 
@@ -4268,7 +4505,7 @@ function scnWaitInjected(cfg) {
 // Icône affichée à côté du numéro de l'étape (symboles #icon-step-* du HTML).
 function scnStepIconId(type, clickMode) {
   if (type === "click" && clickMode === "enter") return "icon-step-enter";
-  const known = ["fill", "input", "goto", "click", "wait", "cond", "pdfcheck", "pdfwrite", "sigeo", "batchedit", "sigeoSelector", "sigeoIm"];
+  const known = ["fill", "input", "goto", "click", "wait", "cond", "pdfcheck", "pdfwrite", "sigeo", "batchedit", "sigeoSelector"];
   return "icon-step-" + (known.includes(type) ? type : "fill");
 }
 
@@ -5079,176 +5316,6 @@ async function execSigeoStep(step, rowIdx, tabId) {
   return { ok: true, info: "enregistré — " + idsTxt + dur() };
 }
 
-/* ---------- Étape « SIGEO : rechercher un IM » (sigeoIm) ----------
-   Logique (parsing, recherche, pagination, filtrage, cache) dans
-   sigeo-im.js ; ici : l'interface de l'étape, l'adaptateur chrome.* et
-   l'écriture des résultats dans le fichier. */
-
-function wireSigeoImStepUI(div, step) {
-  div.querySelector(".scn-im-mode").value = step.imMode || "nom";
-  const onMiss = div.querySelector(".scn-im-onmiss");
-  const skipWrap = div.querySelector(".scn-im-skip-wrap");
-  onMiss.value = step.imOnMiss || "warn";
-  const sync = () => { skipWrap.hidden = onMiss.value !== "skip"; };
-  onMiss.addEventListener("change", sync);
-  sync();
-  if (step.imSel && Object.keys(step.imSel).length) div.querySelector(".scn-im-adv").open = true;
-
-  div.querySelectorAll(".scn-im-pick").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const picked = await pickTargetOnActiveTab();
-      if (!picked) return;
-      const v = picked.selector || picked.name || picked.id;
-      if (!v) return;
-      div.querySelector(`.scn-im-sel[data-k="${btn.dataset.k}"]`).value = v;
-      persistWorkingConfig();
-    });
-  });
-
-  const testBtn = div.querySelector(".scn-im-test");
-  const out = div.querySelector(".scn-im-result");
-  testBtn.addEventListener("click", async () => {
-    if (scnRunning) { showStatus("Un scénario est en cours d'exécution.", "error"); return; }
-    const idx = Array.from($("scenarioSteps").children).indexOf(div);
-    const s = getScenarioSteps()[idx];
-    out.className = "scn-ssel-result scn-im-result";
-    out.textContent = "recherche en cours…";
-    testBtn.disabled = true;
-    try {
-      const tabId = await resolveTargetTabId();
-      scnStopRequested = false; // un « Arrêter » précédent ne doit pas couper le test
-      imClearCache();
-      const res = await execSigeoImStep(s, state.selectedRowIdx, tabId, { testMode: true });
-      let txt = (res.ok ? "✓ " : "✗ ") + (res.ok ? res.info : res.error);
-      if (!res.ok || res.warn) {
-        const diag = await imDiagnose(tabId, s);
-        if (diag) txt += " — " + diag;
-      }
-      out.className = "scn-ssel-result scn-im-result " + (res.ok && !res.warn ? "ok" : "err");
-      out.textContent = txt;
-      showStatus("Recherche IM : " + (res.ok ? res.info : res.error), res.ok ? "success" : "error");
-    } catch (e) {
-      out.className = "scn-ssel-result scn-im-result err";
-      out.textContent = "✗ " + e.message;
-    } finally {
-      testBtn.disabled = false;
-    }
-  });
-}
-
-// Adaptateur chrome.scripting pour l'orchestrateur de sigeo-im.js.
-// world MAIN : imPageOp lit Sys.WebForms.PageRequestManager (postback en cours ?).
-function imChromeAdapter(tabId, timeoutMs) {
-  return {
-    execAll: async (cfg) => {
-      const res = await chrome.scripting.executeScript({
-        target: { tabId, allFrames: true }, world: "MAIN", func: imPageOp, args: [cfg]
-      });
-      return (res || []).map((r) => ({ frameId: r.frameId, result: r.result }));
-    },
-    exec: async (frameId, cfg) => {
-      const res = await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [frameId] }, world: "MAIN", func: imPageOp, args: [cfg]
-      });
-      if (!res || !res[0]) throw new Error("frame injoignable");
-      return res[0].result;
-    },
-    navigate: (url) => navigateTabAndWait(tabId, url, true, timeoutMs),
-    sleep: (ms) => scnSleep(ms),
-    stopped: () => scnStopRequested,
-    log: (t, c) => scnLog(t, c)
-  };
-}
-
-// Diagnostic court (bouton « Tester l'étape ») : ce que la page expose.
-async function imDiagnose(tabId, s) {
-  try {
-    const res = await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true }, world: "MAIN", func: imPageOp,
-      args: [{ op: "probe", mode: s.imMode === "adresse" ? "adresse" : "nom", sel: s.imSel || {} }]
-    });
-    const pr = (res || []).map((r) => r.result).filter(Boolean)
-      .sort((a, b) => (b.ok ? 1 : 0) - (a.ok ? 1 : 0))[0];
-    if (!pr) return "";
-    const f = pr.fields;
-    return `page : Nom ${f.nom || "✗"} · Site ${f.site || "✗"} · Adresse ${f.adresse || "✗"} · CP ${f.cp || "✗"} · ` +
-      `Rechercher ${pr.submit || "✗"} · tableau ${pr.table || "✗"}${pr.count !== null ? ` (${pr.count} résultat(s))` : ""}` +
-      `${pr.next ? ` · page suivante ${pr.next}` : ""}`;
-  } catch (e) {
-    return "diagnostic impossible : " + (e.message || e);
-  }
-}
-
-// Écrit une valeur dans une colonne (existante, lettre ou nouvelle) de la ligne.
-function scnWriteColumn(ref, rowIdx, text) {
-  ref = String(ref || "").trim();
-  if (!ref || rowIdx === null || rowIdx === undefined || !state.rows.length) return;
-  const row = state.rows[rowIdx] = state.rows[rowIdx] || [];
-  const existed = colIndexByName(ref) >= 0;
-  const idx = resolveOutputTarget(ref, {});
-  if (idx < 0) return;
-  setCellByIndex(row, idx, text);
-  persistSession();
-  if (existed) { renderPreview(); renderSelectedRowFields(); }
-  else renderColumns();
-}
-
-async function execSigeoImStep(step, rowIdx, tabId, opts = {}) {
-  const t0 = Date.now();
-  const row = (rowIdx !== null && rowIdx !== undefined) ? (state.rows[rowIdx] || []) : null;
-  const rt = (v) => String(resolveRowTemplate(v ?? "", row) ?? "").trim();
-  const dur = () => ` — ${((Date.now() - t0) / 1000).toFixed(1)} s`;
-  const timeoutMs = Math.max(2000, step.imTimeout || 20000);
-  const write = (status, im) => {
-    scnWriteColumn(step.imResultCol, rowIdx, status);
-    scnWriteColumn(step.imImCol, rowIdx, im || "");
-  };
-  const adresse = rt(step.imAdresse);
-  if (!adresse) {
-    write("ERREUR — adresse source vide", "");
-    return { ok: false, error: `adresse source vide (« ${step.imAdresse || ""} » sur cette ligne)` };
-  }
-  const sel = {};
-  Object.entries(step.imSel || {}).forEach(([k, v]) => { if (v) sel[k] = rt(v); });
-
-  const res = await imLookupAddress(imChromeAdapter(tabId, timeoutMs), {
-    adresse, cp: rt(step.imCp), ville: rt(step.imVille), term: rt(step.imTerm),
-    mode: step.imMode || "nom", siteEmpty: step.imSiteEmpty !== false, sel,
-    url: rt(step.imUrl), timeoutMs, maxPages: step.imMaxPages || 30
-  });
-
-  // Journal : une ligne par recherche (total annoncé, lignes lues, pages, cache).
-  for (const sr of res.searches || []) {
-    scnLog(`   recherche ${sr.mode === "nom" ? "Nom" : "par adresse"} « ${res.term} » : ` +
-      `${sr.cached ? "(cache) " : ""}${sr.total === null ? "?" : sr.total} résultat(s), ` +
-      `${sr.rows} ligne(s) lue(s) sur ${sr.pages} page(s) → ${sr.matches} correspondance(s)` +
-      (sr.ims && sr.ims.length ? ` [${sr.ims.join(", ")}]` : ""), "");
-    (sr.warnings || []).forEach((w) => scnLog("   ⚠ " + w, "skip"));
-  }
-  const text = imStatusText(res);
-  if (res.status === "ERREUR") {
-    write(text, "");
-    return { ok: false, error: res.error + dur() };
-  }
-  write(text, res.status === "OK" ? res.ims[0] : "");
-  if (res.status === "Introuvable" && res.closest.length) {
-    scnLog("   adresses les plus proches : " + res.closest.map((r) => `${r.adresse} (${r.im})`).join(" ; "), "skip");
-  }
-  const what = `${adresse} → ${text}`;
-  if (res.status === "OK") {
-    const m = res.matches.find((r) => r.im === res.ims[0]);
-    return { ok: true, info: `${adresse} → ${res.ims[0]}${m ? ` (${m.adresse})` : ""}` + dur() };
-  }
-  switch (step.imOnMiss || "warn") {
-    case "error": return { ok: false, error: what + dur() };
-    case "skip": {
-      const n = Math.max(1, step.imMissSkip || 1);
-      return { ok: true, skip: n, info: what + ` → saut de ${n} étape(s)` + dur() };
-    }
-    default: return { ok: true, warn: true, info: what + dur() };
-  }
-}
-
 /* ---------- Moteur d'exécution ---------- */
 
 function scnTrunc(s, n = 45) {
@@ -5277,7 +5344,6 @@ function scnStepLabel(s) {
       return `SIGEO : adresse ${scnTrunc(s.sigeoAddressId || "?", 20)}${s.sigeoDryRun !== false ? " (simulation)" : ""}`;
     case "batchedit": return `Éditer par lots de ${s.batchSize || 10}`;
     case "sigeoSelector": return `Sélecteur SIGEO : ${sselChampLabel(s)} = « ${scnTrunc(s.sselValeur, 25)} »`;
-    case "sigeoIm": return `SIGEO : IM de « ${scnTrunc(s.imAdresse || "?", 30)} »${s.imMode === "adresse" ? " (par adresse)" : s.imMode === "both" ? " (nom + adresse)" : ""}`;
   }
   return s.type;
 }
@@ -5556,7 +5622,6 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
         };
       }
       case "sigeo": return await execSigeoStep(step, rowIdx, tabId);
-      case "sigeoIm": return await execSigeoImStep(step, rowIdx, tabId);
 
       case "batchedit": {
         if (!step.batchButton) return { ok: false, error: "sélecteur du bouton « Éditer » manquant — à renseigner dans la configuration de l'étape (champ « bouton à cliquer »)" };
@@ -5750,7 +5815,6 @@ function scenarioNeedsRow(steps) {
     (s.type === "input" && /\{[^{}]+\}/.test(s.inputValue || "")) ||
     (s.type === "pdfwrite") ||
     (s.type === "sigeoSelector" && /\{[^{}]+\}/.test(s.sselValeur || "")) ||
-    (s.type === "sigeoIm") ||
     (s.type === "pdfcheck" && (/\{[^{}]+\}/.test(s.pdfVal || "") ||
       (s.pdfDocMode === "match" && /\{[^{}]+\}/.test(s.pdfDocMatch || "")))) ||
     (s.type === "sigeo" && ([s.sigeoAddressId, s.sigeoTable, s.sigeoPays, s.sigeoCp, s.sigeoVille,
@@ -5762,7 +5826,6 @@ function scenarioNeedsRow(steps) {
 function scnBegin() {
   scnRunning = true;
   scnStopRequested = false;
-  imClearCache(); // cache des recherches IM : propre à une exécution
   $("runScenarioBtn").disabled = true;
   $("runScenarioLoopBtn").disabled = true;
   $("runScenarioMultiBtn").disabled = true;
@@ -6876,7 +6939,9 @@ function buildProfileConfig() {
       rowDelayMs: $("rowDelayMs").value,
       startRow: $("startRow").value,
       endRow: $("endRow").value,
-      outputs: getOutputs()
+      outputs: getOutputs(),
+      kind: extractKind(),
+      im: getImxConfig()
     },
     scenario: {
       steps: getScenarioSteps(),
@@ -6932,6 +6997,7 @@ function applyProfileConfig(cfg) {
   $("rowDelayMs").value = ex.rowDelayMs || 300;
   $("startRow").value = ex.startRow || (dataStartIdx() + 1);
   $("endRow").value = ex.endRow || "";
+  applyImxConfig(ex.im || {}, ex.kind || "standard");
 
   const sc = cfg.scenario || {};
   $("scenarioSteps").innerHTML = "";
@@ -7194,6 +7260,10 @@ async function init() {
   if (stored.workingConfig) {
     applyProfileConfig(stored.workingConfig);
   }
+
+  // Recherche IM : valeurs par défaut si aucune configuration restaurée
+  // (sans cela, la liste « IM → écrire dans » pointerait sur la colonne A).
+  if (!imxConfigApplied) applyImxConfig({}, "standard");
 
   // Lignes par défaut dans l'onglet Extraction si vide
   if (!$("searchFieldsList").children.length) addSearchFieldRow();
