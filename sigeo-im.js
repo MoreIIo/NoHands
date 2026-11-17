@@ -204,7 +204,23 @@ function imParseSource(str, extra = {}) {
 
 // Adresse normalisée SIGEO (colonne « Adresse ») → structure.
 function imParseTarget(str) {
-  const tok = imTokens(str);
+  let tok = imTokens(str);
+  // La cellule peut commencer par le nom de l'immeuble :
+  //   « grande Armee 62 62 AVENUE DE LA GRANDE ARMEE 75017 PARIS »
+  // → l'adresse commence au dernier « <num> <TYPE VOIE> » avant le CP.
+  let cpAt = tok.length;
+  for (let k = tok.length - 1; k >= 0; k--) { if (/^\d{5}$/.test(tok[k])) { cpAt = k; break; } }
+  let start = -1;
+  for (let k = 0; k < cpAt; k++) {
+    if (!/^\d/.test(tok[k])) continue;
+    const rr = imReadNumbers(tok, k);
+    if (rr.nums.length && rr.next < cpAt && IM_TYPES_VOIE[tok[rr.next]] && rr.next + 1 < cpAt) start = k;
+  }
+  // Que des numéros avant (« 158 160 RUE … ») : pas de préfixe, on garde tout.
+  // Sinon on coupe le nom en tête (son éventuel numéro, « … 62 », est ignoré).
+  if (start > 0 && !tok.slice(0, start).every((w) => /^\d{1,4}(BIS|TER)?$|^(BIS|TER)$/.test(w))) {
+    tok = tok.slice(start);
+  }
   const r = imReadNumbers(tok, 0);
   let i = r.next;
   const rest = tok.slice(i);
@@ -277,7 +293,10 @@ function imSimilarity(src, tgt) {
  * Filtre les lignes de résultats {im, nom, adresse} pour une adresse source.
  * Renvoie { status: "OK"|"Multiple"|"Introuvable", ims, matches, closest }.
  */
-function imResolve(src, rows) {
+// Clé de comparaison d'un nom : jetons normalisés (casse, accents, ST/SAINT…).
+const imNameKey = (s) => imTokens(s).join(" ");
+
+function imResolve(src, rows, opts = {}) {
   const scored = [];
   for (const row of rows) {
     const tgt = imParseTarget(row.adresse);
@@ -295,8 +314,13 @@ function imResolve(src, rows) {
       cands = cands.filter((c) => c.numHits === bestHits);
     }
   }
-  const ims = [...new Set(cands.map((c) => c.row.im))];
+  // Nom E.I. strictement identique à la valeur cherchée (ex. « GRANDE ARMEE 62 »).
+  const key = opts.name ? imNameKey(opts.name) : "";
+  const byName = key ? rows.filter((row) => imNameKey(row.nom) === key) : [];
+  const matchRows = [...byName, ...cands.map((c) => c.row).filter((r) => !byName.includes(r))];
+  const ims = [...new Set(matchRows.map((r) => r.im))];
   const status = ims.length === 1 ? "OK" : ims.length ? "Multiple" : "Introuvable";
+  const via = byName.length && cands.length ? "nom + adresse" : byName.length ? "nom" : cands.length ? "adresse" : "";
   let closest = [];
   if (!ims.length) {
     const seen = new Set();
@@ -307,7 +331,7 @@ function imResolve(src, rows) {
       .slice(0, 3)
       .map(({ row }) => row);
   }
-  return { status, ims, matches: cands.map((c) => c.row), closest };
+  return { status, ims, matches: matchRows, closest, via };
 }
 
 // Texte écrit dans la colonne de résultat.
@@ -907,8 +931,8 @@ async function imSearchAllPages(ad, p) {
   // — Cohérence : une recherche par Nom « contient » le terme sur chaque ligne.
   if (rows.length) {
     const col = p.mode === "adresse" ? "adresse" : "nom";
-    const T = imFold(p.term);
-    if (!rows.some((r) => imFold(r[col]).includes(T))) {
+    const T = imNameKey(p.term);
+    if (T && !rows.some((r) => imNameKey(r[col]).includes(T))) {
       return { ok: false, error: `résultats incohérents : aucune ligne ne contient « ${p.term} » (la recherche n'a pas été prise en compte ?)` };
     }
   }
@@ -934,44 +958,75 @@ async function imCachedSearch(ad, p) {
 
 /**
  * Recherche complète pour une ligne du fichier.
- * cfg = { adresse, cp, ville, term?, mode: "nom"|"adresse"|"both", siteEmpty,
- *         sel, url, timeoutMs, maxPages }
+ * cfg = { adresse, cp, ville, term?, mode, siteEmpty, sel, url, timeoutMs, maxPages }
+ * mode :
+ *   "auto"    → tape la valeur COMPLÈTE dans Nom (« GRANDE ARMEE 62 »), valide,
+ *               lit le tableau ; si rien ne correspond, relance avec le seul
+ *               nom de voie (« ARMEE ») ;
+ *   "nom"     → nom de voie seul dans Nom ;
+ *   "adresse" → nom de voie dans « Par adresse » (+ CP) ;
+ *   "both"    → nom de voie, par Nom ET par adresse.
+ * Une ligne du tableau correspond si son Nom E.I. est identique à la valeur
+ * cherchée, ou si son Adresse correspond (numéro, voie, CP/ville).
  * Renvoie { status: "OK"|"Multiple"|"Introuvable"|"ERREUR", ims, closest,
- *           term, searches: [{mode, total, pages, rows, cached, warnings}], error? }
+ *           term, searches: [{mode, term, total, pages, rows, cached, warnings, matches, ims}], error? }
  */
 async function imLookupAddress(ad, cfg) {
-  const src = imParseSource(cfg.adresse, { cp: cfg.cp, ville: cfg.ville });
-  const term = imFold(String(cfg.term || "").trim()).replace(/\s+/g, " ") || imPickSearchTerm(src);
-  if (!term) return { status: "ERREUR", ims: [], closest: [], error: `adresse source illisible : « ${cfg.adresse || ""} » (aucun nom de voie)`, src };
-  const modes = cfg.mode === "both" ? ["nom", "adresse"] : [cfg.mode === "adresse" ? "adresse" : "nom"];
+  const raw = String(cfg.adresse ?? "").replace(/[\u00a0\u202f\u2007]/g, " ").replace(/\s+/g, " ").trim();
+  const src = imParseSource(raw, { cp: cfg.cp, ville: cfg.ville });
+  const forced = String(cfg.term || "").replace(/\s+/g, " ").trim();
+  const voieTerm = imPickSearchTerm(src);
+  const mode = ["auto", "nom", "adresse", "both"].includes(cfg.mode) ? cfg.mode : "auto";
+
+  // Étapes successives ; on s'arrête dès qu'une étape donne au moins une correspondance.
+  let stages;
+  if (forced) {
+    stages = [mode === "both" ? [["nom", forced], ["adresse", forced]] : [[mode === "adresse" ? "adresse" : "nom", forced]]];
+  } else if (mode === "auto") {
+    stages = [[["nom", raw]]];
+    if (voieTerm && imNameKey(voieTerm) !== imNameKey(raw)) stages.push([["nom", voieTerm]]);
+  } else if (mode === "both") {
+    stages = [[["nom", voieTerm], ["adresse", voieTerm]]];
+  } else {
+    stages = [[[mode, voieTerm]]];
+  }
+  if (!raw || stages.some((st) => st.some(([, t]) => !t))) {
+    return { status: "ERREUR", ims: [], closest: [], error: `valeur illisible : « ${raw} » (aucun nom de voie)`, src };
+  }
+
   const searches = [];
   const all = [];
   const keys = new Set();
-  for (const mode of modes) {
-    const r = await imCachedSearch(ad, {
-      mode, term, cp: src.cp, siteEmpty: cfg.siteEmpty, sel: cfg.sel || {}, url: cfg.url,
-      timeoutMs: cfg.timeoutMs, maxPages: cfg.maxPages
-    });
-    if (!r.ok) return { status: "ERREUR", ims: [], closest: [], error: `recherche ${mode === "nom" ? "par nom" : "par adresse"} « ${term} » : ${r.error}`, src, term, searches };
-    // Pertinence de ce mode seul (utile pour comparer « nom » et « adresse »).
-    const own = imResolve(src, r.rows);
-    searches.push({
-      mode, total: r.total, pages: r.pages, rows: r.rows.length, cached: !!r.cached,
-      warnings: r.warnings || [], matches: own.matches.length, ims: own.ims
-    });
-    for (const row of r.rows) {
-      const k = row.im + "|" + row.adresse;
-      if (!keys.has(k)) { keys.add(k); all.push(row); }
+  let res = null;
+  for (const stage of stages) {
+    for (const [m, term] of stage) {
+      const r = await imCachedSearch(ad, {
+        mode: m, term, cp: src.cp, siteEmpty: cfg.siteEmpty, sel: cfg.sel || {}, url: cfg.url,
+        timeoutMs: cfg.timeoutMs, maxPages: cfg.maxPages
+      });
+      if (!r.ok) {
+        return { status: "ERREUR", ims: [], closest: [], error: `recherche ${m === "nom" ? "Nom" : "par adresse"} « ${term} » : ${r.error}`, src, term, searches };
+      }
+      const own = imResolve(src, r.rows, { name: raw });
+      searches.push({
+        mode: m, term, total: r.total, pages: r.pages, rows: r.rows.length, cached: !!r.cached,
+        warnings: r.warnings || [], matches: own.matches.length, ims: own.ims
+      });
+      for (const row of r.rows) {
+        const k = row.im + "|" + row.nom + "|" + row.adresse;
+        if (!keys.has(k)) { keys.add(k); all.push(row); }
+      }
     }
+    res = imResolve(src, all, { name: raw });
+    if (res.ims.length) break;
   }
-  const res = imResolve(src, all);
-  return { ...res, src, term, searches, rowsRead: all.length };
+  return { ...res, src, term: searches.length ? searches[searches.length - 1].term : voieTerm, searches, rowsRead: all.length };
 }
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     imFold, imTokens, imParseSource, imParseTarget, imPickSearchTerm, imMatchAddress,
-    imResolve, imStatusText, imPageOp, imLocate, imWaitForSearchDone, imSearchAllPages,
+    imResolve, imNameKey, imStatusText, imPageOp, imLocate, imWaitForSearchDone, imSearchAllPages,
     imCachedSearch, imClearCache, imLookupAddress, imSearchCache
   };
 }

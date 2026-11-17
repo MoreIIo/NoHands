@@ -3108,6 +3108,7 @@ function getImxConfig() {
     adrCol: $("imxAdrCol").value,
     cpCol: $("imxCpCol").value,
     villeCol: $("imxVilleCol").value,
+    v: 2,
     mode: $("imxMode").value,
     term: $("imxTerm").value.trim(),
     siteEmpty: $("imxSiteEmpty").checked,
@@ -3131,7 +3132,9 @@ function applyImxConfig(im, kind) {
   fillColumnSelect($("imxAdrCol"), im.adrCol || guessAdr);
   fillColumnSelect($("imxCpCol"), im.cpCol || "", colSelectExtras("optional"));
   fillColumnSelect($("imxVilleCol"), im.villeCol || "", colSelectExtras("optional"));
-  $("imxMode").value = im.mode || "nom";
+  // Avant la 2.11.2, « nom » était le réglage par défaut (nom de voie seul) :
+  // les configurations de cette époque passent au nouveau défaut « auto ».
+  $("imxMode").value = (!im.v && im.mode === "nom") ? "auto" : (im.mode || "auto");
   $("imxTerm").value = im.term || "";
   $("imxSiteEmpty").checked = im.siteEmpty !== false;
   $("imxUrl").value = im.url || "";
@@ -3161,12 +3164,14 @@ function imxEstimateText() {
     const a = getCellByIndex(row, adrIdx);
     if (!a.trim()) continue;
     n++;
-    const t = cfg.term ? imFold(resolveRowTemplate(cfg.term, row)) : imPickSearchTerm(imParseSource(a));
-    if (t) terms.add(t);
+    const t = cfg.term ? resolveRowTemplate(cfg.term, row)
+      : cfg.mode === "auto" ? a : imPickSearchTerm(imParseSource(a));
+    if (t) terms.add(imNameKey(t));
   }
   if (!n) return "";
   const perSearch = (cfg.mode === "both" ? 2 : 1) * 4000; // ~3 pages × postback
-  return `Estimation : ${n} ligne${n > 1 ? "s" : ""}, ${terms.size} voie${terms.size > 1 ? "s" : ""} différente${terms.size > 1 ? "s" : ""} à chercher → ~${formatDuration(terms.size * perSearch)} (selon le nombre de pages de résultats).`;
+  const what = cfg.mode === "auto" && !cfg.term ? "valeur" : "voie";
+  return `Estimation : ${n} ligne${n > 1 ? "s" : ""}, ${terms.size} ${what}${terms.size > 1 ? "s" : ""} différente${terms.size > 1 ? "s" : ""} à chercher → ~${formatDuration(terms.size * perSearch)}${what === "valeur" ? " (+ une recherche par nom de voie si rien n'est trouvé)" : ""}.`;
 }
 
 // Adaptateur chrome.scripting pour l'orchestrateur de sigeo-im.js.
@@ -3228,7 +3233,7 @@ function imxLookupParams(cfg, row) {
 
 function imxLogSearches(rowNum, res) {
   for (const sr of res.searches || []) {
-    logLine(`Ligne ${rowNum} : recherche ${sr.mode === "nom" ? "Nom" : "par adresse"} « ${res.term} » — ` +
+    logLine(`Ligne ${rowNum} : recherche ${sr.mode === "nom" ? "Nom" : "par adresse"} « ${sr.term} » — ` +
       `${sr.cached ? "(cache) " : ""}${sr.total === null ? "?" : sr.total} résultat(s), ` +
       `${sr.rows} ligne(s) lue(s) sur ${sr.pages} page(s) → ${sr.matches} correspondance(s)` +
       (sr.ims && sr.ims.length ? ` [${sr.ims.join(", ")}]` : ""), "");
@@ -3306,7 +3311,7 @@ async function runImExtraction() {
     if (imIdx >= 0 && (im || imIdx !== adrIdx)) setCellByIndex(row, imIdx, im); // ne jamais effacer l'adresse source
     if (res.status === "OK") {
       const m = (res.matches || []).find((r) => r.im === im);
-      logLine(`Ligne ${rowNum} (${p.adresse}) : OK — ${im}${m ? ` (${m.adresse})` : ""}`, "ok");
+      logLine(`Ligne ${rowNum} (${p.adresse}) : OK — ${im}${m ? ` (${m.nom} — ${m.adresse})` : ""}${res.via ? ` [via ${res.via}]` : ""}`, "ok");
       runLog.push({ row: rowNum, search: p.adresse, values: [text, im], status: "ok" });
     } else if (res.status === "ERREUR") {
       logLine(`Ligne ${rowNum} (${p.adresse}) : erreur — ${res.error}`, "err");
@@ -3365,7 +3370,7 @@ $("imxTestBtn").addEventListener("click", async () => {
     stopRequested = false;
     imClearCache();
     const res = await imLookupAddress(imChromeAdapter(tabId, p.timeoutMs), p);
-    const s = (res.searches || []).map((x) => `${x.mode === "nom" ? "Nom" : "adresse"} « ${res.term} » : ${x.rows}/${x.total ?? "?"} ligne(s) sur ${x.pages} page(s), ${x.matches} correspondance(s)`).join(" ; ");
+    const s = (res.searches || []).map((x) => `${x.mode === "nom" ? "Nom" : "adresse"} « ${x.term} » : ${x.rows}/${x.total ?? "?"} ligne(s) sur ${x.pages} page(s), ${x.matches} correspondance(s)`).join(" ; ");
     let txt = `${res.status === "OK" ? "✓" : res.status === "ERREUR" ? "✗" : "⚠"} Ligne ${idx + 1} « ${p.adresse} » → ${imStatusText(res)}${s ? " — " + s : ""}`;
     if (res.status !== "OK") {
       const diag = await imDiagnose(tabId, cfg);

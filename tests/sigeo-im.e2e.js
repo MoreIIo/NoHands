@@ -37,6 +37,12 @@ const CASES = [
   { adresse: "131 RUE LAMARCK", mode: "adresse", status: "OK", ims: ["IM0555555"] },
   { adresse: "131 RUE LAMARCK 75018 PARIS", mode: "both", status: "OK", ims: ["IM0555555"] },
   { adresse: "12 RUE ZZTOP", status: "Introuvable", ims: [] },                    // « Aucun résultat »
+  // Mode « auto » : valeur complète dans Nom, puis nom de voie si rien
+  { adresse: "GRANDE ARMEE 62", mode: "auto", status: "OK", ims: ["IM0398898"], searches: 1 },
+  { adresse: "GRANDE ARMEE 62", mode: "nom", status: "OK", ims: ["IM0398898"] },    // Adresse préfixée du nom
+  { adresse: "RESIDENCE DU PARC", mode: "auto", status: "OK", ims: ["IM0777777"] },  // Nom E.I. exact
+  { adresse: "129 RUE LAMARCK", mode: "auto", status: "OK", ims: ["IM0398636"], searches: 2 },
+  { adresse: "8 RUE DE LA 1ERE ARMEE", mode: "auto", status: "OK", ims: ["IM0352337"] },
   { adresse: "129 RUE LAMARCK", sel: { submit: "#body_x_tabCriteres" }, timeoutMs: 3000, status: "ERREUR", ims: [], nocache: true }
 ];
 
@@ -54,17 +60,21 @@ async function runSuite(browser, label, url) {
       siteEmpty: true, sel: c.sel || {}, url: url, timeoutMs: c.timeoutMs || 15000, maxPages: 30
     });
     const ok = r.status === c.status && JSON.stringify([...r.ims].sort()) === JSON.stringify(c.ims) &&
-      (!c.closest || r.closest.length === Math.min(3, r.rowsRead));
+      (!c.closest || r.closest.length === Math.min(3, r.rowsRead)) &&
+      (!c.searches || (r.searches || []).length === c.searches);
     if (!ok) fails++;
-    const s = (r.searches || []).map((x) => `${x.mode}:${x.rows}/${x.total} en ${x.pages}p${x.cached ? " (cache)" : ""}${x.warnings.length ? " ⚠ " + x.warnings.join(";") : ""}`).join(" + ");
+    const s = (r.searches || []).map((x) => `${x.mode}«${x.term}»:${x.rows}/${x.total} en ${x.pages}p${x.cached ? " (cache)" : ""}${x.warnings.length ? " ⚠ " + x.warnings.join(";") : ""}`).join(" + ");
     console.log(`${ok ? "✓" : "✗"} [${label}] ${c.adresse}${c.ville ? " / " + c.ville : ""}${c.mode ? " (" + c.mode + ")" : ""} → ${im.imStatusText(r)}  [${s}] ${Date.now() - t0} ms${r.error ? " ERR " + r.error : ""}`);
   }
   const siteVal = await page.$eval("#body_x_selSite_x_Site", (e) => e.value);
   assert.strictEqual(siteVal, "", "Site doit être forcé à vide");
   if (label === "partiel") {
     const n = await page.evaluate(() => window.__searches);
-    console.log(`  recherches lancées : ${n} (attendu 7 : LAMARCK, SULPICE, SEBASTOPOL, CHARONNE, LAMARCK par adresse ×2 CP, ZZTOP)`);
-    if (n !== 7) fails++;
+    // LAMARCK, SULPICE, SEBASTOPOL, CHARONNE, LAMARCK par adresse ×2 (CP), ZZTOP,
+    // « GRANDE ARMEE 62 », ARMEE, « RESIDENCE DU PARC », « 129 RUE LAMARCK »
+    // (LAMARCK en cache), « 8 RUE DE LA 1ERE ARMEE »
+    console.log(`  recherches lancées : ${n} (attendu 12)`);
+    if (n !== 12) fails++;
   }
   await page.close();
   return fails;

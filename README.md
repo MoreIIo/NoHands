@@ -221,14 +221,24 @@ deux modes :
 
 Choisis **Recherche IM SIGEO** dans *Type d'extraction*, ouvre la recherche
 d'immeubles SIGEO dans l'onglet cible (ou renseigne son URL), indique la
-**colonne adresse** (et éventuellement CP / ville), puis **Démarrer**.
+**colonne à chercher** (nom d'immeuble ou adresse, ex. « GRANDE ARMEE 62 »,
+et éventuellement CP / ville), puis **Démarrer**.
 
-Pourquoi pas une simple recherche « Nom = adresse » : le champ **Nom** est
-un « contient » sur un libellé libre, saisi de façon incohérente
-(`LAMARCK "112"`, `14 LAMARCK`, `*98 LAMARCK***30/03/06****`) — la colonne
-**Nom E.I.** n'est donc jamais utilisée pour la correspondance. La colonne
-**Adresse** est normalisée (`<num>[ BIS|TER] <TYPE VOIE> <NOM VOIE> <CP> <VILLE>`) :
-c'est elle qui sert.
+Par défaut (*Nom : valeur complète, puis nom de voie*) : la valeur de la
+cellule est tapée **telle quelle** dans le champ **Nom**, l'extension valide
+(« Rechercher »), attend la fin du chargement et lit **toutes les pages** du
+tableau. Une ligne correspond si son **Nom E.I.** est identique à la valeur,
+ou si son **Adresse** correspond (voir ci-dessous). Si rien ne correspond,
+elle relance la recherche avec le seul nom de voie (« ARMEE ») et refait la
+comparaison sur les adresses.
+
+Pourquoi ne pas se contenter du Nom : le champ **Nom** est un « contient »
+sur un libellé libre, saisi de façon incohérente (`LAMARCK "112"`,
+`14 LAMARCK`, `*98 LAMARCK***30/03/06****`) — le **Nom E.I.** ne sert donc
+qu'en **égalité stricte** avec la valeur cherchée. La colonne **Adresse** est
+normalisée (`<num>[ BIS|TER] <TYPE VOIE> <NOM VOIE> <CP> <VILLE>`), parfois
+précédée du nom de l'immeuble (`grande Armee 62 62 AVENUE DE LA GRANDE ARMEE
+75017 PARIS`) : ce préfixe est ignoré.
 
 Pour chaque ligne :
 1. **Parsing** de l'adresse : numéros (`158/160` → 158 et 160, `128 128BIS` →
@@ -372,7 +382,10 @@ et complet) et `node tests/sigeo-im.panel.e2e.js` (onglet Extraction du
 vrai panneau). Ouvrir `tests/fixtures/sigeo-im-mock.html` dans Chrome
 permet aussi d'essayer la recherche à la main.
 
-**Version** : 2.11.1 — la **Recherche IM SIGEO** passe dans l'onglet
+**Version** : 2.11.2 — Recherche IM : la valeur complète est d'abord tapée
+dans Nom (correspondance sur le Nom E.I. exact ou l'adresse), puis le nom de
+voie si rien n'est trouvé ; adresses SIGEO préfixées du nom reconnues.
+2.11.1 — la **Recherche IM SIGEO** passe dans l'onglet
 **Extraction** (type d'extraction dédié) au lieu du scénario de Saisie.
 2.11.0 — recherche IM SIGEO (adresse → N° E.I. : recherche par nom de voie,
 toutes les pages, correspondance sur la colonne Adresse, statuts OK /

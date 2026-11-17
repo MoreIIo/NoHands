@@ -71,6 +71,7 @@ window.chrome = {
   assert.strictEqual(defaults.imCol, "N° E.I.");
   assert.strictEqual(defaults.statusCol, "Résultat IM");
   assert.strictEqual(defaults.adrCol, "Adresse");
+  assert.strictEqual(defaults.mode, "auto");
 
   // Choix du type « Recherche IM SIGEO » via l'interface
   await panel.check('input[name="extractKind"][value="sigeoIm"]');
@@ -78,7 +79,7 @@ window.chrome = {
   const vis = await panel.evaluate(() => ({ im: !$("imExtractBox").hidden, std: !$("stdExtractBox").hidden, est: $("extractEstimate").textContent }));
   console.log("UI :", JSON.stringify(vis));
   assert.ok(vis.im && !vis.std, "bloc IM visible, bloc standard masqué");
-  assert.ok(/2 voies différentes/.test(vis.est), "estimation par voie");
+  assert.ok(/5 valeurs différentes/.test(vis.est), "estimation : " + vis.est);
 
   // Bouton « Tester sur la ligne de départ » (n'écrit rien)
   await panel.fill("#startRow", "2");
@@ -108,8 +109,11 @@ window.chrome = {
   assert.strictEqual(out.rows[5][ii], "IM0158160");
   assert.ok(/3 OK · 0 erreur\(s\) · 2 à vérifier · 1 ignorée/.test(out.recap), "récap : " + out.recap);
   const searches = await mock.evaluate(() => window.__searches);
-  // test (LAMARCK) + exécution (LAMARCK, SULPICE) : le cache est vidé au démarrage
-  assert.strictEqual(searches, 3);
+  // Mode par défaut « auto » : valeur complète puis nom de voie.
+  // Test : « 129 RUE LAMARCK » (0 résultat) + LAMARCK = 2 ; exécution (cache
+  // vidé) : 129…, LAMARCK, 137…, 8 BOULEVARD…, SAINT SULPICE 28, SULPICE,
+  // 158/160… = 7 → 9.
+  assert.strictEqual(searches, 9);
 
   // Colonne IM = colonne adresse : un statut non OK n'efface pas l'adresse
   await panel.evaluate(() => {

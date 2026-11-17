@@ -293,9 +293,9 @@
     </div>
 
     <div id="imExtractBox" hidden>
-      <p class="hint">Pour chaque ligne : recherche du <strong>nom de voie seul</strong> dans la recherche d'immeubles SIGEO (Site vide), lecture de <strong>toutes les pages</strong>, puis correspondance sur la colonne <strong>Adresse</strong> (numéro + BIS/TER exacts, voie, CP/ville si fournis). 1 IM → OK, plusieurs → Multiple, aucun → Introuvable — jamais de choix arbitraire. Ouvre d'abord la page de recherche des immeubles dans l'onglet cible. Une voie déjà cherchée n'est pas relancée (cache vidé à chaque démarrage).</p>
+      <p class="hint">Pour chaque ligne : la valeur est tapée dans le champ <strong>Nom</strong> de la recherche d'immeubles SIGEO (Site vide), validée, puis <strong>toutes les pages</strong> du tableau sont lues. Une ligne du tableau correspond si son <strong>Nom E.I.</strong> est identique à la valeur, ou si son <strong>Adresse</strong> correspond (numéro + BIS/TER exacts, voie, CP/ville si fournis). Rien trouvé → nouvelle recherche avec le seul nom de voie. 1 IM → OK, plusieurs → Multiple, aucun → Introuvable — jamais de choix arbitraire. Ouvre d'abord la page de recherche dans l'onglet cible. Une recherche déjà faite n'est pas relancée (cache vidé à chaque démarrage).</p>
       <div class="field-row">
-        <label for="imxAdrCol">Colonne adresse :</label>
+        <label for="imxAdrCol">Colonne à chercher :</label>
         <select id="imxAdrCol" data-colselect="plain"></select>
       </div>
       <div class="field-row">
@@ -306,8 +306,9 @@
       </div>
       <div class="field-row">
         <label for="imxMode">Rechercher par :</label>
-        <select id="imxMode" title="Nom : le mot de la voie est tapé dans « Nom » (recherche « contient »). Par adresse : il est tapé dans « Adresse » (+ code postal si connu). Les deux : lance les deux recherches, fusionne, et indique dans le journal combien de correspondances chacune apporte.">
-          <option value="nom">Nom (nom de voie seul)</option>
+        <select id="imxMode" title="Valeur complète : « GRANDE ARMEE 62 » est tapé dans Nom ; si rien ne correspond, nouvelle recherche avec le seul nom de voie (« ARMEE »). Nom de voie seul : directement « ARMEE ». Par adresse : le nom de voie est tapé dans « Adresse » (+ code postal si connu). Les deux : nom de voie par Nom ET par adresse ; le journal indique combien de correspondances chacune apporte.">
+          <option value="auto">Nom : valeur complète, puis nom de voie</option>
+          <option value="nom">Nom : nom de voie seul</option>
           <option value="adresse">Par adresse (voie + CP)</option>
           <option value="both">les deux (comparer)</option>
         </select>

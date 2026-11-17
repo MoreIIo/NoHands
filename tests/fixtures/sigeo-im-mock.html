@@ -89,6 +89,13 @@ add("IM0280028", "ST SULPICE 28", "28 RUE SAINT SULPICE 75006 PARIS");
 add("IM0260026", "SAINT-SULPICE 26", "26 RUE SAINT SULPICE 75006 PARIS");
 add("IM0730073", "SEBASTOPOL 73", "73 BOULEVARD DE SEBASTOPOL 75001 PARIS");
 add("IM0750075", "75 SEBASTOPOL", "75 BOULEVARD DE SEBASTOPOL 75001 PARIS");
+// Cas réels (capture SIGEO) : l'Adresse commence par le nom de l'immeuble
+add("IM0398898", "GRANDE ARMEE 62", "grande Armee 62 62 AVENUE DE LA GRANDE ARMEE 75017 PARIS");
+add("IM0376008", "GRANDE ARMEE 9", "grande Armee 9 9 RUE DE LA GRANDE ARMEE 13001 MARSEILLE");
+add("IM0292154", "4 AV DE LA 1ERE ARMEE FRANCAISE", "4 AV DE LA 1ERE ARMEE FRANCAISE 95160 MONTMORENCY");
+add("IM0352337", "8 RUE DE LA 1ERE ARMEE", "8 RUE DE LA 1ERE ARMEE 67730 CHATENOIS");
+// Nom sans rapport avec l'adresse : trouvé uniquement par le Nom E.I. exact
+add("IM0777777", "RESIDENCE DU PARC", "3 ALLEE DES CHENES 35000 RENNES");
 
 // ---------------------------------------------------------------- moteur
 const FULL = new URLSearchParams(location.search).get("full") === "1";
