@@ -6692,7 +6692,8 @@ function diagWriteResult(ref, rowIdx, text) {
   else renderColumns();
 }
 
-// Adaptateur diagProcess ↔ onglet SIGEO.
+// Adaptateur diagProcess ↔ onglet SIGEO. Chaque appel ré-injecte
+// diagPageOp : aucune référence d'élément ne survit à un postback.
 function diagAdapter(tabId, prefix, batch, timeoutMs) {
   let frameId = 0;
   const run = (target, cfg) => chrome.scripting.executeScript({ target, func: diagPageOp, args: [Object.assign({ ids: DIAG_IDS }, cfg)] });
@@ -6710,6 +6711,15 @@ function diagAdapter(tabId, prefix, batch, timeoutMs) {
     exec: async (cfg) => {
       const r = await run({ tabId, frameIds: [frameId] }, cfg);
       return r && r[0] ? r[0].result : null;
+    },
+    // Repli « Établi le » : handler onchange appelé dans le monde de la page.
+    execMain: async (cfg) => {
+      const r = await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, world: "MAIN", func: diagMainHandler, args: [cfg] });
+      return r && r[0] ? r[0].result : null;
+    },
+    // Navigation en cours dans l'onglet (POST envoyé, réponse pas encore là).
+    tabLoading: async () => {
+      try { return (await chrome.tabs.get(tabId)).status === "loading"; } catch (_) { return false; }
     },
     navigate: (url) => navigateTabAndWait(tabId, url, true, timeoutMs),
     resolveFile: (want) => diagResolveFile(want, batch),
@@ -6768,7 +6778,7 @@ async function execDiagStep(step, rowIdx, tabId, opts = {}) {
   const r = await diagProcess(diagAdapter(tabId, prefix, batch, T), {
     values: norm.v, warnings: norm.warnings, url,
     attach: step.diagAttach !== false, desc: step.diagDesc, simulate: !!step.diagSimulate,
-    batch, confirmUpload: step.diagConfirm !== false, debug: !!step.diagDebug,
+    batch, confirmUpload: step.diagConfirm !== false, debug: !!step.diagDebug, forceLetters: step.diagForceLetters !== false,
     timeoutMs: T, uploadTimeoutMs: step.diagUploadTimeout, rowLabel: "L" + (rowIdx + 1)
   });
   const w = r.warnings.length ? ` ⚠ ${r.warnings.join(" ; ")}` : "";

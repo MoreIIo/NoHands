@@ -7,13 +7,24 @@
  * (description « DPE »).
  *
  * Principe : le side panel pilote ; chaque action est une fonction
- * autonome injectée dans la page (diagPageOp). Un __doPostBack recharge
- * toute la page, ce qui ne coupe pas le déroulé : le panneau attend le
- * nouveau document (identifiant posé sur <html>, readyState complete),
- * le relit et reprend. La saisie est une boucle « lire la page → faire
- * la PREMIÈRE action manquante (ordre du formulaire) → attendre » : elle
- * est donc idempotente et reprend d'elle-même après n'importe quel
- * rechargement.
+ * autonome injectée dans la page (diagPageOp). Certains champs déclenchent
+ * un __doPostBack COMPLET : le formulaire est sérialisé au submit() puis
+ * toute la page est remplacée — ce qu'on écrit ensuite dans l'ancien
+ * document est perdu. D'où (v2.16.0) :
+ *   - un docId par document (content.js et diagPageOp, attribut data-nh-doc
+ *     sur <html>) et un drapeau « navigation en cours » posé par les
+ *     événements formdata / beforeunload / pagehide ;
+ *   - fireAndSettle : un champ à postback à la fois, puis attente d'un
+ *     nouveau document (docId ≠, readyState complete) ou de ~1,5 s de calme
+ *     sans navigation en attente ; 15 s max → POSTBACK_TIMEOUT. Si un champ
+ *     à postback n'a rien déclenché, son handler onchange est appelé
+ *     directement dans le monde de la page (cas d'« Établi le ») ;
+ *   - saisie en phases, toujours basée sur l'écart avec le DOM relu :
+ *     A champs à postback (Type → Fournisseur → Établi le → Conso → GES),
+ *     B champs sans postback (ADEME, dates, coûts, lettres forcées…),
+ *     C contrôle avant enregistrement (2 nouvelles saisies max),
+ *     D Enregistrer + contrôle après, E upload du PDF.
+ *     Tout rechargement inattendu fait repartir de la phase A.
  *
  * Garde-fous : jamais de touche Entrée (Fournisseur et Description
  * déclenchent Enregistrer), jamais « Enreg. et fermer » ; enregistrement
@@ -34,6 +45,8 @@ const DIAG_IDS = Object.freeze({
   dateReal: "body_x_txtDateReal_x_txtDateReal",
   dateFin: "body_x_txtDateFinValid_x_txtDateFinValid",
   dateFinLabel: "fake_txtDateFinValid_x_txtDateFinValid",
+  dateDeb: "body_x_txtDateDebValid_x_txtDateDebValid",
+  ademe: "body_x_textIdDpe_x_textIdDpe",
   ademeTitle: "body_x_titreIdDpe",
   ademeLabel: "body_x_labelIdDpe",
   divConso: "div_conso",
@@ -69,12 +82,13 @@ const DIAG_FIELDS = Object.freeze([
   { k: "type_local", label: "Type de local", hint: "habitation (défaut) / hors habitation" },
   { k: "code_fournisseur", label: "Code fournisseur", req: true },
   { k: "date_etabli", label: "Établi le", req: true },
-  { k: "date_validite", label: "Valable jusqu'au (opt.)" },
+  { k: "date_validite", label: "Valable jusqu'au (opt.)", hint: "jamais saisi : calculé par SIGEO ; avertissement si différent du calcul" },
+  { k: "date_debut_validite", label: "Date début validité (opt.)" },
   { k: "numero_ademe", label: "N° ADEME" },
   { k: "conso_ep", label: "Conso EP (kWh/m²/an)", req: true },
   { k: "emission_ges", label: "Émission GES (kgCO2/m²/an)", req: true },
-  { k: "lettre_ep_forcee", label: "Lettre EP forcée (opt.)" },
-  { k: "lettre_ges_forcee", label: "Lettre GES forcée (opt.)" },
+  { k: "lettre_ep_forcee", label: "Lettre EP du DPE (opt.)", hint: "mise dans « Forcer la lettre » seulement si SIGEO calcule une autre lettre (option)" },
+  { k: "lettre_ges_forcee", label: "Lettre GES du DPE (opt.)", hint: "mise dans « Forcer la lettre » seulement si SIGEO calcule une autre lettre (option)" },
   { k: "altitude_800m", label: "Altitude > 800 m (oui/non)" },
   { k: "nouvelles_valeurs", label: "Nouvelles valeurs (oui/non)" },
   { k: "cout_min", label: "Coût min (€)" },
@@ -92,15 +106,22 @@ const DIAG_PRESETS = Object.freeze({
   // Colonnes écrites par l'extraction « Analyse DPE » (v2.14.0).
   analyse: Object.freeze({
     type_local: "{type_local}", code_fournisseur: "{N° FU}", date_etabli: "{Établi le}",
-    date_validite: "", numero_ademe: "{N° ADEME}", conso_ep: "{Énergie primaire (kWh/m²/an)}",
-    emission_ges: "{GES (kg CO2/m²/an)}", lettre_ep_forcee: "", lettre_ges_forcee: "",
+    date_validite: "{Valable jusqu'au}", date_debut_validite: "", numero_ademe: "{N° ADEME}", conso_ep: "{Énergie primaire (kWh/m²/an)}",
+    emission_ges: "{GES (kg CO2/m²/an)}", lettre_ep_forcee: "{Classe énergie}", lettre_ges_forcee: "{Classe GES}",
     altitude_800m: "", nouvelles_valeurs: "", cout_min: "{Coût min (€/an)}", cout_max: "{Coût max (€/an)}",
     date_prix: "{date_prix}", resultat: "", commentaire: "", fichier_dpe: "{DPE fichier}", lot: "{lot}"
   })
 });
 
 const DIAG_DEFAULTS = Object.freeze({
-  desc: "DPE", resultCol: "Saisie DPE", timeoutMs: 20000, uploadTimeoutMs: 60000, maxPdfBytes: 40 * 1024 * 1024
+  desc: "DPE", resultCol: "Saisie DPE", timeoutMs: 15000, uploadTimeoutMs: 60000, maxPdfBytes: 40 * 1024 * 1024,
+  settleMs: 1500 // calme sans navigation au-delà duquel un change n'a pas déclenché de postback
+});
+
+// Codes d'erreur (en tête du message, donc de la colonne résultat).
+const DIAG_CODES = Object.freeze({
+  timeout: "POSTBACK_TIMEOUT", before: "ECART_AVANT_ENREG", after: "ECART_APRES_ENREG",
+  tooLong: "VALEUR_TROP_LONGUE", ademe: "ADEME_INVALIDE"
 });
 
 /* ---------------------------------------------------------------- *
@@ -213,7 +234,8 @@ function diagParseNum(s) {
 }
 
 // Nombre de la ligne → texte à saisir : entier, sinon virgule et au plus
-// 2 décimales, dans la limite de maxLen caractères (maxlength du champ).
+// 2 décimales, sans espace ni unité. S'il dépasse maxLen caractères
+// (maxlength du champ) : VALEUR_TROP_LONGUE — jamais d'arrondi pour faire tenir.
 function diagNum(input, cell, maxLen) {
   let n;
   if (cell && cell.t === "n" && Number.isFinite(cell.v)) n = cell.v;
@@ -224,15 +246,12 @@ function diagNum(input, cell, maxLen) {
     if (n === null) return { ok: false, error: `nombre illisible « ${s} »` };
   }
   if (n < 0) return { ok: false, error: `nombre négatif : ${n}` };
-  for (let dec = 2; dec >= 0; dec--) {
-    const r = Math.round(n * 10 ** dec) / 10 ** dec;
-    const txt = (dec ? r.toFixed(dec).replace(/0+$/, "").replace(/\.$/, "") : String(Math.round(n))).replace(".", ",");
-    if (!maxLen || txt.length <= maxLen) {
-      const num = Number(txt.replace(",", "."));
-      return { ok: true, value: txt, num, rounded: Math.abs(num - n) > 1e-9 };
-    }
+  const r = Math.round(n * 100) / 100;
+  const txt = (Number.isInteger(r) ? String(r) : r.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")).replace(".", ",");
+  if (maxLen && txt.length > maxLen) {
+    return { ok: false, code: DIAG_CODES.tooLong, error: `« ${txt} » : ${txt.length} caractères, ${maxLen} au maximum` };
   }
-  return { ok: false, error: `nombre trop long (${maxLen} caractères max) : ${n}` };
+  return { ok: true, value: txt, num: r, rounded: Math.abs(r - n) > 1e-9 };
 }
 
 // Égalité numérique entre la valeur relue (« 320,00 ») et la valeur saisie.
@@ -256,8 +275,9 @@ function diagLetter(input) {
 }
 
 const DIAG_ADEME_FMT = /^\d{4}[A-Z]\d{7}[A-Z]$/;
+const diagAdemeKey = (s) => diagNorm(s).toUpperCase().replace(/\s+/g, "");
 function diagAdeme(input) {
-  const s = diagNorm(input).toUpperCase().replace(/\s+/g, "");
+  const s = diagAdemeKey(input);
   return { ok: true, value: s, plausible: !s || DIAG_ADEME_FMT.test(s) };
 }
 
@@ -298,17 +318,24 @@ function diagNormalizeData(raw, now = Date.now()) {
   };
   date("date_etabli", "dateEtabli", true);
   date("date_validite", "dateValidite", false);
+  date("date_debut_validite", "dateDeb", false);
   date("date_prix", "datePrix", false);
   if (v.dateEtabli && diagDateTs(v.dateEtabli) > now) errors.push(`date d'établissement dans le futur : ${v.dateEtabli}`);
+  // « Valable jusqu'au » n'est jamais saisi (SIGEO le calcule) : la valeur
+  // du PDF n'est comparée au calcul que pour avertir.
+  const expFin = diagExpectedValidity(v.dateEtabli);
+  if (v.dateValidite && expFin && v.dateValidite !== expFin) {
+    warnings.push(`« Valable jusqu'au » du DPE (${v.dateValidite}) ≠ calcul SIGEO (${expFin}) — non saisi, SIGEO garde ${expFin}`);
+  }
 
   const a = diagAdeme(txt("numero_ademe"));
   v.ademe = a.value;
-  if (v.ademe && !a.plausible) warnings.push(`N° ADEME au format inhabituel : ${v.ademe} (attendu 4 chiffres, 1 lettre, 7 chiffres, 1 lettre)`);
+  if (v.ademe && !a.plausible) errors.push(`${DIAG_CODES.ademe} — « ${v.ademe} » : format attendu 4 chiffres, 1 lettre, 7 chiffres, 1 lettre (ex. 2021L2000833E)`);
   if (!v.ademe && v.dateEtabli && diagIsNewDpe(v.dateEtabli)) warnings.push(`N° ADEME vide pour un DPE établi le ${v.dateEtabli}`);
 
   const num = (k, key, maxLen, required) => {
     const r = diagNum(g(k).text, g(k).cell, maxLen);
-    if (!r.ok) { errors.push(`${label(k)} : ${r.error}`); v[key] = ""; return; }
+    if (!r.ok) { errors.push(r.code ? `${r.code} — ${label(k).replace(/ \(.*$/, "")} ${r.error}` : `${label(k)} : ${r.error}`); v[key] = ""; return; }
     v[key] = r.value;
     if (!r.value && required) errors.push(emptyMsg(k));
     if (r.rounded) warnings.push(`${label(k)} arrondi à ${r.value}`);
@@ -323,7 +350,9 @@ function diagNormalizeData(raw, now = Date.now()) {
     warnings.push("coûts annuels incomplets (min, max et date d'indexation attendus)");
   }
 
-  for (const [k, key] of [["lettre_ep_forcee", "forceEp"], ["lettre_ges_forcee", "forceGes"]]) {
+  // Lettres du DPE (PDF) : forcées dans SIGEO seulement si elles diffèrent
+  // de la lettre calculée par SIGEO (voir diagLetterSpecs).
+  for (const [k, key] of [["lettre_ep_forcee", "lettreEp"], ["lettre_ges_forcee", "lettreGes"]]) {
     const r = diagLetter(txt(k));
     if (r.ok) v[key] = r.value; else { errors.push(`${label(k)} : ${r.error}`); v[key] = ""; }
   }
@@ -338,6 +367,38 @@ function diagNormalizeData(raw, now = Date.now()) {
   v.lot = diagNorm(g("lot").text);
   return { v, errors, warnings };
 }
+
+/* ---------------------------------------------------------------- *
+ * 1bis. Comparateur normalisé                                       *
+ * ---------------------------------------------------------------- *
+ * kind : num    → parse FR (espaces, virgule, « € », « kWh… » ignorés),
+ *                 égalité si |a − b| < 0,005 (« 224 » = « 224,00 »)
+ *        date   → jj/mm/aaaa, zéros de tête normalisés (« 1/2/2024 » = « 01/02/2024 »)
+ *        ademe  → sans espaces, en majuscules
+ *        letter → une lettre, majuscules ; code → sans espaces ;
+ *        select → valeur exacte ; check → booléen ; text → espaces normalisés */
+function diagSame(kind, got, want) {
+  switch (kind) {
+    case "num": return diagNumEq(got, want);
+    case "date": {
+      const a = diagDate(got), b = diagDate(want);
+      return a.ok && b.ok && !!b.value && a.value === b.value;
+    }
+    case "ademe": return diagAdemeKey(got) === diagAdemeKey(want);
+    case "letter": return diagNorm(got).toUpperCase() === diagNorm(want).toUpperCase();
+    case "code": return String(got ?? "").replace(/\s+/g, "") === String(want ?? "").replace(/\s+/g, "");
+    case "check": return !!got === !!want;
+    case "select": return String(got ?? "") === String(want ?? "");
+    default: return diagNorm(got) === diagNorm(want);
+  }
+}
+// Valeur lisible dans le journal et les messages d'écart.
+function diagShow(kind, x) {
+  if (kind === "check") return x ? "coché" : "décoché";
+  return diagNorm(x);
+}
+// Entre guillemets (« » pour une valeur vide).
+const diagQ = (x) => (x === "" || x === null || x === undefined) ? "« »" : `« ${x} »`;
 
 /* ---------------------------------------------------------------- *
  * 2. Fichier : correspondance stricte, contrôles                    *
@@ -457,29 +518,62 @@ function diagRowHasFile(row, name) {
  * cfg.ids = DIAG_IDS ; cfg.op :
  *   "read"       → instantané de la page (champs, messages, grille…)
  *   "dump"       → instantané + liste de tous les champs (mode debug)
- *   "set"        { actions:[{ key, kind:value|select|check, id|locate, value|checked, trigger? }] }
- *                  l'action « trigger » (postback attendu) est déclenchée
- *                  en différé, pour que le résultat reparte avant le rechargement
+ *   "fire"       { action } → champ à postback : valeur + input/change
+ *                  DIFFÉRÉS (la réponse repart avant le rechargement) ;
+ *                  l'élément est re-résolu par id au moment d'écrire
+ *   "write"      { action } → champ sans postback : valeur + input/change
+ *                  immédiats, relecture, drapeau de navigation
  *   "save"       → clic différé sur « Enregistrer » (jamais « Enreg. et fermer »)
  *   "showAttach" → clic sur « Joindre un document » si le champ Fichier est masqué
  *   "attach"     { desc, b64, name, size } → Description puis fichier
  *                  (DataTransfer) ; le change part en différé (upload).
- * Aucune touche clavier n'est jamais simulée.
+ * action = { key, label, kind: value|select|check, id | locate:"ademe", value | checked }
+ * Aucune touche clavier n'est jamais simulée ; aucun élément n'est conservé
+ * d'un appel à l'autre (chaque appel refait getElementById).
  */
 function diagPageOp(cfg) {
   const ID = cfg.ids;
   const doc = document;
   const byId = (id) => doc.getElementById(id);
-  const norm = (s) => String(s ?? "").replace(/[   ]/g, " ").replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim();
+  const norm = (s) => String(s ?? "").replace(/[   ]/g, " ").replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim();
   const fold = (s) => norm(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
   const fire = (el, t) => el.dispatchEvent(new Event(t, { bubbles: true }));
 
-  // Identifiant du document : change à chaque rechargement (postback).
+  // Identifiant du document : posé une seule fois par document (par
+  // content.js au chargement, ou ici s'il n'y est pas encore), il change
+  // donc à chaque rechargement. crypto.randomUUID n'existe pas sur une page
+  // http (contexte non sécurisé) : repli sur getRandomValues.
   const root = doc.documentElement;
-  if (root && !root.getAttribute("data-nh-diag-doc")) {
-    root.setAttribute("data-nh-diag-doc", Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
+  const uuid = () => {
+    try { if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID(); } catch (_) { /* contexte non sécurisé */ }
+    const b = new Uint8Array(16);
+    try { crypto.getRandomValues(b); } catch (_) { for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256); }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  };
+  if (root && !root.getAttribute("data-nh-doc")) root.setAttribute("data-nh-doc", uuid());
+  const docId = root ? root.getAttribute("data-nh-doc") || "" : "";
+
+  // Navigation en cours. formdata part de façon SYNCHRONE au submit() (le
+  // formulaire vient d'être sérialisé : toute écriture ultérieure est
+  // perdue) ; beforeunload / pagehide quand la page s'en va. Un écouteur
+  // par monde JS (drapeau global, pas un attribut partagé).
+  if (root && !window.__nhDiagLeaveHook) {
+    window.__nhDiagLeaveHook = true;
+    const mark = (attr) => () => { try { root.setAttribute(attr, String(Date.now())); } catch (_) { /* ignoré */ } };
+    doc.addEventListener("formdata", mark("data-nh-submit"), true);
+    window.addEventListener("beforeunload", mark("data-nh-leaving"), true);
+    window.addEventListener("pagehide", mark("data-nh-leaving"), true);
   }
-  const docId = root ? root.getAttribute("data-nh-diag-doc") : "";
+  // Un FormData construit par un script (sans navigation) ne bloque que 3 s.
+  const leaving = () => {
+    if (!root) return false;
+    if (root.hasAttribute("data-nh-leaving")) return true;
+    const t = +(root.getAttribute("data-nh-submit") || 0);
+    return t > 0 && Date.now() - t < 3000;
+  };
 
   function hidden(el) {
     for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
@@ -498,19 +592,29 @@ function diagPageOp(cfg) {
     if (/^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) return String(el.value ?? "");
     return norm(el.textContent);
   };
+  // Champ à postback (détection automatique) : onchange qui appelle
+  // __doPostBack / changeType / performanceEnergetique, case dont le onclick
+  // le fait, ou bouton submit.
+  const PB_RE = /__doPostBack|changeType|performanceEnergetique/;
+  const pbOf = (el) => !!el && (PB_RE.test(el.getAttribute("onchange") || "") ||
+    (/^(checkbox|radio)$/i.test(el.type || "") && PB_RE.test(el.getAttribute("onclick") || "")) ||
+    (el.tagName === "INPUT" && /^(submit|image)$/i.test(el.type || "")));
   const info = (el) => el ? {
     present: true, visible: visible(el), id: el.id, value: valOf(el),
     checked: el.type === "checkbox" ? !!el.checked : undefined,
-    maxLength: el.maxLength > 0 ? el.maxLength : 0, disabled: !!el.disabled, readOnly: !!el.readOnly
-  } : { present: false, visible: false, value: "" };
+    maxLength: el.maxLength > 0 ? el.maxLength : 0, disabled: !!el.disabled, readOnly: !!el.readOnly,
+    pb: pbOf(el)
+  } : { present: false, visible: false, value: "", pb: false };
 
   const knownIds = new Set(Object.values(ID));
   const textInput = (i) => i && i.tagName === "INPUT" && /^(text|)$/i.test(i.getAttribute("type") || "") && !knownIds.has(i.id);
 
-  // N° ADEME : en création, input sans id connu (rendu serveur) dans la
-  // DERNIÈRE cellule de la ligne qui contient « Établi le » ; une fois
-  // enregistré, texte dans span#body_x_labelIdDpe (plus d'input).
+  // N° ADEME : id réel body_x_textIdDpe_x_textIdDpe ; à défaut (ancienne
+  // page) input de la dernière cellule de la ligne « Établi le », id/name,
+  // ou libellé « ADEME » ; texte seul dans span#body_x_labelIdDpe.
   function ademeEl() {
+    const direct = byId(ID.ademe);
+    if (direct && direct.tagName === "INPUT") return { el: direct, via: "id " + ID.ademe };
     const dr = byId(ID.dateReal);
     if (dr) {
       for (let tr = dr.closest("tr"); tr; tr = tr.parentElement && tr.parentElement.closest("tr")) {
@@ -540,13 +644,14 @@ function diagPageOp(cfg) {
     const lab = byId(ID.ademeLabel);
     const labelText = lab ? norm(lab.textContent) : "";
     const a = ademeEl();
+    const inp = a.el ? info(a.el) : null;
     return {
-      mode: a.el ? "input" : (labelText ? "label" : "absent"),
-      input: a.el ? info(a.el) : null, via: a.via, labelText, title: !!byId(ID.ademeTitle)
+      mode: inp && inp.visible ? "input" : (labelText ? "label" : (inp ? "hidden" : "absent")),
+      input: inp, via: a.via, labelText, title: !!byId(ID.ademeTitle)
     };
   }
 
-  // Nom du fournisseur affiché à côté du code (après enregistrement).
+  // Nom du fournisseur affiché à côté du code.
   function supplier() {
     const inp = byId(ID.fou), btn = byId(ID.fouBtn);
     if (!inp) return { name: "", dedicated: false, src: "" };
@@ -610,7 +715,7 @@ function diagPageOp(cfg) {
     const idDiag = (up && up.idDiag !== "0" && up.idDiag) || (ap && ap.idDiag !== "0" && ap.idDiag) || (up ? up.idDiag : "");
     const g = (k) => info(byId(ID[k]));
     const f = {
-      type: g("type"), fou: g("fou"), dateReal: g("dateReal"), dateFin: g("dateFin"),
+      type: g("type"), fou: g("fou"), dateReal: g("dateReal"), dateFin: g("dateFin"), dateDeb: g("dateDeb"),
       conso: g("conso"), consoLettre: g("consoLettre"), ges: g("ges"), gesLettre: g("gesLettre"),
       forceEp: g("forceEp"), forceGes: g("forceGes"), altitude: g("altitude"), nouvelles: g("nouvelles"),
       coutMin: g("coutMin"), coutMax: g("coutMax"), datePrix: g("datePrix"),
@@ -618,8 +723,10 @@ function diagPageOp(cfg) {
     };
     const sel = byId(ID.type);
     f.type.text = sel && sel.selectedIndex >= 0 && sel.options[sel.selectedIndex] ? norm(sel.options[sel.selectedIndex].text) : "";
+    // « Valable jusqu'au » : input caché recalculé par performanceEnergetique, doublé d'un libellé.
     const lab = byId(ID.dateFinLabel);
     f.dateFin.label = lab ? norm(lab.textContent) : "";
+    f.dateFin.shown = norm(f.dateFin.value) || f.dateFin.label;
     const divC = byId(ID.divConso), divK = byId(ID.divCouts);
     const descEl = byId(ID.docDesc), fileEl = byId(ID.docFile), link = byId(ID.linkAdd);
     const attach = {
@@ -630,7 +737,7 @@ function diagPageOp(cfg) {
     const needSave = /veuillez enregistrer le diagnostic/.test(fold(doc.body ? doc.body.textContent : ""));
     const save = byId(ID.save);
     return {
-      docId, url: location.href, readyState: doc.readyState, title: doc.title,
+      docId, leaving: leaving(), url: location.href, readyState: doc.readyState, title: doc.title,
       login: !!doc.querySelector('input[type="password"]'),
       isDiag: /\/diag_manage\//i.test(location.href) && !!byId(ID.type),
       lotId: up ? up.lotId : "", idDiag,
@@ -682,6 +789,7 @@ function diagPageOp(cfg) {
       else if (type !== "file") item.value = (field ? String(el.value ?? "") : norm(el.textContent)).slice(0, 80);
       if (field && el.maxLength > 0) item.maxLength = el.maxLength;
       if (el.readOnly) item.readOnly = true;
+      if (field || tag === "button") item.postback = pbOf(el);
       if (tag === "li") item.cls = el.className;
       for (const h of ["onchange", "onclick", "onblur", "onkeydown", "onkeyup", "href"]) {
         const v = el.getAttribute(h);
@@ -692,15 +800,19 @@ function diagPageOp(cfg) {
     return out;
   }
 
-  // Élément visé par une action.
-  const target = (a) => a.locate === "ademe" ? ademeEl().el : byId(a.id);
+  // Élément visé par une action (toujours re-résolu).
+  const target = (a) => a.locate === "ademe" ? (byId(a.id) || ademeEl().el) : byId(a.id);
   function check(a, el) {
-    if (!el) return `champ introuvable (${a.label || a.key})`;
+    const lbl = a.label || a.key;
+    if (!el) return { msg: `champ introuvable (${lbl})` };
     if (a.kind === "select" && !Array.from(el.options || []).some((o) => o.value === a.value)) {
-      return `option « ${a.value} » absente de la liste ${a.label || a.key}`;
+      return { msg: `option « ${a.value} » absente de la liste ${lbl}` };
     }
-    if (a.kind === "check" && el.type !== "checkbox") return `${a.label || a.key} n'est pas une case à cocher`;
-    return "";
+    if (a.kind === "check" && el.type !== "checkbox") return { msg: `${lbl} n'est pas une case à cocher` };
+    if (a.kind !== "check" && el.maxLength > 0 && String(a.value ?? "").length > el.maxLength) {
+      return { code: "VALEUR_TROP_LONGUE", msg: `${lbl} « ${a.value} » : ${String(a.value).length} caractères, la page en accepte ${el.maxLength}` };
+    }
+    return null;
   }
   function apply(a, el) {
     if (a.kind === "check") {
@@ -716,32 +828,29 @@ function diagPageOp(cfg) {
   if (cfg.op === "read") return snapshot();
   if (cfg.op === "dump") return Object.assign(snapshot(), { dump: dump() });
 
-  if (cfg.op === "set") {
-    const acts = cfg.actions || [];
-    const results = [];
-    for (const a of acts.filter((x) => !x.trigger)) {
-      const el = target(a);
-      const err = check(a, el);
-      if (err) return { ok: false, error: err, results };
-      apply(a, el);
-      results.push({ key: a.key, after: a.kind === "check" ? el.checked : el.value });
+  if (cfg.op === "fire" || cfg.op === "write") {
+    const a = cfg.action || {};
+    const el = target(a);
+    const bad = check(a, el);
+    if (bad) return { ok: false, error: bad.msg, code: bad.code || "", docId };
+    const cur = (e) => (a.kind === "check" ? !!e.checked : valOf(e));
+    const before = cur(el);
+    const pb = pbOf(el);
+    if (cfg.op === "fire") {
+      // Différé : la réponse repart avant un éventuel rechargement ; l'élément
+      // est re-résolu par id au moment d'écrire.
+      setTimeout(() => { const e2 = target(a); if (e2) apply(a, e2); }, 30);
+      return { ok: true, before, pb, docId };
     }
-    const trig = acts.find((x) => x.trigger);
-    if (trig) {
-      const el = target(trig);
-      const err = check(trig, el);
-      if (err) return { ok: false, error: err, results };
-      // Différé : le résultat doit repartir avant le rechargement de la page.
-      setTimeout(() => apply(trig, el), 60);
-      results.push({ key: trig.key, deferred: true });
-    }
-    return { ok: true, results, docId };
+    apply(a, el);
+    const e2 = target(a);
+    return { ok: true, before, after: e2 ? cur(e2) : "", pb, docId, leaving: leaving() };
   }
 
   if (cfg.op === "save") {
     const btn = byId(ID.save);
     if (!btn) return { ok: false, error: "bouton « Enregistrer » introuvable" };
-    setTimeout(() => btn.click(), 60);
+    setTimeout(() => { const b = byId(ID.save); if (b) b.click(); }, 60);
     return { ok: true, docId };
   }
 
@@ -778,7 +887,7 @@ function diagPageOp(cfg) {
       return { ok: false, error: "le fichier n'a pas pu être posé dans le champ Fichier" };
     }
     // onchange="__doPostBack('')" : l'upload part dès le change (différé).
-    setTimeout(() => fire(inp, "change"), 60);
+    setTimeout(() => { const i2 = byId(ID.docFile) || inp; fire(i2, "change"); }, 60);
     return { ok: true, size: got.size, docId };
   }
 
@@ -786,156 +895,253 @@ function diagPageOp(cfg) {
 }
 
 /* ---------------------------------------------------------------- *
- * 5. Prochaine action (logique pure)                                *
+ * 4bis. Repli : appel direct du handler onchange (monde de la page) *
  * ---------------------------------------------------------------- *
- * Parcourt les champs dans l'ordre du formulaire et renvoie les actions
- * « douces » (sans rechargement attendu) jusqu'à la PREMIÈRE action qui
- * déclenche un postback (hard). Les valeurs saisies avant le
- * déclenchement partent avec le POST et survivent ; tout ce qui suivrait
- * serait perdu, d'où l'arrêt au premier postback.
- * st = { attempts: {clé: n}, warned: {clé: true} } (conservé entre passes).
- * → { soft[], hard|null, done, fatal, warnings[] } */
-const DIAG_MAX_ATTEMPTS = 3;
-
-function diagNextActions(s, v, st) {
-  const I = DIAG_IDS;
-  const F = s.f;
-  const out = { soft: [], hard: null, done: false, fatal: "", warnings: [] };
-  const warnOnce = (k, msg) => { if (!st.warned[k]) { st.warned[k] = true; out.warnings.push(msg); } };
-  const can = (a) => {
-    const n = st.attempts[a.key] || 0;
-    if (n < DIAG_MAX_ATTEMPTS) return true;
-    const want = a.kind === "check" ? (a.checked ? "coché" : "décoché") : `« ${a.value} »`;
-    out.fatal = `la page n'accepte pas ${a.label} : saisi ${n} fois ${want}, relu « ${a.got ?? ""} »`;
-    return false;
+ * Injectée avec world: "MAIN" quand un change synthétique n'a déclenché
+ * aucun postback sur un champ qui en attend un (« Établi le » : vérifié
+ * sur la vraie page). Exécute une à une les instructions de l'attribut
+ * onchange (ex. « ValidatorOnChange(event); performanceEnergetique(this); »),
+ * chacune dans son try/catch : this → le champ, event → un Event change.
+ * Seuls des appels de fonctions de la page avec des arguments simples sont
+ * exécutés (pas d'eval). Autonome. */
+function diagMainHandler(cfg) {
+  const el = document.getElementById(cfg.id);
+  if (!el) return { ok: false, error: `champ introuvable (${cfg.id})` };
+  const code = String(el.getAttribute(cfg.attr || "onchange") || "").replace(/^\s*javascript:/i, "");
+  if (!code.trim()) return { ok: false, error: "aucun handler " + (cfg.attr || "onchange") };
+  const ev = new Event("change", { bubbles: true });
+  // Découpe hors chaînes et hors parenthèses.
+  const split = (src, sep) => {
+    const out = [];
+    let cur = "", q = "", depth = 0;
+    for (let i = 0; i < src.length; i++) {
+      const c = src[i];
+      if (q) {
+        cur += c;
+        if (c === "\\" && i + 1 < src.length) { cur += src[++i]; continue; }
+        if (c === q) q = "";
+        continue;
+      }
+      if (c === "'" || c === '"') { q = c; cur += c; continue; }
+      if (c === "(") depth++;
+      if (c === ")") depth--;
+      if (c === sep && depth === 0) { out.push(cur); cur = ""; continue; }
+      cur += c;
+    }
+    out.push(cur);
+    return out;
   };
-  const soft = (a) => { if (!can(a)) return false; out.soft.push(a); return true; };
-  const hard = (a) => { if (can(a)) out.hard = a; return out; };
-
-  // 1. Type (postback)
-  if (!F.type.present) { out.fatal = "liste « Type » introuvable"; return out; }
-  if (F.type.value !== v.type) return hard({ key: "type", kind: "select", id: I.type, value: v.type, label: "Type", got: F.type.value });
-  if (!s.divConso) { out.fatal = "bloc des consommations (div#div_conso) non affiché alors que le type est sélectionné"; return out; }
-
-  // 2. Fournisseur (jamais d'Entrée : elle déclencherait Enregistrer)
-  if (!F.fou.present) { out.fatal = "champ Fournisseur introuvable"; return out; }
-  if (diagNorm(F.fou.value) !== v.fou && !soft({ key: "fou", kind: "value", id: I.fou, value: v.fou, label: "Fournisseur", got: F.fou.value })) return out;
-
-  // 3. Établi le (postback ; calcule « Valable jusqu'au », fait apparaître le N° ADEME)
-  if (!F.dateReal.present) { out.fatal = "champ « Établi le » introuvable"; return out; }
-  const finVal = F.dateFin.visible ? F.dateFin.value : (F.dateFin.label || F.dateFin.value);
-  if (!diagDateEq(F.dateReal.value, v.dateEtabli)) {
-    return hard({ key: "dateReal", kind: "value", id: I.dateReal, value: v.dateEtabli, label: "Établi le", got: F.dateReal.value });
-  }
-  if (!diagNorm(finVal)) {
-    // Date déjà à la bonne valeur sans calcul (saisie perdue avant postback) : on relance le change une fois.
-    if ((st.attempts.dateReal || 0) >= 1) { out.fatal = "« Valable jusqu'au » non calculé après la saisie de la date"; return out; }
-    return hard({ key: "dateReal", kind: "value", id: I.dateReal, value: v.dateEtabli, label: "Établi le", got: F.dateReal.value });
-  }
-  if (v.dateValidite) {
-    if (F.dateFin.present && F.dateFin.visible) {
-      if (!diagDateEq(F.dateFin.value, v.dateValidite) &&
-        !soft({ key: "dateFin", kind: "value", id: I.dateFin, value: v.dateValidite, label: "Valable jusqu'au", got: F.dateFin.value })) return out;
-    } else if (!diagDateEq(finVal, v.dateValidite)) {
-      warnOnce("dateFinRO", `« Valable jusqu'au » affiché ${finVal} ≠ ${v.dateValidite} (non modifiable sur cette fiche)`);
+  const parseArg = (a) => {
+    a = a.trim();
+    if (a === "this") return { v: el };
+    if (a === "event") return { v: ev };
+    if (/^(['"])[\s\S]*\1$/.test(a)) return { v: a.slice(1, -1).replace(/\\(.)/g, "$1") };
+    if (/^-?\d+(\.\d+)?$/.test(a)) return { v: Number(a) };
+    if (a === "true" || a === "false") return { v: a === "true" };
+    if (a === "null") return { v: null };
+    return null;
+  };
+  const calls = [];
+  for (const raw of split(code, ";")) {
+    const st = raw.trim().replace(/^return\s+/, "");
+    if (!st) continue;
+    const m = st.match(/^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(([\s\S]*)\)$/);
+    if (!m) { calls.push({ st, skipped: "instruction non reconnue" }); continue; }
+    const path = m[1].split(".");
+    let owner = window, fn = window;
+    for (const k of path) { owner = fn; fn = fn == null ? undefined : fn[k]; }
+    if (typeof fn !== "function") { calls.push({ st, skipped: "fonction absente" }); continue; }
+    const args = [];
+    let bad = false;
+    for (const a of (m[2].trim() ? split(m[2], ",") : [])) {
+      const p = parseArg(a);
+      if (!p) { bad = true; break; }
+      args.push(p.v);
     }
-  } else {
-    const exp = diagExpectedValidity(v.dateEtabli);
-    if (exp && !diagDateEq(finVal, exp)) warnOnce("dateFinCalc", `« Valable jusqu'au » = ${finVal}, la règle donnerait ${exp}`);
+    if (bad) { calls.push({ st, skipped: "arguments non reconnus" }); continue; }
+    try { fn.apply(path.length > 1 ? owner : window, args); calls.push({ st, ok: true }); }
+    catch (e) { calls.push({ st, error: String((e && e.message) || e) }); }
   }
-
-  // 4. N° ADEME (présent seulement pour certaines dates ; non modifiable une fois enregistré)
-  const A = F.ademe;
-  if (A.mode === "input") {
-    if (v.ademe) {
-      const cur = diagNorm(A.input.value).toUpperCase().replace(/\s+/g, "");
-      if (cur !== v.ademe && !soft({ key: "ademe", kind: "value", locate: "ademe", value: v.ademe, label: "N° ADEME", got: A.input.value })) return out;
-    } else warnOnce("ademeEmpty", "champ N° ADEME affiché mais N° ADEME vide dans les données");
-  } else if (A.mode === "absent" && v.ademe) {
-    warnOnce("ademeAbsent", `champ ADEME non affiché pour cette date (${v.dateEtabli}) : N° ${v.ademe} non saisi`);
-  }
-
-  // 5. Coûts annuels (bloc affiché par le serveur ; revérifié après chaque postback)
-  if (s.couts.visible) {
-    for (const [key, val, label, num] of [["coutMin", v.coutMin, "Coût min", true], ["coutMax", v.coutMax, "Coût max", true], ["datePrix", v.datePrix, "Date d'indexation des prix", false]]) {
-      if (!val) { warnOnce("vide_" + key, `bloc « coûts annuels » affiché mais ${label} vide dans les données`); continue; }
-      const el = F[key];
-      if (!el.present) { warnOnce("abs_" + key, `champ ${label} introuvable dans le bloc coûts`); continue; }
-      const eq = num ? diagNumEq(el.value, val) : diagDateEq(el.value, val);
-      if (!eq && !soft({ key, kind: "value", id: I[key], value: val, label, got: el.value })) return out;
-    }
-  }
-
-  // 6–7. Consommation puis émissions (postbacks ; lettres calculées par le serveur)
-  if (!F.conso.present) { out.fatal = "champ « Conso énergie primaire » introuvable"; return out; }
-  if (!diagNumEq(F.conso.value, v.conso)) return hard({ key: "conso", kind: "value", id: I.conso, value: v.conso, label: "Conso EP", got: F.conso.value });
-  if (!F.ges.present) { out.fatal = "champ « Émission GES » introuvable"; return out; }
-  if (!diagNumEq(F.ges.value, v.ges)) return hard({ key: "ges", kind: "value", id: I.ges, value: v.ges, label: "Émission GES", got: F.ges.value });
-
-  // 8. Cases optionnelles (bloc masqué par le serveur selon le DPE)
-  for (const [key, val, label] of [["altitude", v.altitude, "Altitude > 800 m"], ["nouvelles", v.nouvelles, "Nouvelles valeurs du DPE"]]) {
-    if (val === null || val === undefined) continue;
-    const c = F[key];
-    if (!c.present || !c.visible) continue; // signalé au contrôle final s'il fallait la cocher
-    if (!!c.checked !== val && !soft({ key, kind: "check", id: I[key], checked: val, label, got: c.checked ? "coché" : "décoché" })) return out;
-  }
-
-  // 9. Lettres forcées, résultat, commentaire
-  for (const [key, val, label] of [["forceEp", v.forceEp, "Lettre EP forcée"], ["forceGes", v.forceGes, "Lettre GES forcée"]]) {
-    if (!val) continue;
-    const el = F[key];
-    if (!el.present || !el.visible) { warnOnce("abs_" + key, `champ ${label} non affiché : lettre ${val} non saisie`); continue; }
-    if (diagNorm(el.value).toUpperCase() !== val && !soft({ key, kind: "value", id: I[key], value: val, label, got: el.value })) return out;
-  }
-  for (const [key, val, label] of [["resultat", v.resultat, "Résultat"], ["comment", v.comment, "Commentaires"]]) {
-    if (!val) continue;
-    const el = F[key];
-    if (!el.present) { warnOnce("abs_" + key, `champ ${label} introuvable`); continue; }
-    if (diagNorm(el.value) !== val && !soft({ key, kind: "value", id: I[key], value: val, label, got: el.value })) return out;
-  }
-
-  out.done = !out.soft.length && !out.hard && !out.fatal;
-  return out;
-}
-
-// Relit tout le formulaire et compare aux données (contrôle final).
-function diagCompare(s, v) {
-  const F = s.f, out = [];
-  const add = (label, want, got, ok) => out.push({ label, want, got: got ?? "", ok: !!ok });
-  add("Type", v.type, F.type.value, F.type.value === v.type);
-  add("Fournisseur", v.fou, F.fou.value, diagNorm(F.fou.value) === v.fou);
-  add("Établi le", v.dateEtabli, F.dateReal.value, diagDateEq(F.dateReal.value, v.dateEtabli));
-  if (v.dateValidite && F.dateFin.visible) add("Valable jusqu'au", v.dateValidite, F.dateFin.value, diagDateEq(F.dateFin.value, v.dateValidite));
-  if (v.ademe && F.ademe.mode !== "absent") {
-    const cur = F.ademe.mode === "input" ? F.ademe.input.value : F.ademe.labelText;
-    add("N° ADEME", v.ademe, cur, diagNorm(cur).toUpperCase().replace(/\s+/g, "") === v.ademe);
-  }
-  add("Conso EP", v.conso, F.conso.value, diagNumEq(F.conso.value, v.conso));
-  add("Émission GES", v.ges, F.ges.value, diagNumEq(F.ges.value, v.ges));
-  if (s.couts.visible) {
-    if (v.coutMin) add("Coût min", v.coutMin, F.coutMin.value, diagNumEq(F.coutMin.value, v.coutMin));
-    if (v.coutMax) add("Coût max", v.coutMax, F.coutMax.value, diagNumEq(F.coutMax.value, v.coutMax));
-    if (v.datePrix) add("Date d'indexation", v.datePrix, F.datePrix.value, diagDateEq(F.datePrix.value, v.datePrix));
-  }
-  for (const [key, val, label] of [["altitude", v.altitude, "Altitude > 800 m"], ["nouvelles", v.nouvelles, "Nouvelles valeurs"]]) {
-    if (val === null || val === undefined || !F[key].present || !F[key].visible) continue;
-    add(label, val ? "coché" : "décoché", F[key].checked ? "coché" : "décoché", !!F[key].checked === val);
-  }
-  for (const [key, val, label] of [["forceEp", v.forceEp, "Lettre EP forcée"], ["forceGes", v.forceGes, "Lettre GES forcée"]]) {
-    if (val && F[key].present && F[key].visible) add(label, val, F[key].value, diagNorm(F[key].value).toUpperCase() === val);
-  }
-  if (v.resultat && F.resultat.present) add("Résultat", v.resultat, F.resultat.value, diagNorm(F.resultat.value) === v.resultat);
-  if (v.comment && F.comment.present) add("Commentaires", v.comment, F.comment.value, diagNorm(F.comment.value) === v.comment);
-  return out;
+  return { ok: calls.some((c) => c.ok), calls };
 }
 
 /* ---------------------------------------------------------------- *
- * 6. Orchestration (côté panneau, via un adaptateur)               *
+ * 5. Plan de saisie et comparaison (logique pure)                  *
+ * ---------------------------------------------------------------- *
+ * diagPlan(s, v, opts) → { specs[], warnings[] }, s = instantané (op read).
+ * spec = { key, label, phase, kind (comparateur), act (null = non saisi),
+ *          want, got, ok, present, visible, pb, note? }
+ *   phase "A"    : champs à postback, ordre Type → Fournisseur → Établi le
+ *                  → Conso → GES (un à la fois, fireAndSettle) ;
+ *   phase "calc" : « Valable jusqu'au », calculé par SIGEO à partir
+ *                  d'« Établi le » : vérifié, jamais saisi ;
+ *   phase "B"    : champs sans postback (ADEME, date début validité, coûts,
+ *                  date des prix, lettres forcées, cases, résultat, commentaire).
+ * Les lettres EP/GES ne sont jamais comparées au PDF : la lettre du DPE va
+ * dans « Forcer la lettre » seulement si SIGEO en calcule une autre
+ * (opts.forceLetters, défaut oui) — c'est ce champ-là qui est vérifié. */
+const DIAG_PHASE_A = Object.freeze(["type", "fou", "dateReal", "conso", "ges"]);
+
+function diagPlan(s, v, opts = {}) {
+  const I = DIAG_IDS, F = s.f || {};
+  const specs = [], warnings = [];
+  const fld = (k) => F[k] || { present: false, visible: false, value: "" };
+  const add = (o) => {
+    const f = o.field || fld(o.key);
+    const sp = Object.assign({ present: !!f.present, visible: !!f.visible, pb: !!f.pb, note: "" }, o);
+    delete sp.field;
+    sp.ok = diagSame(sp.kind, sp.got, sp.want);
+    specs.push(sp);
+    return sp;
+  };
+  const val = (k) => fld(k).value;
+
+  // — Phase A (postback) + « Valable jusqu'au » calculé
+  add({ key: "type", label: "Type", phase: "A", kind: "select", act: { kind: "select", id: I.type }, want: v.type, got: val("type") });
+  add({ key: "fou", label: "Fournisseur", phase: "A", kind: "code", act: { kind: "value", id: I.fou }, want: v.fou, got: val("fou") });
+  add({ key: "dateReal", label: "Établi le", phase: "A", kind: "date", act: { kind: "value", id: I.dateReal }, want: v.dateEtabli, got: val("dateReal") });
+  const exp = diagExpectedValidity(v.dateEtabli);
+  const fin = fld("dateFin");
+  if (exp && (fin.present || fin.label)) {
+    add({ key: "dateFin", label: "Valable jusqu'au", phase: "calc", kind: "date", act: null, want: exp,
+      got: fin.shown ?? fin.value, field: Object.assign({}, fin, { present: true, visible: true, pb: false }) });
+  } else if (exp) warnings.push("« Valable jusqu'au » introuvable sur la page : non vérifié");
+  add({ key: "conso", label: "Conso EP", phase: "A", kind: "num", act: { kind: "value", id: I.conso }, want: v.conso, got: val("conso") });
+  add({ key: "ges", label: "Émission GES", phase: "A", kind: "num", act: { kind: "value", id: I.ges }, want: v.ges, got: val("ges") });
+
+  // — Phase B (sans postback)
+  const A = F.ademe || { mode: "absent" };
+  if (v.ademe) {
+    if (A.mode === "input") {
+      add({ key: "ademe", label: "N° ADEME", phase: "B", kind: "ademe", act: { kind: "value", locate: "ademe", id: A.input.id },
+        want: v.ademe, got: A.input.value, field: A.input });
+    } else if (A.mode === "label") {
+      add({ key: "ademe", label: "N° ADEME", phase: "B", kind: "ademe", act: null, want: v.ademe, got: A.labelText,
+        field: { present: true, visible: true, pb: false } });
+    } else warnings.push(`champ N° ADEME ${A.mode === "hidden" ? "masqué" : "absent"} sur la page : N° ${v.ademe} non saisi`);
+  } else if (A.mode === "input" && diagIsNewDpe(v.dateEtabli)) warnings.push("champ N° ADEME affiché mais N° ADEME vide dans les données");
+
+  if (v.dateDeb) {
+    const f = fld("dateDeb");
+    if (f.present && f.visible) add({ key: "dateDeb", label: "Date début validité", phase: "B", kind: "date", act: { kind: "value", id: I.dateDeb }, want: v.dateDeb, got: f.value });
+    else warnings.push(`champ « Date début validité » ${f.present ? "masqué" : "absent"} : ${v.dateDeb} non saisie`);
+  }
+
+  const couts = [["coutMin", v.coutMin, "Coût min", "num"], ["coutMax", v.coutMax, "Coût max", "num"], ["datePrix", v.datePrix, "Date d'indexation des prix", "date"]];
+  if (s.couts && s.couts.visible) {
+    for (const [key, want, label, kind] of couts) {
+      if (!want) { warnings.push(`bloc « coûts annuels » affiché mais ${label} vide dans les données`); continue; }
+      const f = fld(key);
+      if (!f.present) { warnings.push(`champ ${label} introuvable dans le bloc coûts`); continue; }
+      add({ key, label, phase: "B", kind, act: { kind: "value", id: I[key] }, want, got: f.value });
+    }
+  } else if (couts.some((c) => c[1])) warnings.push("bloc « coûts annuels » non affiché : coûts non saisis");
+
+  for (const [key, want, legend, L] of [["forceEp", v.lettreEp, "consoLettre", "EP"], ["forceGes", v.lettreGes, "gesLettre", "GES"]]) {
+    if (!want) continue;
+    const f = fld(key);
+    const sigeo = diagNorm(val(legend)).toUpperCase();
+    const forced = diagNorm(f.value).toUpperCase();
+    let target = null, note = "";
+    if (forced === want) target = want;                    // déjà forcée à la lettre du DPE
+    else if (sigeo === want) { if (forced) target = ""; }  // SIGEO calcule la bonne lettre : on retire un forçage contraire
+    else if (opts.forceLetters !== false) {
+      target = want;
+      note = `lettre ${L} du DPE ${want} ≠ lettre calculée par SIGEO ${sigeo || "(vide)"} → forcée`;
+    } else warnings.push(`lettre ${L} du DPE ${want} ≠ lettre calculée par SIGEO ${sigeo || "(vide)"} — non forcée (option désactivée)`);
+    if (target === null) continue;
+    if (!f.present || !f.visible) { warnings.push(`champ « Forcer la lettre ${L} » non affiché : lettre ${want} non forcée`); continue; }
+    add({ key, label: `Lettre ${L} forcée`, phase: "B", kind: "letter", act: { kind: "value", id: I[key] }, want: target, got: f.value, note });
+  }
+
+  for (const [key, want, label] of [["altitude", v.altitude, "Altitude > 800 m"], ["nouvelles", v.nouvelles, "Nouvelles valeurs du DPE"]]) {
+    if (want === null || want === undefined) continue;
+    const f = fld(key);
+    if (!f.present || !f.visible) { if (want) warnings.push(`case « ${label} » non affichée : non cochée`); continue; }
+    add({ key, label, phase: "B", kind: "check", act: { kind: "check", id: I[key] }, want, got: !!f.checked });
+  }
+  for (const [key, want, label] of [["resultat", v.resultat, "Résultat"], ["comment", v.comment, "Commentaires"]]) {
+    if (!want) continue;
+    const f = fld(key);
+    if (!f.present) { warnings.push(`champ ${label} introuvable`); continue; }
+    add({ key, label, phase: "B", kind: "text", act: { kind: "value", id: I[key] }, want, got: f.value });
+  }
+  return { specs, warnings };
+}
+
+// Comparaison complète (contrôles avant / après enregistrement).
+function diagCompare(s, v, opts = {}) {
+  return diagPlan(s, v, opts).specs.map((x) => ({ key: x.key, label: x.label, kind: x.kind, want: x.want, got: x.got ?? "", ok: x.ok }));
+}
+
+// « 2 écart(s) : N° ADEME attendu « … », relu « … » ; … » (TOUS les écarts).
+function diagGapText(gaps) {
+  return `${gaps.length} écart(s) : ` + gaps.map((g) => `${g.label} attendu ${diagQ(diagShow(g.kind, g.want))}, relu ${diagQ(diagShow(g.kind, g.got))}`).join(" ; ");
+}
+
+/* ---------------------------------------------------------------- *
+ * 6. Attente après un déclenchement (fireAndSettle)                 *
+ * ---------------------------------------------------------------- *
+ * Interroge la frame jusqu'à :
+ *   a) un NOUVEAU document (docId ≠ docBefore) en readyState complete
+ *      → { reloaded: true, snap } ;
+ *   b) ou quietMs (~1,5 s) d'affilée sans navigation en attente — même
+ *      document, chargé, pas de drapeau formdata/beforeunload, onglet pas
+ *      en chargement — → { reloaded: false, snap } (pas de postback) ;
+ *      jamais si o.mustReload (Enregistrer, upload) ;
+ *   c) au-delà de timeoutMs → { timeout: true } ;
+ *   o.doneWhen(snap) : fin acceptée aussi sur le MÊME document (mise à jour
+ *      partielle d'un update panel) → { reloaded: false, partial: true }.
+ * read() renvoie null pendant que la page est remplacée ; une lecture qui
+ * ne répond pas (frame en pleine navigation) est abandonnée après
+ * o.readCapMs et comptée comme « navigation en cours », pour que le délai
+ * global s'applique toujours. o.ignoreLoading : l'onglet était déjà
+ * « loading » avant le déclenchement (non significatif). */
+function diagCapped(promise, ms) {
+  return new Promise((resolve) => {
+    let done = false;
+    const end = (x) => { if (!done) { done = true; clearTimeout(t); resolve(x); } };
+    const t = setTimeout(() => end(null), ms);
+    Promise.resolve(promise).then(end, () => end(null));
+  });
+}
+async function diagSettle(ad, read, docBefore, o = {}) {
+  const quietMs = o.quietMs ?? DIAG_DEFAULTS.settleMs;
+  const timeoutMs = o.timeoutMs ?? DIAG_DEFAULTS.timeoutMs;
+  const capMs = o.readCapMs ?? 2500;
+  const t0 = ad.now();
+  let quietSince = null, last = null, sawLeaving = false;
+  for (;;) {
+    if (ad.stopped()) return { stopped: true };
+    let s = null;
+    try { s = await diagCapped(read(), capMs); } catch (_) { s = null; }
+    if (s) last = s;
+    if (s && s.docId && s.docId !== docBefore && s.readyState === "complete") return { reloaded: true, snap: s, sawLeaving };
+    if (s && s.leaving) sawLeaving = true;
+    if (o.doneWhen && s && s.docId === docBefore && s.readyState === "complete" && !s.leaving && o.doneWhen(s)) {
+      return { reloaded: false, partial: true, snap: s, sawLeaving };
+    }
+    let loading = false;
+    if (!o.ignoreLoading && ad.tabLoading) { try { loading = !!(await ad.tabLoading()); } catch (_) { loading = false; } }
+    const pending = !s || s.readyState !== "complete" || s.docId !== docBefore || !!s.leaving || loading;
+    if (!pending && !o.mustReload) {
+      if (quietSince === null) quietSince = ad.now();
+      if (ad.now() - quietSince >= quietMs) return { reloaded: false, snap: s, sawLeaving };
+    } else quietSince = null;
+    if (ad.now() - t0 > timeoutMs) return { timeout: true, snap: last, sawLeaving };
+    await ad.sleep(o.pollMs ?? 150);
+  }
+}
+
+/* ---------------------------------------------------------------- *
+ * 7. Orchestration (côté panneau, via un adaptateur)               *
  * ---------------------------------------------------------------- *
  * ad = {
  *   read():            instantané (op "read") ou null si la page est en
  *                      cours de chargement
  *   exec(cfg):         résultat d'une op de diagPageOp dans la frame du formulaire
+ *   execMain(cfg):     diagMainHandler dans le monde de la page (facultatif)
+ *   tabLoading():      l'onglet est-il en chargement ? (facultatif)
  *   navigate(url):     { ok, error? }
  *   resolveFile({ name, ademe }): { file:{ name, path, size }, via, bytes() } | { error }
  *   pdfText(bytes):    texte du PDF ("" si illisible)
@@ -945,24 +1151,33 @@ function diagCompare(s, v) {
  *   log(text, cls), sleep(ms), now(), stopped()
  * }
  * p = { values, warnings, url, attach, desc, simulate, batch, confirmUpload,
- *       debug, timeoutMs, uploadTimeoutMs, rowLabel }
- * → { ok, status, error?, warnings[], idDiag, file, info } */
+ *       forceLetters, debug, timeoutMs, uploadTimeoutMs, settleMs, rowLabel }
+ * → { ok, status, code, error?, warnings[], idDiag, file, info } */
 async function diagProcess(ad, p) {
   const v = p.values;
+  const opts = { forceLetters: p.forceLetters !== false };
   const warnings = [];
-  const res = { ok: false, status: "ERREUR", warnings, idDiag: "", file: "", info: "" };
+  const res = { ok: false, status: "ERREUR", code: "", warnings, idDiag: "", file: "", info: "" };
   const T = Math.max(3000, p.timeoutMs || DIAG_DEFAULTS.timeoutMs);
   const TU = Math.max(T, p.uploadTimeoutMs || DIAG_DEFAULTS.uploadTimeoutMs);
+  const QUIET = p.settleMs || DIAG_DEFAULTS.settleMs;
   const desc = diagNorm(p.desc) || DIAG_DEFAULTS.desc;
+  const sec = (ms) => Math.round(ms / 1000);
   const log = (t, c) => { if (ad.log) ad.log(t, c); };
   const warn = (w) => { if (!warnings.includes(w)) { warnings.push(w); log("⚠ " + w, "skip"); } };
-  const fail = (msg, status = "ERREUR") => Object.assign(res, { ok: false, status, error: msg });
+  const fail = (msg, status = "ERREUR", code = "") => {
+    const c = code || (String(msg).match(/^([A-Z_]{8,}) — /) || [])[1] || "";
+    return Object.assign(res, { ok: false, status, code: c, error: msg });
+  };
+  const E = (error, status = "ERREUR", code = "") => ({ error, status, code });
   (p.warnings || []).forEach(warn);
 
   let lastDoc = "";
+  // Lecture bornée : pendant une navigation la frame peut ne pas répondre.
+  const readCap = Math.min(T, 2500);
   const read = async () => {
     let s = null;
-    try { s = await ad.read(); } catch (_) { s = null; }
+    try { s = await diagCapped(ad.read(), readCap); } catch (_) { s = null; }
     if (s && s.docId !== lastDoc && s.readyState === "complete") {
       lastDoc = s.docId;
       if (p.debug && ad.debug) {
@@ -971,16 +1186,20 @@ async function diagProcess(ad, p) {
     }
     return s;
   };
-  // Attend un NOUVEAU document (postback terminé) — erreur au-delà du délai.
-  const waitReload = async (docId, timeoutMs) => {
+  const tabLoading = async () => {
+    if (!ad.tabLoading) return false;
+    try { return !!(await ad.tabLoading()); } catch (_) { return false; }
+  };
+  const settle = (docBefore, o = {}) => diagSettle(ad, read, docBefore, Object.assign({ quietMs: QUIET, timeoutMs: T }, o));
+  // Document chargé, sans navigation en attente.
+  const stable = async () => {
     const t0 = ad.now();
-    await ad.sleep(300);
     for (;;) {
       if (ad.stopped()) return { stopped: true };
       const s = await read();
-      if (s && s.docId !== docId && s.readyState === "complete") return { snap: s };
-      if (ad.now() - t0 > timeoutMs) return { timeout: true };
-      await ad.sleep(250);
+      if (s && s.readyState === "complete" && !s.leaving) return { snap: s };
+      if (ad.now() - t0 > T) return { timeout: true };
+      await ad.sleep(150);
     }
   };
   const pageError = (s) => {
@@ -1026,8 +1245,9 @@ async function diagProcess(ad, p) {
 
   const key = diagJournalKey(s.lotId, v);
   const J = await ad.journalGet(key);
-  if (s.f.ademe.mode === "label" && v.ademe && diagNorm(s.f.ademe.labelText).toUpperCase().replace(/\s+/g, "") !== v.ademe) {
-    return fail(`mauvaise fiche : N° ADEME affiché ${s.f.ademe.labelText} ≠ ${v.ademe} — rien n'a été modifié`, "PAGE");
+  const shownAdeme = s.f.ademe.mode === "label" ? s.f.ademe.labelText : (s.saved && s.f.ademe.input ? s.f.ademe.input.value : "");
+  if (v.ademe && diagAdemeKey(shownAdeme) && diagAdemeKey(shownAdeme) !== v.ademe) {
+    return fail(`mauvaise fiche : N° ADEME affiché ${diagAdemeKey(shownAdeme)} ≠ ${v.ademe} — rien n'a été modifié`, "PAGE");
   }
   if (!s.saved && J) {
     if (J.idDiag || ["saved", "uploading", "done"].includes(J.phase)) {
@@ -1076,71 +1296,177 @@ async function diagProcess(ad, p) {
     if (e) return fail(`fichier DPE ${e}${s.saved ? "" : " — rien n'a été saisi"}`, "FICHIER");
   }
 
-  // — 3. Saisie : boucle « lire → première action manquante → attendre »
+  // — 3. Saisie en phases (toujours d'après l'écart avec le DOM relu)
   if (!s.saved && !J) await ad.journalSet(key, { phase: "filling", row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
-  const st = { attempts: {}, warned: {} };
-  let changed = false, ademeSeen = s.f.ademe.mode === "input";
-  for (let iter = 0; ; iter++) {
-    if (ad.stopped()) return fail("arrêté par l'utilisateur", "ARRÊT");
-    if (iter > 40) return fail("saisie non stabilisée après 40 passes");
-    const plan = diagNextActions(s, v, st);
-    plan.warnings.forEach(warn);
-    if (plan.fatal) return fail(plan.fatal);
-    if (s.f.ademe.mode === "input") ademeSeen = true;
-    if (plan.done) break;
-    const acts = plan.soft.concat(plan.hard ? [Object.assign({}, plan.hard, { trigger: true })] : []);
-    acts.forEach((a) => { st.attempts[a.key] = (st.attempts[a.key] || 0) + 1; });
-    log("saisie : " + acts.map((a) => `${a.label} = ${a.kind === "check" ? (a.checked ? "coché" : "décoché") : "« " + a.value + " »"}`).join(", ") +
-      (plan.hard ? " → rechargement" : ""));
-    if (plan.hard && !s.saved) await ad.journalSet(key, { phase: "filling", step: plan.hard.key, row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
-    const before = s.docId;
-    let r;
-    try { r = await ad.exec({ op: "set", actions: acts }); } catch (e) { r = { ok: false, error: e.message || String(e) }; }
-    if (!r || !r.ok) return fail("saisie impossible : " + ((r && r.error) || "page indisponible"));
-    changed = true;
-    let reloaded = !!plan.hard;
-    if (!plan.hard) {
-      await ad.sleep(700); // un champ « doux » a-t-il quand même déclenché un postback ?
-      const s2 = await read();
-      if (s2 && s2.docId === before) s = s2;
-      else { reloaded = true; log("rechargement inattendu après la saisie — reprise"); }
-    }
-    if (reloaded) {
-      const w = await waitReload(before, T);
-      if (w.stopped) return fail("arrêté par l'utilisateur", "ARRÊT");
-      if (w.timeout) return fail(`pas de rechargement de la page après « ${plan.hard ? plan.hard.label : "saisie"} » (${Math.round(T / 1000)} s)`);
-      s = w.snap;
-      const e = pageError(s);
-      if (e) return fail(e, s.login ? "AUTH" : "PAGE");
-      const errs = msgErrors(s);
-      if (errs.length) return fail("SIGEO : " + errs.join(" | "), "REFUS");
-      if (plan.hard && plan.hard.key === "type" && !s.divConso) return fail("bloc des consommations non affiché après le choix du type");
-      if (plan.hard && plan.hard.key === "dateReal") {
-        const fin = s.f.dateFin.visible ? s.f.dateFin.value : (s.f.dateFin.label || s.f.dateFin.value);
-        log(`valable jusqu'au : ${fin || "(vide)"} · champ ADEME : ${s.f.ademe.mode === "input" ? "affiché (" + s.f.ademe.via + ")" : s.f.ademe.mode === "label" ? "enregistré" : "absent"} · coûts annuels : ${s.couts.visible ? "affichés" : "masqués"}`);
-      }
-      if (plan.hard && plan.hard.key === "conso") log(`lettre EP : ${s.f.consoLettre.value || "(vide)"}`);
-      if (plan.hard && plan.hard.key === "ges") log(`lettre GES : ${s.f.gesLettre.value || "(vide)"}`);
-    }
-  }
+  const st = { attempts: {}, restarts: 0, cRounds: 0 };
+  let changed = false;
+  const actOf = (sp) => Object.assign({ key: sp.key, label: sp.label, value: sp.want, checked: !!sp.want }, sp.act);
+  const gotAfter = (snap, sp) => {
+    const x = snap ? diagPlan(snap, v, opts).specs.find((y) => y.key === sp.key) : null;
+    return x ? diagShow(x.kind, x.got) : "(champ absent)";
+  };
 
-  // — Contrôle final : toutes les valeurs relues, lettres calculées
-  if (!diagNorm(s.f.consoLettre.value) && !v.forceEp) return fail(`lettre EP non calculée par SIGEO (conso ${v.conso})`);
-  if (!diagNorm(s.f.gesLettre.value) && !v.forceGes) return fail(`lettre GES non calculée par SIGEO (émission ${v.ges})`);
-  if (!s.couts.visible && (v.coutMin || v.coutMax || v.datePrix)) warn("bloc « coûts annuels » non affiché : coûts non saisis");
-  for (const [key, val, label] of [["altitude", v.altitude, "Altitude > 800 m"], ["nouvelles", v.nouvelles, "Nouvelles valeurs du DPE"]]) {
-    if (val && !(s.f[key].present && s.f[key].visible)) warn(`case « ${label} » non affichée : non cochée`);
+  // fireAndSettle : UN champ à postback, puis rechargement complet ou calme.
+  const fireAndSettle = async (sp, why) => {
+    const w0 = await stable();
+    if (w0.stopped) return E("arrêté par l'utilisateur", "ARRÊT");
+    if (w0.timeout) return E(`${DIAG_CODES.timeout} — page toujours en rechargement avant « ${sp.label} » (${sec(T)} s)`, "ERREUR", DIAG_CODES.timeout);
+    const s0 = w0.snap;
+    const pe0 = pageError(s0);
+    if (pe0) return E(pe0, s0.login ? "AUTH" : "PAGE");
+    const loading0 = await tabLoading();
+    if (sp.note) log(sp.note);
+    let r;
+    try { r = await ad.exec({ op: "fire", action: actOf(sp) }); } catch (e) { r = { ok: false, error: e.message || String(e) }; }
+    if (!r || !r.ok) {
+      if (r && r.code) return E(`${r.code} — ${r.error}`, "ERREUR", r.code);
+      return E(`saisie impossible (${sp.label}) : ${(r && r.error) || "page indisponible"}`);
+    }
+    changed = true;
+    let w = await settle(s0.docId, { ignoreLoading: loading0 });
+    let how = "";
+    if (!w.stopped && !w.timeout && !w.reloaded && r.pb && ad.execMain) {
+      // Champ à postback resté sans effet : le change synthétique n'a pas
+      // atteint le postback (« Établi le ») → appel direct du handler.
+      log(`${sp.label} : pas de postback après le change synthétique → appel direct du handler onchange`, "skip");
+      let m;
+      try { m = await ad.execMain({ id: (sp.act && sp.act.id) || "" }); } catch (e) { m = { ok: false, error: e.message || String(e) }; }
+      if (m && m.calls) log(`handler : ${m.calls.map((c) => `${c.st.slice(0, 60)} ${c.ok ? "✓" : c.error ? "✗ " + c.error : "— " + c.skipped}`).join(" · ")}`, "skip");
+      else if (m && m.error) log(`handler : ${m.error}`, "skip");
+      w = await settle(s0.docId, { ignoreLoading: loading0 });
+      how = " (handler appelé)";
+    }
+    if (w.stopped) return E("arrêté par l'utilisateur", "ARRÊT");
+    if (w.timeout) return E(`${DIAG_CODES.timeout} — « ${sp.label} » : rechargement non terminé après ${sec(T)} s`, "ERREUR", DIAG_CODES.timeout);
+    const s1 = w.snap;
+    if (w.reloaded) log(`↻ postback (${sp.label})`);
+    log(`${sp.label} : attendu ${diagQ(diagShow(sp.kind, sp.want))} · avant ${diagQ(diagShow(sp.kind, r.before))} · après ${diagQ(gotAfter(s1, sp))}` +
+      `${w.reloaded ? "" : " — sans postback" + how}${why ? " — " + why : ""}`);
+    if (w.reloaded) {
+      const pe1 = pageError(s1);
+      if (pe1) return E(pe1, s1.login ? "AUTH" : "PAGE");
+      const errs = msgErrors(s1);
+      if (errs.length) return E("SIGEO : " + errs.join(" | "), "REFUS");
+    }
+    return { snap: s1, reloaded: !!w.reloaded };
+  };
+
+  // Phase A : champs à postback, un par un, dans l'ordre ; on repart
+  // toujours du DOM relu (un postback peut en défaire un autre).
+  const phaseA = async () => {
+    for (let guard = 0; guard < 40; guard++) {
+      const w = await stable();
+      if (w.stopped) return E("arrêté par l'utilisateur", "ARRÊT");
+      if (w.timeout) return E(`${DIAG_CODES.timeout} — page toujours en rechargement (${sec(T)} s)`, "ERREUR", DIAG_CODES.timeout);
+      s = w.snap;
+      const pe1 = pageError(s);
+      if (pe1) return E(pe1, s.login ? "AUTH" : "PAGE");
+      const plan = diagPlan(s, v, opts);
+      const gap = plan.specs.find((x) => !x.ok && (x.phase === "A" || (x.phase === "calc" && (st.attempts.dateFin || 0) < 2)));
+      if (!gap) return { snap: s };
+      if (gap.key !== "type" && gap.key !== "fou" && !s.divConso) return E("bloc des consommations (div#div_conso) non affiché alors que le type est sélectionné");
+      let sp = gap, why = "";
+      if (gap.phase === "calc") {
+        // « Valable jusqu'au » ≠ calcul : « Établi le » n'a pas été pris en compte → nouveau déclenchement.
+        st.attempts.dateFin = (st.attempts.dateFin || 0) + 1;
+        sp = plan.specs.find((x) => x.key === "dateReal");
+        why = `« Valable jusqu'au » = ${diagQ(diagShow("date", gap.got))} au lieu de ${gap.want} : nouveau déclenchement`;
+      } else if (!gap.present) return E(`champ « ${gap.label} » introuvable sur la fiche`, "PAGE");
+      const n = st.attempts[sp.key] = (st.attempts[sp.key] || 0) + 1;
+      if (n > 3) {
+        return E(`${DIAG_CODES.before} — la page ne retient pas ${sp.label} : saisi ${n - 1} fois ${diagQ(diagShow(sp.kind, sp.want))}, relu ${diagQ(diagShow(sp.kind, sp.got))}`, "ERREUR", DIAG_CODES.before);
+      }
+      const r = await fireAndSettle(sp, why);
+      if (r.error) return r;
+      if (sp.key === "type" && !r.snap.divConso) return E("bloc des consommations non affiché après le choix du type");
+      if (sp.key === "conso" && r.reloaded) log(`lettre EP calculée par SIGEO : ${diagNorm(r.snap.f.consoLettre.value) || "(vide)"}`);
+      if (sp.key === "ges" && r.reloaded) log(`lettre GES calculée par SIGEO : ${diagNorm(r.snap.f.gesLettre.value) || "(vide)"}`);
+    }
+    return E("saisie non stabilisée (phase A : 40 passes)");
+  };
+
+  // Phase B : champs sans postback, SEULEMENT après la phase A. Valeur +
+  // input/change ; tout rechargement observé → reprise en phase A.
+  const phaseB = async () => {
+    const w = await stable();
+    if (w.stopped) return E("arrêté par l'utilisateur", "ARRÊT");
+    if (w.timeout) return E(`${DIAG_CODES.timeout} — page toujours en rechargement (${sec(T)} s)`, "ERREUR", DIAG_CODES.timeout);
+    s = w.snap;
+    let docRef = s.docId, wrote = false;
+    for (const sp of diagPlan(s, v, opts).specs.filter((x) => x.phase === "B" && !x.ok && x.act)) {
+      const cur = await read();
+      if (!cur || cur.docId !== docRef || cur.leaving || cur.readyState !== "complete") return { restart: `avant « ${sp.label} »` };
+      if (sp.pb) {
+        // Détecté comme champ à postback (onchange) : traité comme en phase A.
+        const n = st.attempts[sp.key] = (st.attempts[sp.key] || 0) + 1;
+        if (n > 3) return E(`${DIAG_CODES.before} — la page ne retient pas ${sp.label} : saisi ${n - 1} fois ${diagQ(diagShow(sp.kind, sp.want))}, relu ${diagQ(diagShow(sp.kind, sp.got))}`, "ERREUR", DIAG_CODES.before);
+        const r = await fireAndSettle(sp, "champ à postback détecté");
+        if (r.error) return r;
+        if (r.reloaded) return { restart: `après « ${sp.label} »`, expected: true };
+        docRef = r.snap.docId;
+        continue;
+      }
+      if (sp.note) log(sp.note);
+      let r;
+      try { r = await ad.exec({ op: "write", action: actOf(sp) }); } catch (e) { r = { ok: false, error: e.message || String(e) }; }
+      if (!r || !r.ok) {
+        if (r && r.code) return E(`${r.code} — ${r.error}`, "ERREUR", r.code);
+        const again = await read();
+        if (!again || again.docId !== docRef) return { restart: `pendant « ${sp.label} »` };
+        return E(`saisie impossible (${sp.label}) : ${(r && r.error) || "page indisponible"}`);
+      }
+      changed = true;
+      wrote = true;
+      log(`${sp.label} : attendu ${diagQ(diagShow(sp.kind, sp.want))} · avant ${diagQ(diagShow(sp.kind, r.before))} · après ${diagQ(diagShow(sp.kind, r.after))}`);
+      if (r.leaving || (r.docId && r.docId !== docRef)) return { restart: `après « ${sp.label} »` };
+    }
+    if (!wrote) return { snap: s };
+    // Aucun champ « sans postback » ne doit avoir rechargé la page.
+    const w2 = await settle(docRef);
+    if (w2.stopped) return E("arrêté par l'utilisateur", "ARRÊT");
+    if (w2.timeout) return E(`${DIAG_CODES.timeout} — rechargement non terminé après la phase B (${sec(T)} s)`, "ERREUR", DIAG_CODES.timeout);
+    if (w2.reloaded) return { restart: "après la phase B" };
+    s = w2.snap;
+    return { snap: s };
+  };
+
+  let finalPlan = null;
+  for (;;) {
+    if (ad.stopped()) return fail("arrêté par l'utilisateur", "ARRÊT");
+    if (st.restarts > 4) return fail("saisie non stabilisée : trop de rechargements inattendus");
+    const a = await phaseA();
+    if (a.error) return fail(a.error, a.status, a.code);
+    const b = await phaseB();
+    if (b.error) return fail(b.error, b.status, b.code);
+    if (b.restart !== undefined) {
+      if (b.expected) log(`↻ reprise en phase A (postback ${b.restart})`);
+      else { st.restarts++; log(`↻ rechargement inattendu ${b.restart} — reprise en phase A`, "skip"); }
+      continue;
+    }
+    // — Phase C : contrôle AVANT enregistrement (relecture complète)
+    s = b.snap;
+    const L = (k) => diagNorm(s.f[k].value);
+    if (!L("consoLettre") && !(v.lettreEp && opts.forceLetters)) return fail(`lettre EP non calculée par SIGEO (conso ${v.conso}) : le postback de la consommation n'a pas eu lieu`);
+    if (!L("gesLettre") && !(v.lettreGes && opts.forceLetters)) return fail(`lettre GES non calculée par SIGEO (émission ${v.ges}) : le postback des émissions n'a pas eu lieu`);
+    const plan = diagPlan(s, v, opts);
+    const gaps = plan.specs.filter((x) => !x.ok);
+    if (!gaps.length) { plan.warnings.forEach(warn); finalPlan = plan; break; }
+    const fixable = gaps.some((g) => g.act || (g.phase === "calc" && (st.attempts.dateFin || 0) < 2));
+    st.cRounds++;
+    if (!fixable || st.cRounds > 2) return fail(`${DIAG_CODES.before} — ${diagGapText(gaps)}`, "ERREUR", DIAG_CODES.before);
+    log(`contrôle avant enregistrement : ${gaps.length} écart(s) → nouvelle saisie (essai ${st.cRounds}/2) : ${gaps.map((g) => g.label).join(", ")}`, "skip");
   }
-  const cmp = diagCompare(s, v);
-  const bad = cmp.filter((c) => !c.ok);
-  if (bad.length) return fail("contrôle avant enregistrement : " + bad.map((c) => `${c.label} attendu « ${c.want} », relu « ${c.got} »`).join(" ; "));
-  log(`contrôle : ${cmp.length} valeur(s) conforme(s) · lettres ${s.f.consoLettre.value || v.forceEp}/${s.f.gesLettre.value || v.forceGes}`, "ok");
+  const showOf = (plan, k) => { const x = plan.specs.find((y) => y.key === k); return x ? `${x.label} ${diagShow(x.kind, x.got)}` : ""; };
+  const summary = (plan) => ["conso", "ges", "dateFin", "ademe"].map((k) => showOf(plan, k)).filter(Boolean).join(" · ");
+  const letters = () => `${diagNorm(s.f.consoLettre.value) || "?"}/${diagNorm(s.f.gesLettre.value) || "?"}`;
+  log(`contrôle avant enregistrement : ${finalPlan.specs.length} valeur(s) conforme(s) · lettres SIGEO ${letters()}`, "ok");
 
   if (p.simulate) {
-    return Object.assign(res, { ok: true, status: "SIMULATION", idDiag: s.idDiag !== "0" ? s.idDiag : "", info: `simulation : formulaire rempli et contrôlé (${cmp.length} valeurs), non enregistré` });
+    return Object.assign(res, { ok: true, status: "SIMULATION", idDiag: s.idDiag !== "0" ? s.idDiag : "",
+      info: `simulation : formulaire rempli et contrôlé (${finalPlan.specs.length} valeurs : ${summary(finalPlan)}), non enregistré` });
   }
 
-  // — 4. Enregistrer (une seule fois ; jamais « Enreg. et fermer »)
+  // — Phase D : Enregistrer (une seule fois ; jamais « Enreg. et fermer »)
   if (!s.saved || changed) {
     if (!s.saveBtn.present) return fail("bouton « Enregistrer » introuvable");
     const isNew = !s.saved;
@@ -1149,10 +1475,11 @@ async function diagProcess(ad, p) {
     const r = await ad.exec({ op: "save" });
     if (!r || !r.ok) return fail("Enregistrer : " + ((r && r.error) || "page indisponible"));
     log(isNew ? "Enregistrer → création du diagnostic" : "Enregistrer → mise à jour du diagnostic");
-    const w = await waitReload(before, T);
+    const w = await settle(before, { mustReload: true });
     if (w.stopped) return fail("arrêté pendant l'enregistrement — vérifie dans SIGEO", "ARRÊT");
-    if (w.timeout) return fail(`pas de rechargement après « Enregistrer » (${Math.round(T / 1000)} s) — vérifie dans SIGEO si le diagnostic a été créé`);
+    if (w.timeout) return fail(`${DIAG_CODES.timeout} — pas de rechargement terminé ${sec(T)} s après « Enregistrer » — vérifie dans SIGEO si le diagnostic a été créé`, "ERREUR", DIAG_CODES.timeout);
     s = w.snap;
+    log("↻ postback (Enregistrer)");
     const e = pageError(s);
     if (e) return fail(e, s.login ? "AUTH" : "PAGE");
     const m = diagClassifyMessages(s.messages);
@@ -1172,24 +1499,23 @@ async function diagProcess(ad, p) {
     log("diagnostic déjà enregistré et conforme : pas de nouvel enregistrement");
   }
 
-  // — 5. Contrôles après enregistrement (avant tout upload)
-  const serverAdeme = s.f.ademe.mode === "label" ? diagNorm(s.f.ademe.labelText).toUpperCase().replace(/\s+/g, "") : "";
-  if (v.ademe) {
-    if (serverAdeme && serverAdeme !== v.ademe) return fail(`N° ADEME enregistré par SIGEO ${serverAdeme} ≠ ${v.ademe} — upload annulé`);
-    if (!serverAdeme && ademeSeen) return fail("N° ADEME non affiché par SIGEO après l'enregistrement — upload annulé");
-  }
-  if (serverAdeme) log(`N° ADEME confirmé par SIGEO : ${serverAdeme}`);
+  // — Contrôle APRÈS enregistrement (même comparateur), avant tout upload
+  const pa = diagPlan(s, v, opts);
+  pa.warnings.forEach(warn);
+  const bad = pa.specs.filter((x) => !x.ok);
+  if (bad.length) return fail(`${DIAG_CODES.after} — ${diagGapText(bad)} — upload annulé`, "ERREUR", DIAG_CODES.after);
+  const ademeSpec = pa.specs.find((x) => x.key === "ademe");
+  const ademeOk = ademeSpec && ademeSpec.ok ? diagAdemeKey(ademeSpec.got) : "";
+  log(`contrôle après enregistrement : ${pa.specs.length} valeur(s) conforme(s) · ${summary(pa)}`, "ok");
   const fn = s.f.fouName || {};
   if (fn.name) log(`fournisseur : ${v.fou} — ${fn.name}`);
   else if (fn.dedicated) return fail(`fournisseur ${v.fou} non reconnu par SIGEO (nom vide à côté du code) — upload annulé`);
   else warn("nom du fournisseur non repéré sur la page (active le mode debug pour le localiser)");
-  const after = diagCompare(s, v).filter((c) => !c.ok);
-  if (after.length) return fail("valeurs différentes après l'enregistrement : " + after.map((c) => `${c.label} « ${c.got} » au lieu de « ${c.want} »`).join(" ; ") + " — upload annulé");
 
-  const okInfo = () => [res.idDiag ? "diagnostic " + res.idDiag : "diagnostic enregistré", serverAdeme ? "ADEME " + serverAdeme : ""].filter(Boolean).join(", ");
+  const okInfo = () => [res.idDiag ? "diagnostic " + res.idDiag : "diagnostic enregistré", ademeOk ? "ADEME " + ademeOk : ""].filter(Boolean).join(", ");
   if (!p.attach) return Object.assign(res, { ok: true, status: "OK", info: okInfo() + " — PDF non joint (option désactivée)" });
 
-  // — 6. Pièce jointe (idempotente : jamais deux documents « DPE »)
+  // — Phase E : pièce jointe (idempotente : jamais deux documents « DPE »)
   const existing = diagFindDocRow(s.grid, desc);
   if (existing) {
     if (fileRef && !diagRowHasFile(existing, fileRef.file.name)) warn(`un document « ${desc} » est déjà joint (${existing.join(" · ")}) mais pas sous le nom ${fileRef.file.name}`);
@@ -1200,8 +1526,7 @@ async function diagProcess(ad, p) {
     if (e) return fail(`fichier DPE ${e} — diagnostic enregistré, PDF non joint`, "FICHIER");
   }
   const name = fileRef.file.name;
-  const ref = serverAdeme || v.ademe;
-  // Contrôle contre le N° ADEME confirmé par SIGEO (identique à celui de la ligne, sinon arrêt plus haut).
+  const ref = ademeOk || v.ademe;
   const chk = ref === v.ademe && fileChk ? fileChk : await checkFile(ref);
   if (chk.status === "other") return fail(`le ${chk.where} de ${name} contient un autre N° ADEME (${chk.others.join(", ")}) que la fiche (${ref}) — upload annulé`, "FICHIER");
   const chkTxt = {
@@ -1214,13 +1539,15 @@ async function diagProcess(ad, p) {
   if (!p.batch || p.confirmUpload || chk.status === "unknown") {
     const ok = await ad.confirm({
       row: p.rowLabel || "", lot: v.lot || s.lotId, fiche: res.idDiag || s.idDiag || "", ademe: ref,
-      ademeSrc: serverAdeme ? "confirmé par SIGEO" : (ref ? "données de la ligne" : ""),
+      ademeSrc: ademeOk ? "confirmé par SIGEO" : (ref ? "données de la ligne" : ""),
       file: name, path: fileRef.file.path || name, size: diagFmtSize(bytes.length), via: fileRef.via,
       check: chkTxt, risky: chk.status === "unknown"
     });
     if (!ok) return fail("upload annulé (non confirmé) — diagnostic enregistré, PDF non joint", "ANNULÉ");
     // La page a pu être rechargée pendant la confirmation : on relit tout.
-    s = await read();
+    const w = await stable();
+    if (w.stopped) return fail("arrêté par l'utilisateur", "ARRÊT");
+    s = w.snap || await read();
     const e2 = pageError(s);
     if (e2) return fail(e2 + " — PDF non joint", s && s.login ? "AUTH" : "PAGE");
     if (diagFindDocRow(s.grid, desc)) return Object.assign(res, { ok: true, status: "DÉJÀ JOINT", info: `${okInfo()} — document « ${desc} » déjà joint` });
@@ -1249,10 +1576,13 @@ async function diagProcess(ad, p) {
     await ad.journalSet(key, { phase: "saved", idDiag: res.idDiag, row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
     return fail("upload : " + ((r && r.error) || "page indisponible"));
   }
-  const w = await waitReload(before, TU);
+  // Postback complet attendu ; une mise à jour partielle de la grille
+  // (update panel body_x_upcDiag) est acceptée aussi.
+  const w = await settle(before, { mustReload: true, timeoutMs: TU, doneWhen: (x) => !!x.grid && x.grid.count > count0 });
   if (w.stopped) return fail("arrêté pendant l'upload — vérifie la liste des documents", "ARRÊT");
-  if (w.timeout) return fail(`pas de rechargement après l'envoi du PDF (${Math.round(TU / 1000)} s) — vérifie la liste des documents`);
+  if (w.timeout) return fail(`${DIAG_CODES.timeout} — pas de rechargement terminé ${sec(TU)} s après l'envoi du PDF — vérifie la liste des documents`, "ERREUR", DIAG_CODES.timeout);
   s = w.snap;
+  log(w.partial ? "↻ postback partiel (upload du PDF, grille mise à jour)" : "↻ postback (upload du PDF)");
   const e3 = pageError(s);
   if (e3) return fail(e3, s.login ? "AUTH" : "PAGE");
   const errs = msgErrors(s);
@@ -1268,15 +1598,16 @@ async function diagProcess(ad, p) {
 }
 
 /* ---------------------------------------------------------------- *
- * 7. Corps HTML de l'étape (panneau)                               *
+ * 8. Corps HTML de l'étape (panneau)                               *
  * ---------------------------------------------------------------- */
+// (v2.16.0 : 20000, ancien défaut du délai de rechargement, devient 15000.)
 function diagStepHtml(step, esc) {
   const cols = Object.assign({}, DIAG_PRESETS.default, step.diagCols || {});
   const grid = DIAG_FIELDS.map((f) => `
         <label title="${esc(f.hint || f.k)}">${f.label}${f.req ? " *" : ""}</label>
         <input type="text" class="scn-diag-col" data-k="${f.k}" value="${esc(cols[f.k] ?? "")}" />`).join("");
   return `
-      <p class="hint scn-only-diag">Remplit le formulaire « Diagnostic » SIGEO (popup <code>diag_manage</code>) : type, fournisseur, dates, N° ADEME, consommations, coûts…, contrôle toutes les valeurs, clique « Enregistrer », puis joint le PDF. Chaque postback recharge la page : l'étape attend le rechargement et reprend là où elle en est. Jamais de touche Entrée ni « Enreg. et fermer » ; la popup reste ouverte.</p>
+      <p class="hint scn-only-diag">Remplit le formulaire « Diagnostic » SIGEO (popup <code>diag_manage</code>) en phases : A) champs à postback un par un (type → fournisseur → établi le → conso → GES, rechargement attendu à chaque fois), B) champs sans postback (N° ADEME, dates, coûts, lettres forcées…), C) contrôle complet avant « Enregistrer », D) enregistrement et contrôle après, E) PDF joint. « Valable jusqu'au » n'est jamais saisi (calculé par SIGEO, vérifié). Tout rechargement inattendu fait repartir de la phase A. Jamais de touche Entrée ni « Enreg. et fermer » ; la popup reste ouverte.</p>
       <div class="scn-row scn-only-diag">
         <label>URL de la fiche :</label>
         <input type="text" class="scn-diag-url" placeholder="vide = fiche déjà ouverte · ex : …/popup.aspx/fr/sig_imm/diag_manage/{ID interne}/10/0" value="${esc(step.diagUrl || "")}" />
@@ -1310,13 +1641,16 @@ function diagStepHtml(step, esc) {
         <label class="checkbox-row" title="Remplit et contrôle tout, sans cliquer Enregistrer ni joindre le PDF"><input type="checkbox" class="scn-diag-simulate" ${step.diagSimulate ? "checked" : ""} /> simulation</label>
       </div>
       <div class="scn-row scn-only-diag">
+        <label class="checkbox-row" title="Si la lettre EP/GES du DPE (colonnes « Lettre … du DPE ») diffère de celle calculée par SIGEO, elle est saisie dans « Forcer la lettre » et contrôlée ; sinon simple avertissement"><input type="checkbox" class="scn-diag-forceletters" ${step.diagForceLetters === false ? "" : "checked"} /> forcer la lettre du DPE si SIGEO en calcule une autre</label>
+      </div>
+      <div class="scn-row scn-only-diag">
         <label>résultat → colonne :</label>
         <input type="text" class="new-col-input scn-diag-resultcol" value="${esc(step.diagResultCol ?? DIAG_DEFAULTS.resultCol)}" />
         <label class="checkbox-row" title="Une ligne dont la colonne résultat commence par « OK » est sautée"><input type="checkbox" class="scn-diag-skipdone" ${step.diagSkipDone === false ? "" : "checked"} /> sauter les lignes « OK »</label>
       </div>
       <div class="scn-row scn-only-diag">
-        <label>rechargement max (ms) :</label>
-        <input type="number" class="scn-diag-timeout" min="3000" step="1000" value="${esc(step.diagTimeout ?? DIAG_DEFAULTS.timeoutMs)}" />
+        <label title="Délai maximal d'un rechargement (postback) ; au-delà : POSTBACK_TIMEOUT">rechargement max (ms) :</label>
+        <input type="number" class="scn-diag-timeout" min="3000" step="1000" value="${esc(step.diagTimeout && step.diagTimeout !== 20000 ? step.diagTimeout : DIAG_DEFAULTS.timeoutMs)}" />
         <label>upload max (ms) :</label>
         <input type="number" class="scn-diag-uptimeout" min="5000" step="5000" value="${esc(step.diagUploadTimeout ?? DIAG_DEFAULTS.uploadTimeoutMs)}" />
       </div>
@@ -1345,6 +1679,7 @@ function diagStepRead(el) {
     diagDesc: val(".scn-diag-desc", DIAG_DEFAULTS.desc).trim() || DIAG_DEFAULTS.desc,
     diagConfirm: chk(".scn-diag-confirm", true),
     diagSimulate: chk(".scn-diag-simulate", false),
+    diagForceLetters: chk(".scn-diag-forceletters", true),
     diagResultCol: val(".scn-diag-resultcol", DIAG_DEFAULTS.resultCol).trim(),
     diagSkipDone: chk(".scn-diag-skipdone", true),
     diagTimeout: parseInt(val(".scn-diag-timeout"), 10) || DIAG_DEFAULTS.timeoutMs,
@@ -1357,9 +1692,10 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     DIAG_IDS, DIAG_FIELDS, DIAG_PRESETS, DIAG_DEFAULTS,
     diagNorm, diagFold, diagDate, diagDateEq, diagSerialToDate, diagExpectedValidity, diagIsNewDpe,
-    diagParseNum, diagNum, diagNumEq, diagBool, diagLetter, diagAdeme, diagType, diagNormalizeData,
+    diagParseNum, diagNum, diagNumEq, diagBool, diagLetter, diagAdeme, diagAdemeKey, diagType, diagNormalizeData,
+    diagSame, diagShow, diagQ, DIAG_CODES, DIAG_PHASE_A,
     diagMatchFile, diagCheckFileAdeme, diagIsPdf, diagToBase64, diagFmtSize,
     diagUrlParts, diagUrlWithId, diagJournalKey, diagClassifyMessages, diagFindDocRow, diagRowHasFile,
-    diagPageOp, diagNextActions, diagCompare, diagProcess, diagStepHtml, diagStepRead
+    diagPageOp, diagMainHandler, diagPlan, diagCompare, diagGapText, diagCapped, diagSettle, diagProcess, diagStepHtml, diagStepRead
   };
 }

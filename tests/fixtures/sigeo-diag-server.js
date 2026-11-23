@@ -1,10 +1,24 @@
 // Faux SIGEO « diag_manage » (popup Diagnostic) pour les tests de l'étape
-// « SIGEO : saisir un DPE ». Reproduit ce qui compte pour l'automatisation :
+// « SIGEO : saisir un DPE ». Reproduit ce qui compte pour l'automatisation
+// (ids réels relevés sur sigeo.evoriel.net le 23/11/2026) :
 //   - chaque __doPostBack = POST multipart complet → page entièrement rechargée ;
+//     le formulaire est sérialisé au submit() : toute écriture postérieure dans
+//     l'ancien document est perdue (cfg.delayMs simule un serveur lent) ;
 //   - Type (changeType) → affiche le bloc consommations ;
-//   - Établi le (performanceEnergetique) → calcule « Valable jusqu'au » côté
-//     client puis postback ; le champ N° ADEME (id sans rapport) n'apparaît
-//     qu'après ce postback et seulement si la date ≥ 01/07/2021 ;
+//   - Fournisseur : onchange → __doPostBack (cfg.fouPostback, défaut oui), bouton
+//     « Sélectionner » de type submit ;
+//   - Établi le : onchange = ValidatorOnChange(event); performanceEnergetique(this)
+//     → calcule « Valable jusqu'au » (input caché + libellé) puis postback ; comme
+//     sur la vraie page, un change SYNTHÉTIQUE n'atteint pas le postback
+//     (cfg.dateSynthetic = false par défaut) — appeler le handler, si ;
+//   - N° ADEME : input body_x_textIdDpe_x_textIdDpe affiché dès que le type est
+//     choisi (quelle que soit la date, cfg.ademeFrom pour restreindre), toujours
+//     un champ de saisie après enregistrement (cfg.ademeAfterSave = "input" ;
+//     "label" → span#body_x_labelIdDpe) ;
+//   - Date début validité : body_x_txtDateDebValid_x_txtDateDebValid (sans postback) ;
+//   - cfg.clearOnChange = "dateDeb,comment" : la page vide ces champs au change
+//     (valeur refusée côté client) ; cfg.corruptOnSave = "ademe,ges" : le serveur
+//     enregistre une autre valeur (ADEME vidé, GES + 1) → écarts après enregistrement ;
 //   - les cases n'apparaissent qu'après la date (DPE ≥ 07/2021), les coûts
 //     annuels seulement après la conso (vérifie qu'on revérifie à chaque postback) ;
 //   - conso / GES → postback, lettres calculées, valeurs réaffichées « 320,00 » ;
@@ -63,7 +77,7 @@ function parseMultipart(buf, boundary) {
 const N = {
   type: "body$x$ddlDiagnostic$ddlDiagnostic", fou: "body$x$proxyFou$x$txt$x$txt",
   dateReal: "body$x$txtDateReal$x$txtDateReal", dateFin: "body$x$txtDateFinValid$x$txtDateFinValid",
-  ademe: "body$x$_ctl37$x$_ctl0", conso: "body$x$txtConsoE$x$txtConsoE", consoL: "body$x$txtConsoLegende$x$_ctl0",
+  ademe: "body$x$textIdDpe$x$textIdDpe", dateDeb: "body$x$txtDateDebValid$x$txtDateDebValid", conso: "body$x$txtConsoE$x$txtConsoE", consoL: "body$x$txtConsoLegende$x$_ctl0",
   ges: "body$x$txtEmission$x$txtEmission", gesL: "body$x$txtEmisLegende$x$_ctl0",
   forceEp: "body$x$txtForceDiag$x$_ctl0", forceGes: "body$x$txtForceGes$x$_ctl0",
   altitude: "body$x$chkAltitude$x$_ctl0", nouvelles: "body$x$chkSurface$x$_ctl0",
@@ -76,20 +90,25 @@ const N = {
 const idOf = (name) => name.replace(/\$/g, "_");
 
 function blank() {
-  return { type: "", fou: "", dateReal: "", dateFin: "", ademe: "", conso: "", ges: "", forceEp: "", forceGes: "",
+  return { type: "", fou: "", dateReal: "", dateFin: "", dateDeb: "", ademe: "", conso: "", ges: "", forceEp: "", forceGes: "",
     altitude: false, nouvelles: false, coutMin: "", coutMax: "", datePrix: "", resultat: "", comment: "", docs: [] };
 }
 
 function render(url, d, opts) {
+  const cfg = opts.cfg || {};
   const saved = !!opts.saved;
   const cons = num(d.conso), ges = num(d.ges);
   const showConso = !!d.type;
   const dateDone = !!parseDate(d.dateReal) && opts.dateKnown;
-  const showAdeme = !saved && dateDone && isNew2021(d.dateReal);
+  const ademeFrom = parseDate(cfg.ademeFrom || "");
+  const ademeLabel = saved && cfg.ademeAfterSave === "label";
+  const showAdeme = showConso && !ademeLabel && (!ademeFrom || ((parseDate(d.dateReal) || { ts: 0 }).ts >= ademeFrom.ts));
   const showCases = dateDone && isNew2021(d.dateReal);
   const showCouts = showConso && cons !== null && isNew2021(d.dateReal);
   const msgs = opts.msgs || [];
-  const inp = (k, extra = "") => `<input type="text" id="${idOf(N[k])}" name="${N[k]}" value="${esc(d[k])}" ${extra}>`;
+  const clear = String(cfg.clearOnChange || "").split(",").map((x) => x.trim()).filter(Boolean);
+  const clr = (k) => clear.includes(k) ? ` onchange="this.value=''"` : "";
+  const inp = (k, extra = "") => `<input type="text" id="${idOf(N[k])}" name="${N[k]}" value="${esc(d[k])}" ${extra}${clr(k)}>`;
   const chk = (k) => `<input type="checkbox" id="${idOf(N[k])}" name="${N[k]}" ${d[k] ? "checked" : ""}>`;
   const docs = d.docs || [];
   const grid = docs.length
@@ -114,15 +133,16 @@ function render(url, d, opts) {
     <option value=""></option><option value="3"${d.type === "3" ? " selected" : ""}>Amiante</option>
     <option value="11"${d.type === "11" ? " selected" : ""}>Performance Energetique</option>
     <option value="15"${d.type === "15" ? " selected" : ""}>Performance Energetique</option></select></td></tr>
-  <tr><td>Fournisseur</td><td><span id="body_x_proxyFou"><input type="text" id="${idOf(N.fou)}" name="${N.fou}" maxlength="9" value="${esc(d.fou)}" onkeydown="return press(cmdSave)">
-    <input type="button" id="body_x_proxyFou_x_btn" value="Sélectionner" onclick="return false"><span id="body_x_proxyFou_x_lblLib">${saved ? esc(SUPPLIERS[d.fou] || "") : ""}</span></span></td></tr>
+  <tr><td>Fournisseur</td><td><span id="body_x_proxyFou"><input type="text" id="${idOf(N.fou)}" name="${N.fou}" maxlength="9" value="${esc(d.fou)}" onkeydown="return press(cmdSave)"${cfg.fouPostback === false ? "" : ` onchange="__doPostBack('${N.fou}','')"`}>
+    <input type="submit" id="body_x_proxyFou_x_btn" value="Sélectionner" onclick="return false"><span id="body_x_proxyFou_x_lblLib">${esc(SUPPLIERS[d.fou] || "")}</span></span></td></tr>
 </table>
 <div id="div_conso" style="${showConso ? "" : "display:none"}">
 <table class="dpe">
   <tr><td>Établi le</td><td>Valable jusqu'au</td><td><span id="body_x_titreIdDpe">N° ADEME</span></td></tr>
-  <tr><td>${inp("dateReal", 'maxlength="10" onchange="performanceEnergetique(this)"')}</td>
-      <td>${saved ? `<label id="fake_txtDateFinValid_x_txtDateFinValid">${esc(d.dateFin)}</label><input type="text" style="display:none" id="${idOf(N.dateFin)}" name="${N.dateFin}" value="${esc(d.dateFin)}">` : inp("dateFin", 'maxlength="10"')}</td>
-      <td>${saved ? `<span id="body_x_labelIdDpe">${esc(d.ademe)}</span>` : showAdeme ? inp("ademe", 'maxlength="13"') : ""}</td></tr>
+  <tr><td>${inp("dateReal", 'maxlength="10" onchange="ValidatorOnChange(event); performanceEnergetique(this);"')}</td>
+      <td><label id="fake_txtDateFinValid_x_txtDateFinValid">${esc(d.dateFin)}</label><input type="text" style="display:none" id="${idOf(N.dateFin)}" name="${N.dateFin}" value="${esc(d.dateFin)}"></td>
+      <td>${ademeLabel ? `<span id="body_x_labelIdDpe">${esc(d.ademe)}</span>` : showAdeme ? inp("ademe", 'maxlength="13"') : ""}</td></tr>
+  <tr><td>Date début validité</td><td>${inp("dateDeb", 'maxlength="10"')}</td><td></td></tr>
 </table>
 <div id="body_x_blocCases" style="${showCases ? "" : "display:none"}">
   ${chk("altitude")} <label for="${idOf(N.altitude)}">Logement à plus de 800m d'altitude en H1B, H1C ou H2D</label>
@@ -141,7 +161,7 @@ function render(url, d, opts) {
 </div>
 <table>
   <tr><td>Résultat</td><td><textarea id="${idOf(N.resultat)}" name="${N.resultat}" maxlength="1000">${esc(d.resultat)}</textarea></td></tr>
-  <tr><td>Commentaires</td><td><textarea id="${idOf(N.comment)}" name="${N.comment}">${esc(d.comment)}</textarea></td></tr>
+  <tr><td>Commentaires</td><td><textarea id="${idOf(N.comment)}" name="${N.comment}"${clr("comment")}>${esc(d.comment)}</textarea></td></tr>
 </table>
 ${saved ? `<fieldset><legend>Documents</legend>
   <a id="body_x_prxFileManager_x_linkAjoutDocument" href="javascript:showAddDocument()">Joindre un document</a>
@@ -166,7 +186,16 @@ function press(btn) {
   return true;
 }
 function changeType() { __doPostBack("${N.type}", ""); }
+function ValidatorOnChange(event) {
+  if (!event) event = window.event;
+  var t = event.srcElement || event.target; // comme WebUIValidation.js
+  return !!t;
+}
+var NH_DATE_SYNTHETIC = ${cfg.dateSynthetic ? "true" : "false"};
 function performanceEnergetique(el) {
+  // Vraie page : un change synthétique (dispatchEvent) n'atteint pas le postback.
+  var e = window.event;
+  if (e && e.isTrusted === false && !NH_DATE_SYNTHETIC) return;
   var m = /^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/.exec(el.value);
   var fin = document.getElementById("${idOf(N.dateFin)}");
   if (m && fin) {
@@ -174,6 +203,8 @@ function performanceEnergetique(el) {
     var p10 = function () { var x = new Date(Date.UTC(y + 10, mo - 1, d) - 86400000); return ("0" + x.getUTCDate()).slice(-2) + "/" + ("0" + (x.getUTCMonth() + 1)).slice(-2) + "/" + x.getUTCFullYear(); };
     if (y < 2013) r = p10(); else if (y <= 2017) r = "31/12/2022"; else if (t < Date.UTC(2021, 6, 1)) r = "31/12/2024"; else r = p10();
     fin.value = r;
+    var lab = document.getElementById("fake_txtDateFinValid_x_txtDateFinValid");
+    if (lab) lab.textContent = r;
   }
   __doPostBack("${N.dateReal}", "");
 }
@@ -190,17 +221,17 @@ async function start(cfg = {}) {
   const store = new Map(); // id → données enregistrées
   const flash = new Map();
   const stats = { saves: 0, creates: 0, updates: 0, uploads: 0, enterSaves: 0, saveCloses: 0, posts: 0, refused: 0 };
-  const config = Object.assign({ redirect: false, delayMs: 0 }, cfg);
+  const config = Object.assign({ redirect: false, delayMs: 0, fouPostback: true, dateSynthetic: false, ademeAfterSave: "input", ademeFrom: "" }, cfg);
   let nextId = 1147729;
 
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, "http://x");
     if (u.pathname === "/__config") {
-      for (const [k, v] of u.searchParams) config[k] = v === "1" ? true : v === "0" ? false : v;
+      for (const [k, v] of u.searchParams) config[k] = v === "1" ? true : v === "0" ? false : /^\d+$/.test(v) ? Number(v) : v;
       res.end("ok");
       return;
     }
-    const m = u.pathname.match(/^\/popup\.aspx\/fr\/sig_imm\/diag_manage\/([^/]+)\/10\/(\d+)$/);
+    const m = u.pathname.match(/^\/popup\.aspx\/fr\/sig_imm\/diag_manage\/([^/]+)\/\d+\/(\d+)$/);
     if (!m) { res.statusCode = 404; res.end("not found"); return; }
     const lot = m[1], id = m[2];
     const url = `http://${req.headers.host}${u.pathname}`;
@@ -212,7 +243,7 @@ async function start(cfg = {}) {
       const d = id === "0" ? blank() : JSON.parse(JSON.stringify(store.get(id)));
       const msgs = flash.get(id) || [];
       flash.delete(id);
-      send(render(url, d, { saved: id !== "0", dateKnown: id !== "0", msgs }));
+      send(render(url, d, { saved: id !== "0", dateKnown: id !== "0", msgs, cfg: config }));
       return;
     }
     const chunks = [];
@@ -225,13 +256,11 @@ async function start(cfg = {}) {
       const saved = id !== "0" && store.has(id);
       const d = saved ? JSON.parse(JSON.stringify(store.get(id))) : blank();
       // Valeurs postées (le N° ADEME n'est modifiable qu'avant enregistrement)
-      for (const k of ["type", "fou", "dateReal", "conso", "ges", "forceEp", "forceGes", "coutMin", "coutMax", "datePrix", "resultat", "comment"]) {
+      for (const k of ["type", "fou", "dateReal", "dateDeb", "conso", "ges", "forceEp", "forceGes", "coutMin", "coutMax", "datePrix", "resultat", "comment"]) {
         if (fields[N[k]] !== undefined) d[k] = fields[N[k]];
       }
-      if (!saved) {
-        if (fields[N.dateFin] !== undefined) d.dateFin = fields[N.dateFin];
-        if (fields[N.ademe] !== undefined) d.ademe = fields[N.ademe];
-      }
+      if (fields[N.dateFin] !== undefined) d.dateFin = fields[N.dateFin];
+      if (fields[N.ademe] !== undefined && (!saved || config.ademeAfterSave !== "label")) d.ademe = fields[N.ademe];
       d.altitude = fields[N.altitude] !== undefined;
       d.nouvelles = fields[N.nouvelles] !== undefined;
       const dateKnown = !!fields.__dateKnown || target === N.dateReal;
@@ -251,11 +280,14 @@ async function start(cfg = {}) {
         if (errs.length) {
           stats.refused++;
           msgs = errs.map((t) => ({ cls: "errormsg", text: t }));
-          send(render(url, d, { saved, dateKnown, msgs }));
+          send(render(url, d, { saved, dateKnown, msgs, cfg: config }));
           return;
         }
         const n = (k) => { const x = num(d[k]); if (x !== null) d[k] = fmt2(x); };
         n("conso"); n("ges");
+        const bad = String(config.corruptOnSave || "").split(",").map((x) => x.trim());
+        if (bad.includes("ademe")) d.ademe = "";
+        if (bad.includes("ges") && num(d.ges) !== null) d.ges = fmt2(num(d.ges) + 1);
         let newId = id;
         if (!saved) { newId = String(nextId++); stats.creates++; } else stats.updates++;
         store.set(newId, Object.assign({ lot }, d));
@@ -266,7 +298,7 @@ async function start(cfg = {}) {
           setTimeout(() => { res.statusCode = 302; res.setHeader("Location", newUrl); res.end(); }, config.delayMs || 0);
           return;
         }
-        send(render(url, store.get(newId), { saved: true, dateKnown: true, msgs, action: newUrl }));
+        send(render(url, store.get(newId), { saved: true, dateKnown: true, msgs, action: newUrl, cfg: config }));
         return;
       }
       if (target === "" && files[N.file] && files[N.file].filename) {
@@ -279,14 +311,14 @@ async function start(cfg = {}) {
         }
       }
       if (saved) d.docs = store.get(id).docs;
-      send(render(url, d, { saved, dateKnown, msgs, action }));
+      send(render(url, d, { saved, dateKnown, msgs, action, cfg: config }));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const origin = `http://127.0.0.1:${server.address().port}`;
   return {
     server, origin, store, stats, config,
-    url: (lot, id = 0) => `${origin}/popup.aspx/fr/sig_imm/diag_manage/${lot}/10/${id}`,
+    url: (lot, id = 0, kind = 10) => `${origin}/popup.aspx/fr/sig_imm/diag_manage/${lot}/${kind}/${id}`,
     diags: () => [...store.entries()].map(([id, d]) => Object.assign({ id }, d))
   };
 }

@@ -4,10 +4,8 @@ const assert = require("assert");
 const D = require("../sigeo-diag.js");
 
 let failures = 0;
-function check(name, fn) {
-  try { fn(); console.log("✓ " + name); }
-  catch (e) { failures++; console.log("✗ " + name + "\n   " + (e.stack || e).toString().split("\n").slice(0, 3).join("\n   ")); }
-}
+const tests = [];
+function check(name, fn) { tests.push([name, fn]); } // exécutés dans l'ordre, async compris
 
 check("dates : texte, série Excel, ISO, invalides", () => {
   assert.deepStrictEqual(D.diagDate("15/1/21"), { ok: true, value: "15/01/2021" });
@@ -24,7 +22,17 @@ check("dates : texte, série Excel, ISO, invalides", () => {
   assert.ok(D.diagDateEq("1/2/2024", "01/02/2024"));
 });
 
-check("validité calculée (règles SIGEO)", () => {
+check("validité calculée (règles SIGEO) — cas de la demande", () => {
+  assert.strictEqual(D.diagExpectedValidity("08/10/2020"), "31/12/2024");
+  assert.strictEqual(D.diagExpectedValidity("15/03/2016"), "31/12/2022");
+  assert.strictEqual(D.diagExpectedValidity("12/09/2022"), "11/09/2032");
+});
+
+check("validité calculée (règles SIGEO) — bornes", () => {
+  assert.strictEqual(D.diagExpectedValidity("31/12/2012"), "30/12/2022", "avant 2013 : +10 ans −1 jour");
+  assert.strictEqual(D.diagExpectedValidity("01/01/2013"), "31/12/2022");
+  assert.strictEqual(D.diagExpectedValidity("31/12/2017"), "31/12/2022");
+  assert.strictEqual(D.diagExpectedValidity("01/01/2018"), "31/12/2024");
   assert.strictEqual(D.diagExpectedValidity("15/03/2012"), "14/03/2022");
   assert.strictEqual(D.diagExpectedValidity("01/06/2015"), "31/12/2022");
   assert.strictEqual(D.diagExpectedValidity("15/01/2018"), "31/12/2024");
@@ -34,19 +42,41 @@ check("validité calculée (règles SIGEO)", () => {
   assert.ok(D.diagIsNewDpe("01/07/2021") && !D.diagIsNewDpe("30/06/2021"));
 });
 
-check("nombres : unités, séparateurs, maxlength", () => {
+check("nombres à saisir : 2 décimales max, virgule, VALEUR_TROP_LONGUE", () => {
   assert.strictEqual(D.diagNum("1 234,5 kWh/m2/an", null, 6).value, "1234,5");
-  assert.strictEqual(D.diagNum("320", null, 6).value, "320");
-  assert.strictEqual(D.diagNum("320.456", null, 6).value, "320,46");
+  assert.strictEqual(D.diagNum("224", null, 6).value, "224");
+  assert.strictEqual(D.diagNum("52,6", null, 6).value, "52,6");
+  assert.strictEqual(D.diagNum("52.60", null, 6).value, "52,6");
+  const r = D.diagNum("320.456", null, 6);
+  assert.deepStrictEqual([r.value, r.rounded], ["320,46", true]);
   assert.strictEqual(D.diagNum("1.234,5", null, 6).value, "1234,5");
   assert.strictEqual(D.diagNum("", { t: "n", v: 9 }, 6).value, "9");
   assert.strictEqual(D.diagNum("1,240", { t: "n", v: 1240 }, 5).value, "1240", "cellule numérique prioritaire");
-  const r = D.diagNum("1240,75", null, 5);
-  assert.strictEqual(r.value, "1241");
-  assert.ok(r.rounded);
-  assert.ok(!D.diagNum("1234567", null, 6).ok);
+  assert.strictEqual(D.diagNum("1 240 €", null, 5).value, "1240", "estimation : sans espace ni €");
+  const long = D.diagNum("1240,75", null, 5);
+  assert.deepStrictEqual([long.ok, long.code], [false, "VALEUR_TROP_LONGUE"], "plus d'arrondi pour faire tenir");
+  assert.ok(/7 caractères, 5 au maximum/.test(long.error), long.error);
+  assert.strictEqual(D.diagNum("1234,56", null, 6).code, "VALEUR_TROP_LONGUE");
+  assert.strictEqual(D.diagNum("1234567", null, 6).code, "VALEUR_TROP_LONGUE");
   assert.ok(!D.diagNum("abc", null, 6).ok);
-  assert.ok(D.diagNumEq("320,00", "320") && D.diagNumEq("9,00", "9") && D.diagNumEq("1 240,00", "1240") && !D.diagNumEq("320,00", "321"));
+});
+
+check("comparateur normalisé", () => {
+  const S = D.diagSame;
+  // nombres : parse FR, |a−b| < 0,005
+  assert.ok(S("num", "224,00", "224") && S("num", "224", "224,00"));
+  assert.ok(S("num", "52,60", "52,6") && S("num", "52,6", "52,60"));
+  assert.ok(S("num", "1 240,00 €", "1240") && S("num", "224,00 kWh/m²/an", "224") && S("num", "52,6 kgCO2/m²/an", "52,60"));
+  assert.ok(S("num", "52,604", "52,6") && !S("num", "52,61", "52,6") && !S("num", "", "52,6") && !S("num", "224,00", "225"));
+  // dates : jj/mm/aaaa, zéros de tête
+  assert.ok(S("date", "8/10/2020", "08/10/2020") && S("date", "08/10/2020", "8/10/2020") && S("date", " 31/12/2024 ", "31/12/2024"));
+  assert.ok(!S("date", "", "31/12/2024") && !S("date", "31/12/2025", "31/12/2024"));
+  // ADEME : trim + majuscules
+  assert.ok(S("ademe", " 2021l2000833e ", "2021L2000833E") && !S("ademe", "", "2021L2000833E"));
+  // divers
+  assert.ok(S("code", " 448957", "448957") && S("letter", "d", "D") && S("check", true, true) && !S("check", false, true));
+  assert.ok(S("select", "11", "11") && !S("select", "15", "11") && S("text", "a  b", "a b"));
+  assert.strictEqual(D.diagShow("check", true), "coché");
 });
 
 check("type, oui/non, lettres, ADEME", () => {
@@ -63,7 +93,9 @@ check("type, oui/non, lettres, ADEME", () => {
   assert.strictEqual(D.diagLetter("c").value, "C");
   assert.ok(!D.diagLetter("H").ok);
   assert.deepStrictEqual(D.diagAdeme(" 2475 e1234567x "), { ok: true, value: "2475E1234567X", plausible: true });
+  assert.deepStrictEqual(D.diagAdeme(" 2021l2000833e"), { ok: true, value: "2021L2000833E", plausible: true });
   assert.strictEqual(D.diagAdeme("ABC").plausible, false);
+  assert.strictEqual(D.diagAdeme("2021L200083").plausible, false);
 });
 
 check("données de la ligne : obligatoires, colonnes absentes, avertissements", () => {
@@ -79,6 +111,26 @@ check("données de la ligne : obligatoires, colonnes absentes, avertissements", 
   assert.ok(r.errors.some((e) => /illisible/.test(e)));
   r = D.diagNormalizeData(raw({ code_fournisseur: "448957", date_etabli: "15/03/2024", conso_ep: "320", emission_ges: "9", numero_ademe: "2475E1234567X", cout_min: "2000", cout_max: "1000" }), Date.UTC(2026, 10, 23));
   assert.ok(r.warnings.some((w) => /coût min/.test(w)) && r.warnings.some((w) => /incomplets/.test(w)));
+});
+
+check("données de la ligne : cas réel, ADEME_INVALIDE, VALEUR_TROP_LONGUE, validité du PDF", () => {
+  const raw = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { text: v }]));
+  const real = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ademe: "2021L2000833E", conso_ep: "224", emission_ges: "52,6",
+    lettre_ep_forcee: "d", date_debut_validite: "8/10/2020" };
+  let r = D.diagNormalizeData(raw(real), Date.UTC(2026, 10, 23));
+  assert.deepStrictEqual(r.errors, []);
+  assert.deepStrictEqual([r.v.fou, r.v.dateEtabli, r.v.ademe, r.v.conso, r.v.ges, r.v.lettreEp, r.v.dateDeb], ["448957", "08/10/2020", "2021L2000833E", "224", "52,6", "D", "08/10/2020"]);
+  r = D.diagNormalizeData(raw(Object.assign({}, real, { numero_ademe: "2021L200083" })), Date.UTC(2026, 10, 23));
+  assert.ok(r.errors.some((e) => /^ADEME_INVALIDE — « 2021L200083 »/.test(e)), r.errors.join(" | "));
+  r = D.diagNormalizeData(raw(Object.assign({}, real, { conso_ep: "1234,56", cout_min: "1240,75" })), Date.UTC(2026, 10, 23));
+  assert.ok(r.errors.some((e) => /^VALEUR_TROP_LONGUE — Conso EP « 1234,56 » : 7 caractères, 6 au maximum/.test(e)), r.errors.join(" | "));
+  assert.ok(r.errors.some((e) => /^VALEUR_TROP_LONGUE — Coût min « 1240,75 »/.test(e)), r.errors.join(" | "));
+  // « Valable jusqu'au » du PDF : avertissement seulement
+  r = D.diagNormalizeData(raw(Object.assign({}, real, { date_validite: "07/10/2030" })), Date.UTC(2026, 10, 23));
+  assert.deepStrictEqual(r.errors, []);
+  assert.ok(r.warnings.some((w) => /Valable jusqu'au » du DPE \(07\/10\/2030\) ≠ calcul SIGEO \(31\/12\/2024\)/.test(w)), r.warnings.join(" | "));
+  r = D.diagNormalizeData(raw(Object.assign({}, real, { date_validite: "31/12/2024" })), Date.UTC(2026, 10, 23));
+  assert.ok(!r.warnings.some((w) => /Valable jusqu'au/.test(w)));
 });
 
 check("fichier : correspondance stricte", () => {
@@ -125,86 +177,189 @@ check("URL, journal, messages, grille", () => {
   assert.ok(D.diagRowHasFile(g.rows[1], "DPE_2475E1234567X.pdf"));
 });
 
-// Instantané de page minimal pour diagNextActions.
+// Instantané de page minimal (op "read").
 function snap(o = {}) {
-  const f = (v = "", extra = {}) => Object.assign({ present: true, visible: true, value: v }, extra);
+  const f = (v = "", extra = {}) => Object.assign({ present: true, visible: true, value: v, pb: false }, extra);
   const s = {
+    docId: "d1", readyState: "complete", leaving: false,
     divConso: true, couts: { present: true, visible: false },
     f: {
-      type: f(""), fou: f(""), dateReal: f(""), dateFin: f(""), conso: f(""), ges: f(""),
+      type: f("", { pb: true }), fou: f(""), dateReal: f("", { pb: true }), dateFin: f("", { visible: false, label: "", shown: "" }), dateDeb: f(""),
+      conso: f("", { pb: true }), ges: f("", { pb: true }),
       consoLettre: f(""), gesLettre: f(""), forceEp: f(""), forceGes: f(""),
       altitude: f(undefined, { checked: false, visible: false }), nouvelles: f(undefined, { checked: false, visible: false }),
       coutMin: f(""), coutMax: f(""), datePrix: f(""), resultat: f(""), comment: f(""),
-      ademe: { mode: "absent", input: null, labelText: "" }, fouName: { name: "" }
+      ademe: { mode: "input", input: { present: true, visible: true, value: "", id: "body_x_textIdDpe_x_textIdDpe", pb: false }, labelText: "" },
+      fouName: { name: "" }
     }
   };
-  for (const [k, v] of Object.entries(o.f || {})) Object.assign(s.f[k], v);
+  for (const [k, v] of Object.entries(o.f || {})) s.f[k] = Object.assign({}, s.f[k], v);
   if (o.couts) s.couts = o.couts;
   if (o.divConso !== undefined) s.divConso = o.divConso;
   return s;
 }
-const V = {
-  type: "11", fou: "448957", dateEtabli: "15/03/2024", dateValidite: "", ademe: "2475E1234567X", conso: "320", ges: "9",
-  forceEp: "", forceGes: "", altitude: false, nouvelles: true, coutMin: "1240", coutMax: "1680", datePrix: "01/01/2021",
-  resultat: "", comment: "ok", fichier: "", lot: ""
+const REALV = {
+  type: "11", fou: "448957", dateEtabli: "08/10/2020", dateValidite: "", dateDeb: "", ademe: "2021L2000833E", conso: "224", ges: "52,6",
+  lettreEp: "", lettreGes: "", altitude: null, nouvelles: null, coutMin: "", coutMax: "", datePrix: "", resultat: "", comment: "", fichier: "", lot: ""
 };
+const gaps = (s, v, o) => D.diagPlan(s, v, o).specs.filter((x) => !x.ok);
 
-check("prochaine action : ordre du formulaire, arrêt au premier postback", () => {
-  const st = { attempts: {}, warned: {} };
-  let p = D.diagNextActions(snap(), V, st);
-  assert.deepStrictEqual([p.soft.length, p.hard.key], [0, "type"]);
-  p = D.diagNextActions(snap({ f: { type: { value: "11" } } }), V, st);
-  assert.deepStrictEqual([p.soft.map((a) => a.key), p.hard.key], [["fou"], "dateReal"], "fournisseur saisi avant le postback de la date");
-  p = D.diagNextActions(snap({ divConso: false, f: { type: { value: "11" } } }), V, st);
-  assert.ok(/div_conso/.test(p.fatal));
-  // date faite, ADEME affiché, coûts encore masqués → ADEME puis conso
-  const after = { type: { value: "11" }, fou: { value: "448957" }, dateReal: { value: "15/03/2024" }, dateFin: { value: "14/03/2034" },
-    ademe: { mode: "input", input: { value: "", id: "x" } } };
-  p = D.diagNextActions(snap({ f: after }), V, st);
-  assert.deepStrictEqual([p.soft.map((a) => a.key), p.hard.key], [["ademe"], "conso"]);
-  // coûts apparus après la conso → saisis avant le postback des GES
-  const after2 = Object.assign({}, after, { ademe: { mode: "input", input: { value: "2475E1234567X" } }, conso: { value: "320,00" } });
-  p = D.diagNextActions(snap({ f: after2, couts: { present: true, visible: true } }), V, st);
-  assert.deepStrictEqual([p.soft.map((a) => a.key), p.hard.key], [["coutMin", "coutMax", "datePrix"], "ges"]);
-  // tout est saisi sauf cases / commentaire
-  const after3 = Object.assign({}, after2, { ges: { value: "9,00" }, coutMin: { value: "1240" }, coutMax: { value: "1680" }, datePrix: { value: "01/01/2021" },
-    nouvelles: { visible: true, checked: false }, altitude: { visible: true, checked: false } });
-  p = D.diagNextActions(snap({ f: after3, couts: { present: true, visible: true } }), V, st);
-  assert.deepStrictEqual([p.soft.map((a) => a.key + ":" + (a.kind === "check" ? a.checked : a.value)), p.hard], [["nouvelles:true", "comment:ok"], null]);
-  const after4 = Object.assign({}, after3, { nouvelles: { visible: true, checked: true }, comment: { value: "ok" } });
-  p = D.diagNextActions(snap({ f: after4, couts: { present: true, visible: true } }), V, st);
-  assert.ok(p.done && !p.fatal);
-  assert.deepStrictEqual(D.diagCompare(snap({ f: after4, couts: { present: true, visible: true } }), V).filter((c) => !c.ok), []);
+check("plan : phase A (postback) dans l'ordre, puis phase B", () => {
+  assert.deepStrictEqual(D.DIAG_PHASE_A, ["type", "fou", "dateReal", "conso", "ges"]);
+  const p = D.diagPlan(snap(), REALV);
+  assert.deepStrictEqual(p.specs.map((x) => x.key + ":" + x.phase), ["type:A", "fou:A", "dateReal:A", "dateFin:calc", "conso:A", "ges:A", "ademe:B"]);
+  assert.strictEqual(p.specs.find((x) => x.key === "ademe").act.id, "body_x_textIdDpe_x_textIdDpe", "ADEME par son id réel");
+  assert.strictEqual(p.specs.find((x) => x.key === "dateFin").act, null, "« Valable jusqu'au » jamais saisi");
+  assert.strictEqual(p.specs.find((x) => x.key === "dateFin").want, "31/12/2024");
+  // page remplie comme après enregistrement (valeurs réaffichées par SIGEO)
+  const done = snap({ f: { type: { value: "11" }, fou: { value: "448957" }, dateReal: { value: "08/10/2020" },
+    dateFin: { value: "31/12/2024", label: "31/12/2024", shown: "31/12/2024" }, conso: { value: "224,00" }, ges: { value: "52,60" },
+    consoLettre: { value: "D" }, gesLettre: { value: "E" },
+    ademe: { mode: "input", input: { present: true, visible: true, value: "2021L2000833E", id: "body_x_textIdDpe_x_textIdDpe" }, labelText: "" } } });
+  assert.deepStrictEqual(gaps(done, REALV), []);
+  // ADEME vide après enregistrement → un écart, lu dans le champ de saisie
+  const lost = snap({ f: Object.assign({}, done.f, { ademe: { mode: "input", input: { present: true, visible: true, value: "", id: "x" }, labelText: "" } }) });
+  const g = gaps(lost, REALV);
+  assert.deepStrictEqual(g.map((x) => [x.label, x.want, x.got]), [["N° ADEME", "2021L2000833E", ""]]);
+  assert.strictEqual(D.diagGapText(g), "1 écart(s) : N° ADEME attendu « 2021L2000833E », relu « »");
+  // ADEME en libellé (fiche enregistrée, ancienne page)
+  const lab = snap({ f: Object.assign({}, done.f, { ademe: { mode: "label", input: null, labelText: "2021L2000833E" } }) });
+  assert.deepStrictEqual(gaps(lab, REALV), []);
+  assert.strictEqual(D.diagPlan(lab, REALV).specs.find((x) => x.key === "ademe").act, null);
+  // « Valable jusqu'au » ≠ calcul → écart (signe que « Établi le » n'a pas été pris en compte)
+  const badFin = snap({ f: Object.assign({}, done.f, { dateFin: { value: "", label: "", shown: "" } }) });
+  assert.deepStrictEqual(gaps(badFin, REALV).map((x) => x.key), ["dateFin"]);
+  // tous les écarts listés
+  const two = snap({ f: Object.assign({}, lost.f, { ges: { value: "53,60" } }) });
+  assert.strictEqual(D.diagGapText(gaps(two, REALV)), "2 écart(s) : Émission GES attendu « 52,6 », relu « 53,60 » ; N° ADEME attendu « 2021L2000833E », relu « »");
 });
 
-check("prochaine action : avertissements ADEME, champ refusé", () => {
-  const st = { attempts: {}, warned: {} };
-  const base = { type: { value: "11" }, fou: { value: "448957" }, dateReal: { value: "12/05/2019" }, dateFin: { value: "31/12/2024" } };
-  let p = D.diagNextActions(snap({ f: base }), Object.assign({}, V, { dateEtabli: "12/05/2019" }), st);
-  assert.ok(p.warnings.some((w) => /champ ADEME non affiché/.test(w)));
-  p = D.diagNextActions(snap({ f: base }), Object.assign({}, V, { dateEtabli: "12/05/2019" }), st);
-  assert.ok(!p.warnings.some((w) => /champ ADEME non affiché/.test(w)), "avertissement émis une seule fois");
-  // la page refuse obstinément la conso → erreur après 3 tentatives
-  st.attempts.conso = 3;
-  p = D.diagNextActions(snap({ f: base }), Object.assign({}, V, { dateEtabli: "12/05/2019" }), st);
-  assert.ok(/n'accepte pas Conso EP/.test(p.fatal), p.fatal);
-  // date à la bonne valeur mais « Valable jusqu'au » vide → un seul nouveau change
-  const st2 = { attempts: {}, warned: {} };
-  const V19 = Object.assign({}, V, { dateEtabli: "12/05/2019" });
-  p = D.diagNextActions(snap({ f: Object.assign({}, base, { dateFin: { value: "" } }) }), V19, st2);
-  assert.strictEqual(p.hard && p.hard.key, "dateReal");
-  assert.strictEqual(p.hard.value, "12/05/2019");
-  st2.attempts.dateReal = 1;
-  p = D.diagNextActions(snap({ f: Object.assign({}, base, { dateFin: { value: "" } }) }), V19, st2);
-  assert.ok(/Valable jusqu'au/.test(p.fatal));
+check("plan : phase B complète, avertissements", () => {
+  const v = Object.assign({}, REALV, { dateEtabli: "15/03/2024", dateDeb: "15/03/2024", coutMin: "1240", coutMax: "1680", datePrix: "01/01/2021",
+    nouvelles: true, altitude: false, comment: "ok" });
+  let p = D.diagPlan(snap({ couts: { present: true, visible: true }, f: { nouvelles: { visible: true, checked: false }, altitude: { visible: true, checked: false } } }), v);
+  assert.deepStrictEqual(p.specs.filter((x) => x.phase === "B").map((x) => x.key), ["ademe", "dateDeb", "coutMin", "coutMax", "datePrix", "altitude", "nouvelles", "comment"]);
+  p = D.diagPlan(snap(), v);
+  assert.ok(p.warnings.includes("bloc « coûts annuels » non affiché : coûts non saisis"));
+  assert.ok(p.warnings.some((w) => /case « Nouvelles valeurs du DPE » non affichée/.test(w)));
+  p = D.diagPlan(snap({ f: { ademe: { mode: "absent", input: null, labelText: "" } } }), REALV);
+  assert.ok(p.warnings.some((w) => /champ N° ADEME absent sur la page : N° 2021L2000833E non saisi/.test(w)), p.warnings.join(" | "));
+  p = D.diagPlan(snap({ f: { ademe: { mode: "hidden", input: { present: true, visible: false, value: "" }, labelText: "" } } }), REALV);
+  assert.ok(p.warnings.some((w) => /champ N° ADEME masqué/.test(w)));
+});
+
+check("plan : lettres du DPE forcées seulement si SIGEO calcule autre chose", () => {
+  const v = Object.assign({}, REALV, { lettreEp: "D", lettreGes: "B" });
+  const page = (o) => snap({ f: Object.assign({ consoLettre: { value: "E" }, gesLettre: { value: "B" } }, o) });
+  let p = D.diagPlan(page(), v);
+  const ep = p.specs.find((x) => x.key === "forceEp");
+  assert.deepStrictEqual([ep.want, ep.ok, ep.phase], ["D", false, "B"]);
+  assert.ok(/lettre EP du DPE D ≠ lettre calculée par SIGEO E → forcée/.test(ep.note));
+  assert.ok(!p.specs.some((x) => x.key === "forceGes"), "GES identique : pas de forçage");
+  // forcée → conforme, même si la légende affiche désormais D
+  assert.ok(D.diagPlan(page({ forceEp: { value: "D" }, consoLettre: { value: "D" } }), v).specs.find((x) => x.key === "forceEp").ok);
+  // forçage contraire alors que SIGEO calcule la bonne lettre → à vider
+  const clr = D.diagPlan(page({ gesLettre: { value: "B" }, forceGes: { value: "C" } }), v).specs.find((x) => x.key === "forceGes");
+  assert.deepStrictEqual([clr.want, clr.ok], ["", false]);
+  // option désactivée → avertissement, rien à saisir
+  p = D.diagPlan(page(), v, { forceLetters: false });
+  assert.ok(!p.specs.some((x) => x.key === "forceEp"));
+  assert.ok(p.warnings.some((w) => /non forcée \(option désactivée\)/.test(w)));
+});
+
+// Faux adaptateur à horloge virtuelle pour diagSettle.
+function fakeAd(script, o = {}) {
+  let t = 0;
+  return {
+    now: () => t, sleep: async (ms) => { t += ms; }, stopped: () => false,
+    tabLoading: o.tabLoading ? async () => o.tabLoading(t) : undefined,
+    read: async () => script(t)
+  };
+}
+const page = (docId, extra = {}) => Object.assign({ docId, readyState: "complete", leaving: false }, extra);
+
+check("fireAndSettle : rechargement, calme, navigation en attente, délai", async () => {
+  // a) postback : nouveau docId après 400 ms (null pendant le remplacement)
+  let ad = fakeAd((t) => t < 200 ? page("A", { leaving: t > 30 }) : t < 400 ? null : page("B"));
+  let r = await D.diagSettle(ad, ad.read, "A", { quietMs: 1500, timeoutMs: 15000 });
+  assert.deepStrictEqual([r.reloaded, r.snap.docId], [true, "B"]);
+  // b) pas de postback : 1,5 s de calme
+  ad = fakeAd(() => page("A"));
+  r = await D.diagSettle(ad, ad.read, "A", { quietMs: 1500, timeoutMs: 15000 });
+  assert.strictEqual(r.reloaded, false);
+  assert.ok(ad.now() >= 1500 && ad.now() < 2000, "≈ 1,5 s : " + ad.now());
+  // c) serveur lent : ancien document encore là 2,5 s, mais formulaire envoyé → on attend
+  ad = fakeAd((t) => t < 2500 ? page("A", { leaving: true }) : page("B"));
+  r = await D.diagSettle(ad, ad.read, "A", { quietMs: 1500, timeoutMs: 15000 });
+  assert.deepStrictEqual([r.reloaded, r.snap.docId], [true, "B"], "jamais « pas de postback » tant que la navigation est en attente");
+  // c bis) même cas signalé seulement par l'onglet en chargement
+  ad = fakeAd((t) => t < 2500 ? page("A") : page("B"), { tabLoading: (t) => t < 2500 });
+  r = await D.diagSettle(ad, ad.read, "A", { quietMs: 1500, timeoutMs: 15000 });
+  assert.strictEqual(r.reloaded, true);
+  // d) nouveau document pas encore complet → on attend complete
+  ad = fakeAd((t) => t < 300 ? page("A") : t < 900 ? page("B", { readyState: "interactive" }) : page("B"));
+  r = await D.diagSettle(ad, ad.read, "A", { quietMs: 1500, timeoutMs: 15000 });
+  assert.ok(r.reloaded && ad.now() >= 900);
+  // e) navigation qui ne finit jamais → timeout 15 s
+  ad = fakeAd(() => page("A", { leaving: true }));
+  r = await D.diagSettle(ad, ad.read, "A", { quietMs: 1500, timeoutMs: 15000 });
+  assert.ok(r.timeout && ad.now() > 15000 && ad.now() < 15500);
+  // f) mustReload (Enregistrer) : le calme ne suffit pas
+  ad = fakeAd(() => page("A"));
+  r = await D.diagSettle(ad, ad.read, "A", { quietMs: 1500, timeoutMs: 4000, mustReload: true });
+  assert.ok(r.timeout);
+  // f bis) mustReload + doneWhen : mise à jour partielle sur le même document
+  ad = fakeAd((t) => page("A", { grid: { count: t < 800 ? 0 : 1 } }));
+  r = await D.diagSettle(ad, ad.read, "A", { quietMs: 1500, timeoutMs: 4000, mustReload: true, doneWhen: (x) => x.grid.count > 0 });
+  assert.deepStrictEqual([r.partial, r.reloaded], [true, false]);
+  // g) lecture qui ne répond plus (frame en navigation) : le délai s'applique quand même
+  ad = fakeAd(() => new Promise(() => {}));
+  r = await D.diagSettle(ad, ad.read, "A", { quietMs: 1500, timeoutMs: 3000, readCapMs: 5 });
+  assert.ok(r.timeout, "POSTBACK_TIMEOUT même si la page ne répond pas");
+  assert.strictEqual(await D.diagCapped(new Promise(() => {}), 5), null);
+  assert.strictEqual(await D.diagCapped(Promise.resolve(7), 50), 7);
+});
+
+check("repli : handler onchange appelé instruction par instruction (monde MAIN)", () => {
+  const calls = [];
+  const el = { id: "d", value: "08/10/2020", getAttribute: (a) => a === "onchange" ? "javascript:ValidatorOnChange(event); performanceEnergetique(this); return x.y('a\\'b', 2);" : null };
+  const saved = { window: global.window, document: global.document };
+  global.document = { getElementById: (id) => id === "d" ? el : null };
+  global.window = {
+    ValidatorOnChange: (ev) => { calls.push(["V", ev.type]); throw new Error("vals is undefined"); },
+    performanceEnergetique(e) { calls.push(["P", e === el, this === global.window]); },
+    x: { y(a, n) { calls.push(["Y", a, n, this === global.window.x]); } }
+  };
+  try {
+    const r = D.diagMainHandler({ id: "d" });
+    assert.ok(r.ok);
+    assert.deepStrictEqual(calls, [["V", "change"], ["P", true, true], ["Y", "a'b", 2, true]], "une erreur n'empêche pas la suite");
+    assert.ok(/vals is undefined/.test(r.calls[0].error));
+    assert.deepStrictEqual(D.diagMainHandler({ id: "zz" }).ok, false);
+    el.getAttribute = () => "foo(bar)";
+    assert.strictEqual(D.diagMainHandler({ id: "d" }).calls[0].skipped, "fonction absente");
+  } finally { global.window = saved.window; global.document = saved.document; }
 });
 
 check("HTML de l'étape et lecture des réglages", () => {
   const html = D.diagStepHtml({ diagCols: { code_fournisseur: "{N° FU}" }, diagConfirm: false }, (s) => String(s ?? "").replace(/"/g, "&quot;"));
   assert.ok(html.includes('data-k="code_fournisseur" value="{N° FU}"'));
   assert.ok(/scn-diag-confirm"\s*\/>/.test(html), "case confirmer décochée");
+  assert.ok(/scn-diag-forceletters" checked/.test(html), "forcer la lettre : coché par défaut");
+  assert.ok(!/scn-diag-forceletters" checked/.test(D.diagStepHtml({ diagForceLetters: false }, String)));
   assert.strictEqual(Object.keys(D.DIAG_PRESETS.analyse).length, D.DIAG_FIELDS.length);
+  assert.strictEqual(D.DIAG_PRESETS.analyse.lettre_ep_forcee, "{Classe énergie}");
+  assert.strictEqual(D.DIAG_IDS.ademe, "body_x_textIdDpe_x_textIdDpe");
+  assert.strictEqual(D.DIAG_DEFAULTS.timeoutMs, 15000);
+  assert.ok(/scn-diag-timeout"[^>]*value="15000"/.test(D.diagStepHtml({ diagTimeout: 20000 }, String)), "ancien défaut 20 s → 15 s");
+  assert.ok(/scn-diag-timeout"[^>]*value="30000"/.test(D.diagStepHtml({ diagTimeout: 30000 }, String)), "valeur personnalisée conservée");
 });
 
-console.log(failures ? `\n${failures} échec(s)` : "\nTous les tests passent.");
-process.exit(failures ? 1 : 0);
+(async () => {
+  for (const [name, fn] of tests) {
+    try { await fn(); console.log("✓ " + name); }
+    catch (e) { failures++; console.log("✗ " + name + "\n   " + (e.stack || e).toString().split("\n").slice(0, 8).join("\n   ")); }
+  }
+  console.log(failures ? `\n${failures} échec(s)` : "\nTous les tests passent.");
+  process.exit(failures ? 1 : 0);
+})();

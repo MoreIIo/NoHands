@@ -10,6 +10,29 @@ if (window.__nohandsOsaInjected) {
 } else {
   window.__nohandsOsaInjected = true;
 
+// Identifiant de CE document (v2.16.0) : généré une fois au chargement par
+// cette instance du content script, il change donc à chaque rechargement
+// complet (postback ASP.NET). Posé sur <html> (data-nh-doc) pour que les
+// fonctions injectées par le panneau (étape DPE) lisent le même, et renvoyé
+// dans chaque réponse. crypto.randomUUID n'existe que sur une page sécurisée
+// (https) : repli sur getRandomValues pour SIGEO en http.
+function nhNewDocId() {
+  try { if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID(); } catch (_) { /* contexte non sécurisé */ }
+  const b = new Uint8Array(16);
+  try { crypto.getRandomValues(b); } catch (_) { for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256); }
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+const NH_DOC_ID = (() => {
+  const root = document.documentElement;
+  if (!root) return nhNewDocId();
+  // Déjà posé par une fonction injectée avant document_end : on le garde.
+  if (!root.getAttribute('data-nh-doc')) root.setAttribute('data-nh-doc', nhNewDocId());
+  return root.getAttribute('data-nh-doc');
+})();
+
 // Dernier élément cliqué-droit (pour le menu contextuel)
 let lastContextMenuTarget = null;
 
@@ -24,7 +47,13 @@ document.addEventListener('contextmenu', (event) => {
   lastContextMenuTarget = event.target;
 }, true);
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((request, sender, rawSendResponse) => {
+  // Chaque réponse porte le docId de ce document (détection des rechargements).
+  const sendResponse = (res) => rawSendResponse(res && typeof res === 'object' && !Array.isArray(res) ? Object.assign({ docId: NH_DOC_ID }, res) : res);
+  if (request.action === 'docState') {
+    sendResponse({ success: true, readyState: document.readyState, url: location.href });
+    return false;
+  }
   if (request.action === 'fillForm') {
     console.log('NoHands OSA: fillForm reçu', request);
 

@@ -208,39 +208,79 @@ deux modes :
 
    **Colonnes** (modèles `{Colonne}` modifiables, bloc « Colonnes du
    fichier ») : `type_local` (habitation → 11 par défaut, hors habitation →
-   15), `code_fournisseur`*, `date_etabli`*, `date_validite`, `numero_ademe`,
-   `conso_ep`*, `emission_ges`*, `lettre_ep_forcee`, `lettre_ges_forcee`,
-   `altitude_800m` / `nouvelles_valeurs` (oui/non), `cout_min`, `cout_max`,
-   `date_prix`, `resultat`, `commentaire`, `fichier_dpe`, `lot` (affichage).
+   15), `code_fournisseur`*, `date_etabli`*, `date_validite` (jamais saisie :
+   comparée au calcul SIGEO, simple avertissement si elle diffère),
+   `date_debut_validite`, `numero_ademe`, `conso_ep`*, `emission_ges`*,
+   `lettre_ep_forcee` / `lettre_ges_forcee` (lettres **du DPE** : voir
+   ci-dessous), `altitude_800m` / `nouvelles_valeurs` (oui/non), `cout_min`,
+   `cout_max`, `date_prix`, `resultat`, `commentaire`, `fichier_dpe`, `lot`
+   (affichage).
    Le bouton « Colonnes de l'Analyse DPE » reprend celles écrites par
-   l'extraction *Analyse DPE* (`{N° FU}`, `{Établi le}`, `{DPE fichier}`…) ;
-   « Modèle DPE » les choisit tout seul si le fichier chargé les contient.
+   l'extraction *Analyse DPE* (`{N° FU}`, `{Établi le}`, `{Classe énergie}`,
+   `{DPE fichier}`…) ; « Modèle DPE » les choisit tout seul si le fichier
+   chargé les contient.
    Dates : la valeur brute du classeur est lue (n° de série Excel → jj/mm/aaaa,
-   SheetJS affichant sinon `m/d/yy`) ; nombres sans espace ni unité, virgule
-   décimale, dans la limite du `maxlength` du champ. Une donnée obligatoire
-   manquante ou illisible arrête la ligne avant toute saisie.
+   SheetJS affichant sinon `m/d/yy`). Nombres : virgule, **au plus 2
+   décimales**, sans espace ni unité ni « € » ; s'ils dépassent le `maxlength`
+   du champ (6 pour conso/GES, 5 pour les estimations) → `VALEUR_TROP_LONGUE`
+   (plus d'arrondi pour faire tenir). N° ADEME : trim + majuscules, format
+   `^\d{4}[A-Z]\d{7}[A-Z]$`, sinon `ADEME_INVALIDE`. Une donnée obligatoire
+   manquante, illisible ou invalide arrête la ligne **avant toute saisie**.
 
-   **Déroulé** : la page étant entièrement rechargée à chaque `__doPostBack`,
-   l'étape boucle « relire la page → faire la première action manquante →
-   attendre le rechargement » dans l'ordre du formulaire : Type (postback,
-   bloc consommations affiché), Fournisseur (**jamais de touche Entrée** : elle
-   déclenche Enregistrer), Établi le (postback : « Valable jusqu'au » calculé,
-   champ N° ADEME affiché pour les DPE récents), N° ADEME (repéré dans la
-   dernière cellule de la ligne « Établi le »), coûts annuels dès que leur
-   bloc apparaît (revérifié après chaque postback), Conso EP puis GES
-   (postbacks, lettres calculées vérifiées), cases, lettres forcées, résultat,
-   commentaire. Les valeurs saisies avant un déclenchement partent avec le
-   POST ; rien n'est saisi entre le déclenchement et le rechargement (20 s
-   max, sinon erreur). Une valeur effacée par un postback est ressaisie
-   (3 essais max). Contrôle final : toutes les valeurs relues et comparées
-   (`320` = `320,00`), puis **Enregistrer** (jamais « Enreg. et fermer ») :
-   succès = `Enregistrement réussi !` dans `#msgbody` ; tout autre message
-   arrête la ligne et son texte est affiché dans le journal et la colonne
-   résultat. Après enregistrement : N° ADEME relu dans `#body_x_labelIdDpe`
-   (différent → arrêt avant l'upload), nom du fournisseur non vide, valeurs
-   relues une seconde fois. La popup reste ouverte.
-   Champ ADEME absent alors qu'un N° est fourni (DPE ancien) → avertissement,
-   la ligne continue.
+   **Déroulé (v2.16.0, en phases)**. Certains champs déclenchent un
+   `__doPostBack` **complet** (hors de l'update panel `body_x_upcDiag`) : le
+   formulaire est sérialisé au `submit()` puis la page entière est remplacée —
+   tout ce qui est écrit ensuite dans l'ancien document est perdu. Donc :
+   - **Détection des postbacks** : chaque document reçoit un `docId`
+     (`crypto.randomUUID()`, repli `getRandomValues` sur http) posé sur
+     `<html data-nh-doc>` par `content.js` au chargement (et renvoyé dans ses
+     réponses) ou par la fonction injectée ; les événements `formdata`
+     (synchrone au `submit()`), `beforeunload` et `pagehide` signalent une
+     navigation en cours. **fireAndSettle** : `input` + `change` sur UN champ,
+     puis interrogation de la frame jusqu'à un nouveau `docId` en
+     `readyState complete` (rechargement) ou ~1,5 s de calme sans navigation
+     en attente (pas de postback) ; 15 s max (réglable) → `POSTBACK_TIMEOUT`.
+     Aucune référence d'élément n'est réutilisée après une attente : chaque
+     action refait `getElementById`. Champs à postback détectés aussi
+     automatiquement (`onchange` avec `__doPostBack`, `changeType`,
+     `performanceEnergetique`, ou `input type=submit`).
+   - **Phase A** — champs à postback, un par un : Type → Fournisseur →
+     Établi le → Conso EP → GES. Pour chacun : relire le DOM, ne remplir que
+     si la valeur normalisée diffère, fireAndSettle, vérifier qu'elle a tenu
+     (3 essais). Sur la vraie page, un `change` synthétique sur « Établi le »
+     n'atteint pas le postback : si rien ne se passe, le handler `onchange`
+     est appelé directement dans le monde de la page (instruction par
+     instruction : `ValidatorOnChange(event); performanceEnergetique(this)`).
+     « Valable jusqu'au » n'est **jamais** saisi : il doit valoir le calcul
+     SIGEO (avant 2013 et dès le 01/07/2021 : +10 ans −1 jour ; 2013–2017 :
+     31/12/2022 ; 01/2018–06/2021 : 31/12/2024), sinon « Établi le » est
+     redéclenché.
+   - **Phase B** — ensuite seulement, les champs sans postback : N° ADEME
+     (`body_x_textIdDpe_x_textIdDpe`), date début validité, estimations,
+     date de référence des prix, lettres forcées, cases, résultat,
+     commentaire (valeur + `input`/`change`). **Lettres** : jamais comparées
+     au PDF ; si la lettre du DPE diffère de celle calculée par SIGEO, elle
+     est mise dans « Forcer la lettre » (option de l'étape, cochée par
+     défaut) et c'est ce champ qui est vérifié.
+   - **Phase C** — contrôle **avant** enregistrement : tout est relu et
+     comparé (comparateur normalisé : `224` = `224,00`, `52,6` = `52,60`,
+     écart < 0,005 ; dates jj/mm/aaaa ; ADEME en majuscules) ; les écarts
+     sont ressaisis (2 essais) ; s'il en reste → `ECART_AVANT_ENREG` avec
+     **tous** les écarts, rien n'est enregistré.
+   - **Phase D** — **Enregistrer** (jamais « Enreg. et fermer » ni la touche
+     Entrée) ; rechargement attendu (`docId`) et `Enregistrement réussi !`
+     dans `#msgbody` (tout autre message arrête la ligne) ; contrôle
+     **après** enregistrement avec le même comparateur (N° ADEME relu dans
+     le champ ou dans `#body_x_labelIdDpe`) → `ECART_APRES_ENREG` avec tous
+     les écarts, upload annulé.
+   - **Phase E** — upload du PDF (postback attendu) puis vérification de la
+     grille de `body_x_upcDiag`.
+   - **Reprise** : tout rechargement inattendu fait repartir de la phase A
+     d'après le DOM (aucun champ n'est sauté parce qu'il avait été « fait »).
+   - **Journal** : pour chaque champ `attendu « … » · avant « … » · après « … »`
+     et une ligne `↻ postback (champ)` à chaque rechargement.
+   La popup reste ouverte. Champ ADEME absent alors qu'un N° est fourni →
+   avertissement, la ligne continue.
 
    **PDF** : « PDF (ligne active) » (clic ou glisser-déposer) pour *Démarrer
    sur la ligne active* ; **Dossier des DPE** (mémorisé, sous-dossiers
@@ -632,15 +672,32 @@ fournisseur inconnu, PDF sans ligne — générés par
 dossier, OCR Tesseract.js, liste fournisseurs, export Excel). Un dossier de
 vrais DPE peut être passé en argument : `node tests/dpe-scan.node.js <dossier>`.
 Saisie DPE : `node tests/sigeo-diag.node.js` (logique : dates, nombres,
-correspondance des fichiers, contrôle ADEME, ordre des actions) et
+comparateur normalisé, calcul de « Valable jusqu'au », plan des phases,
+lettres forcées, fireAndSettle à horloge virtuelle, repli du handler,
+correspondance des fichiers, contrôle ADEME),
 `node tests/sigeo-diag.panel.e2e.js` (vrai panneau contre un faux SIGEO
-`diag_manage` — `tests/fixtures/sigeo-diag-server.js` : postbacks complets,
-champ ADEME selon la date, coûts après la conso, refus serveur, upload
-multipart — : saisie de bout en bout, ancien DPE, fichiers absent / ambigu /
-mauvais ADEME / scan / non PDF, rechargements pendant la saisie et la
-confirmation, relances sans doublon).
+`diag_manage` — `tests/fixtures/sigeo-diag-server.js` : postbacks complets
+sérialisés au `submit()`, fournisseur à postback, change synthétique sans
+effet sur « Établi le », ADEME `body_x_textIdDpe_x_textIdDpe`, coûts après
+la conso, refus serveur, upload multipart — : saisie de bout en bout, ancien
+DPE, fichiers absent / ambigu / mauvais ADEME / scan / non PDF,
+rechargements pendant la saisie et la confirmation, relances sans doublon)
+et `node tests/sigeo-diag.realcase.e2e.js` (cas réel 448957 / 08/10/2020 /
+2021L2000833E / 224 / 52,6 en simulation puis enregistré, serveur lent,
+`ADEME_INVALIDE`, `VALEUR_TROP_LONGUE`, `ECART_AVANT_ENREG`,
+`ECART_APRES_ENREG`, `POSTBACK_TIMEOUT`, lettre forcée).
 
-**Version** : 2.15.0 — nouvelle étape de scénario **SIGEO : saisir un DPE**
+**Version** : 2.16.0 — **SIGEO : saisir un DPE** fiabilisée face aux
+postbacks complets : `docId` par document (content.js + fonction injectée),
+fireAndSettle (rechargement ou 1,5 s de calme, 15 s → `POSTBACK_TIMEOUT`),
+repli par appel direct du handler sur « Établi le », remplissage en phases
+A (postback) → B (sans postback) → C (contrôle avant, 2 essais) →
+D (Enregistrer + contrôle après) → E (PDF), N° ADEME par son id réel,
+« Valable jusqu'au » vérifié mais jamais saisi, lettre du DPE forcée
+seulement si SIGEO en calcule une autre, codes `ECART_AVANT_ENREG`,
+`ECART_APRES_ENREG`, `VALEUR_TROP_LONGUE`, `ADEME_INVALIDE`, tous les écarts
+listés.
+2.15.0 — nouvelle étape de scénario **SIGEO : saisir un DPE**
 (formulaire diagnostic + PDF joint, reprise après chaque postback, journal
 anti-doublon, correspondance stricte du fichier, mode debug).
 2.14.0 — nouveau type d'extraction **Analyse DPE** (dossier de
