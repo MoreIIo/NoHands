@@ -476,7 +476,10 @@ DPE : `node tests/sigeo-dpe.jsdom.js` (jsdom : filtre, plus récent, nom de
 fichier, attente du chargement, fiche → page Documents, POST → PDF ou HTML,
 contre `tests/fixtures/sigeo-dpe-mock.js`) et `node tests/sigeo-dpe.panel.e2e.js`.
 
-**Version** : 2.13.0 — nouveau type d'extraction **DPE SIGEO** (DPE le plus
+**Version** : 2.13.1 — DPE SIGEO : titres de section lus dans les
+`<fieldset><legend>` de la page Documents (le formulaire SIGEO porte un
+`onclick` qui masquait tous les titres en 2.13.0).
+2.13.0 — nouveau type d'extraction **DPE SIGEO** (DPE le plus
 récent de chaque lot : vérification, téléchargement renommé, colonnes DPE).
 2.12.0 — nouveau type d'extraction **Recherche d'id interne de
 lot** (IM + LT → id interne SIGEO + URL de la fiche, par POST direct avec

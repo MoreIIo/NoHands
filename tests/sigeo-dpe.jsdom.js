@@ -130,6 +130,17 @@ function adapter(srv, saved, logs) {
     assert.strictEqual(tie.chosen.name, "DPE b");
   });
 
+  await check("lot F (structure réelle : fieldset/legend, form onclick) : « 17312 (DIAG DPE2021).pdf » retenu", async () => {
+    const page = parse(mock.docsPage("F"));
+    const titles = page.sections.map((s) => s.title);
+    ["Diagnostics >> EPC", "Diagnostics Multys >> EPC", "Divers", "Plans"].forEach((t) => assert.ok(titles.includes(t), titles.join(" | ")));
+    const sel = dpe.dpeSelect(page.sections, rules);
+    assert.strictEqual(sel.candidates.length, 1, JSON.stringify(sel.candidates.map((c) => c.name)));
+    assert.strictEqual(sel.chosen.name, "17312 (DIAG DPE2021).pdf");
+    assert.strictEqual(sel.chosen.iso, "2025-01-09");
+    assert.strictEqual(sel.chosen.section, "Diagnostics >> EPC");
+  });
+
   await check("« Chargement en cours... » visible → page pas prête", async () => {
     const page = parse(mock.docsPage("A", { loaded: false }));
     assert.strictEqual(page.ready, false);
@@ -192,6 +203,13 @@ function adapter(srv, saved, logs) {
     assert.ok(/^KO téléchargement : réponse HTML au lieu d'un fichier \(validation ASP\.NET refusée\)/.test(r.statut), r.statut);
     assert.strictEqual(saved.length, 0);
     assert.ok(logs.some((l) => /POST __doPostBack refusé/.test(l)));
+  });
+
+  await check("lot F : parcours complet + téléchargement", async () => {
+    const saved = [];
+    const r = await dpe.dpeProcess(adapter(srv, saved, []), P(srv.docsUrl("F")));
+    assert.strictEqual(r.statut, "Téléchargé", JSON.stringify(r));
+    assert.strictEqual(r.file, "IM0393664_10_DPE_2025-01-09.pdf");
   });
 
   await check("vérification seule : trouvé, pas de POST", async () => {

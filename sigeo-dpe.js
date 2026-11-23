@@ -224,7 +224,18 @@ function dpePageOp(cfg) {
       });
     }
 
-    // Titres : textes hors tableaux de fichiers, rattachés au tableau suivant.
+    // Titres. 1) <fieldset><legend>Diagnostics >> EPC</legend> (structure
+    // SIGEO) : légende du fieldset le plus proche du tableau. 2) À défaut,
+    // texte le plus proche avant le tableau.
+    const legendOf = (el) => {
+      for (let e = el; e && e !== body; e = e.parentElement) {
+        if (e.tagName !== "FIELDSET") continue;
+        const lg = Array.from(e.children).find((c) => c.tagName === "LEGEND");
+        if (lg && norm(lg.textContent)) return norm(lg.textContent);
+      }
+      return "";
+    };
+    const isTitle = (t) => />>|»/.test(t);
     const gridTables = Array.from(grids.keys());
     const inGrid = (node) => gridTables.some((t) => t.contains(node));
     const sections = [];
@@ -238,20 +249,20 @@ function dpePageOp(cfg) {
           seen.add(n);
           // Titre = texte le plus proche avant le tableau (hors liens,
           // boutons, compteurs « (3) »).
-          const title = gap.filter((t) => t.length <= 120 && !/^[(\[]?\d+[)\]]?$/.test(t)).pop() || "";
+          const title = legendOf(n) || gap.filter((t) => t.length <= 120 && !/^[(\[]?\d+[)\]]?$/.test(t)).pop() || "";
           sections.push({ title, files: grids.get(n) });
           gap = [];
         }
         continue;
       }
       const p = n.parentElement;
-      if (!p || /^(SCRIPT|STYLE|NOSCRIPT|OPTION|BUTTON|TEXTAREA|SELECT)$/.test(p.tagName) || p.closest("a,button,[onclick]")) continue;
+      if (!p || /^(SCRIPT|STYLE|NOSCRIPT|OPTION|BUTTON|TEXTAREA|SELECT)$/.test(p.tagName) || p.closest("a,button")) continue;
       const t = norm(n.nodeValue);
       if (!t || LOADING.test(t) || HEAD.test(fold(t)) || inGrid(n)) continue;
       gap.push(t);
-      if (t.includes(">>")) titles.push(t);
+      if (isTitle(t) || p.closest("legend")) titles.push(t);
     }
-    // Sections sans tableau (vides) : titres « >> » non rattachés.
+    // Sections sans tableau (vides) : titres « >> » / légendes non rattachés.
     const attached = new Set(sections.map((s) => s.title));
     titles.filter((t) => !attached.has(t)).forEach((t) => sections.push({ title: t, files: [], empty: true }));
 
@@ -395,7 +406,10 @@ async function dpeProcess(ad, p) {
   if (open.error) return Object.assign(base, { status: "PAGE", statut: "Page introuvable", error: open.error });
 
   const sel = dpeSelect(open.page.sections, rules);
-  if (!sel.sections.length) info.push("aucune section « EPC » trouvée (titres : " + (open.page.titles.join(" | ") || "aucun") + ")");
+  if (!sel.sections.length) {
+    const nf = open.page.sections.reduce((k, s) => k + s.files.length, 0);
+    info.push("aucune section « EPC » trouvée (titres : " + (open.page.sections.map((s) => s.title || "?").join(" | ") || "aucun") + ` ; ${nf} fichier(s) lus)`);
+  }
   const res = Object.assign(base, { candidates: sel.candidates, count: sel.candidates.length, chosen: sel.chosen, sections: sel.sections.map((s) => s.title) });
   if (!sel.chosen) return Object.assign(res, { status: "ABSENT", present: "NON", statut: "Absent" });
   res.present = "OUI";

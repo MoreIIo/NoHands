@@ -56,6 +56,23 @@ const LOTS = {
       ["DPE", "Multys", "10/05/2023"]
     ]
   },
+  // Structure réelle observée (capture du 23/11) : sections en <fieldset>
+  // + <legend>, formulaire avec onclick, « Joindre un document ».
+  F: {
+    "Diagnostics >> EPC": [
+      ["17312 (DIAG DPE2021).pdf", "RapportDiagnosticLot", "09/01/2025"],
+      ["diag_elec_2017.pdf", "RapportDiagnosticLot", "17/08/2017"],
+      ["additif_edle_1_emetteur_en_plus.msg", "RapportDiagnosticLot", "03/07/2017"],
+      ["EDLE_WROBEL_ORALIA.pdf", "RapportDiagnosticLot", "31/05/2017"],
+      ["Votre_entree_dans_le_logement_Proprietaire_BUNLON.msg", "RapportDiagnosticLot", "26/04/2017"],
+      ["BUNLON_392_05.10.10_DP.pdf", "RapportDiagnosticLot", "26/04/2017"]
+    ],
+    "Diagnostics Multys >> EPC": [],
+    "Divers": [],
+    "Etats des lieux": [],
+    "Photos": [],
+    "Plans": [["plan.jpg", "PlanLot", "26/04/2017"]]
+  },
   // Le DPE renvoie du HTML au lieu d'un PDF (ViewState rejeté côté serveur).
   H: {
     "Diagnostics >> EPC": [["DPE 2020", "RapportDiagnosticLot", "03/03/2020"]]
@@ -86,12 +103,24 @@ function sectionsHtml(lot) {
   }).join("");
 }
 
+// Variante fieldset / legend (lot F) : structure de la vraie page.
+function fieldsetHtml(lot) {
+  return Object.entries(LOTS[lot] || {}).map(([title, files], si) => `
+  <fieldset class="ged"><legend>${esc(title)}</legend>
+    ${title === "Divers" || title === "Photos" || title === "Plans" ? `<div><img src="add.gif"><a href="javascript:__doPostBack('body$x$reManagers$_ctl${si}$lnkAdd','')">Joindre un document</a></div>` : ""}
+    ${files.length ? `<table cellspacing="0" rules="all" border="1" style="border-collapse:collapse;">
+      <tr style="color:White;background-color:#333;font-weight:bold;"><td>Nom</td><td>Description</td><td>Date</td></tr>
+      ${files.map(([n, d, dt], fi) => `<tr><td><a href="javascript:__doPostBack('${target(lot, si, fi)}','')">${esc(n)}</a></td><td>${esc(d)}</td><td>${esc(dt)}</td></tr>`).join("")}
+    </table>` : ""}
+  </fieldset>`).join("");
+}
+
 // loaded=false : page telle qu'à l'ouverture (« Chargement en cours... »),
 // sections injectées par un script après `delay` ms (si delay fourni).
 function docsPage(lot, { loaded = true, delay = 0 } = {}) {
-  const inner = `<table class="layout">${sectionsHtml(lot)}</table>`;
+  const inner = lot === "F" ? fieldsetHtml(lot) : `<table class="layout">${sectionsHtml(lot)}</table>`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Gestion des documents</title></head><body>
-<form name="aspnetForm" method="post" action="./lot_manage?lot=${lot}" id="aspnetForm">
+<form name="aspnetForm" method="post" action="./lot_manage?lot=${lot}" id="aspnetForm"${lot === "F" ? ' onclick="if(window.hideMenus)hideMenus();"' : ""}>
 <input type="hidden" name="__EVENTTARGET" id="__EVENTTARGET" value="">
 <input type="hidden" name="__EVENTARGUMENT" id="__EVENTARGUMENT" value="">
 <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="${loaded ? VIEWSTATE : "initial"}">
