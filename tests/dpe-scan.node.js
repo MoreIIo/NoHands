@@ -132,27 +132,29 @@ function unitTests() {
   const g = (f, c) => out[f][c];
   // DPE 2021 texte (ACADE) : valeurs calculées total ÷ surface, sans OCR en mode auto
   const A = "IM0393664_10_DPE_2022-10-19.pdf";
-  assert.deepStrictEqual([g(A, "DPE analyse"), g(A, "Fournisseur DPE"), g(A, "N° FU"), g(A, "Établi le"), g(A, "Valable jusqu'au"),
-    g(A, "Énergie primaire (kWh/m²/an)"), g(A, "Énergie primaire totale (kWh/an)"), g(A, "Classe énergie"), g(A, "GES (kg CO2/m²/an)"),
-    g(A, "GES total (kg CO2/an)"), g(A, "Classe GES"), g(A, "Coût min (€/an)"), g(A, "Coût max (€/an)"), g(A, "N° ADEME"), g(A, "Surface (m²)"),
-    g(A, "Adresse DPE"), g(A, "Diagnostiqueur"), g(A, "N° certification")],
-  ["OK", "ACADE", "0448957", "19/10/2022", "18/10/2032", "208", "9410", "D", "19", "860", "C", "1230", "1700", "2275E1234567X", "45,2",
-    "12 rue Lamarck 75018 PARIS", "Jean DUPONT", "C2019-SE01-045"]);
+  // Colonnes : uniquement ce qui sert à la saisie SIGEO
+  assert.deepStrictEqual(ds.DS_COLS, ["DPE analyse", "PDF analysé", "N° FU", "Établi le", "Valable jusqu'au", "N° ADEME",
+    "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "Coût min (€/an)", "Coût max (€/an)",
+    "Prix indexés au", "Remarques DPE"]);
+  assert.deepStrictEqual(ds.DS_COLS.map((c) => out[A][c]),
+    ["OK", A, "0448957", "19/10/2022", "18/10/2032", "2275E1234567X", "208", "D", "19", "C", "1230", "1700", "01/01/2021", ""]);
   // DPE 2021 scanné (SOCOTEC ≈ SOCOTECH) : OCR, petite surface (E au lieu de F)
   const B = "IM0393664_11_DPE_2025-03-15.pdf";
   assert.strictEqual(g(B, "N° FU"), "0048730");
-  assert.strictEqual(g(B, "Fournisseur (liste)"), "SOCOTECH");
   assert.deepStrictEqual([g(B, "Établi le"), g(B, "Valable jusqu'au"), g(B, "Énergie primaire (kWh/m²/an)"), g(B, "GES (kg CO2/m²/an)"),
-    g(B, "Classe énergie"), g(B, "Classe GES"), g(B, "Surface (m²)"), g(B, "Coût min (€/an)"), g(B, "Coût max (€/an)")],
-  ["15/03/2025", "14/03/2035", "340", "21", "E", "C", "28,5", "1080", "1470"]);
+    g(B, "Classe énergie"), g(B, "Classe GES"), g(B, "Coût min (€/an)"), g(B, "Coût max (€/an)")],
+  ["15/03/2025", "14/03/2035", "340", "21", "E", "C", "1080", "1470"]);
   assert.strictEqual(g(B, "N° ADEME"), "2575E0456789B");
   assert.strictEqual(g(B, "DPE analyse"), "À VÉRIFIER");
-  assert.ok(/rapproché/.test(g(B, "Remarques DPE")), g(B, "Remarques DPE"));
+  assert.ok(/rapproché : « .+ » ≈ « SOCOTECH »/.test(g(B, "Remarques DPE")), g(B, "Remarques DPE"));
   // Ancien DPE 2014
   const C = "IM0393665_3_DPE_2014-05-12.pdf";
   assert.deepStrictEqual([g(C, "Établi le"), g(C, "Valable jusqu'au"), g(C, "Énergie primaire (kWh/m²/an)"), g(C, "GES (kg CO2/m²/an)"),
-    g(C, "Classe énergie"), g(C, "Classe GES"), g(C, "Fournisseur (liste)"), g(C, "N° FU"), g(C, "N° ADEME")],
-  ["12/05/2014", "11/05/2024", "318,99", "74,64", "E", "F", "DIAG 75", "0394076x", "1475V1001234X"]);
+    g(C, "Classe énergie"), g(C, "Classe GES"), g(C, "N° FU"), g(C, "N° ADEME")],
+  ["12/05/2014", "11/05/2024", "318,99", "74,64", "E", "F", "0394076x", "1475V1001234X"]);
+  // DPE d'avant 07/2021 : pas d'estimation dans SIGEO → coûts et date des prix non écrits
+  assert.deepStrictEqual([g(C, "Coût min (€/an)"), g(C, "Coût max (€/an)"), g(C, "Prix indexés au")], ["", "", ""]);
+  assert.ok(!/coûts|montant annuel|indexation/.test(g(C, "Remarques DPE")), g(C, "Remarques DPE"));
   assert.ok(/validité légale jusqu'au 31\/12\/2022/.test(g(C, "Remarques DPE")));
   // Fournisseur inconnu
   const E = "IM0393667_5_DPE_2023-02-02.pdf";

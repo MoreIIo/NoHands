@@ -126,7 +126,7 @@ const DIAG_PRESETS = Object.freeze({
     date_validite: "{Valable jusqu'au}", date_debut_validite: "", numero_ademe: "{N° ADEME}", conso_ep: "{Énergie primaire (kWh/m²/an)}",
     emission_ges: "{GES (kg CO2/m²/an)}", lettre_ep_forcee: "{Classe énergie}", lettre_ges_forcee: "{Classe GES}",
     altitude_800m: "", nouvelles_valeurs: "", cout_min: "{Coût min (€/an)}", cout_max: "{Coût max (€/an)}",
-    date_prix: "{date_prix}", resultat: "", commentaire: "", fichier_dpe: "{DPE fichier}", lot: "{lot}"
+    date_prix: "{Prix indexés au}", resultat: "", commentaire: "", fichier_dpe: "{PDF analysé}", lot: "{lot}"
   })
 });
 

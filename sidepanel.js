@@ -4358,7 +4358,7 @@ async function runDsExtraction() {
         logLine(`Ligne ${rowNum} : ${f.name}${via} → ÉCHEC — ${rec.error}`, "err");
       } else {
         const fu = g("N° FU") ? `FU ${g("N° FU")}` : "FU ?";
-        logLine(`Ligne ${rowNum} : ${f.name}${via} → ${statut} — ${g("Fournisseur DPE") || "?"} (${fu}), ${g("Établi le") || "?"} → ${g("Valable jusqu'au") || "?"}, ` +
+        logLine(`Ligne ${rowNum} : ${f.name}${via} → ${statut} — ${rec.societe || "?"} (${fu}), ${g("Établi le") || "?"} → ${g("Valable jusqu'au") || "?"}, ` +
           `${g("Énergie primaire (kWh/m²/an)") || "?"} kWh/m² ${g("Classe énergie")}, ${g("GES (kg CO2/m²/an)") || "?"} kg CO2/m² ${g("Classe GES")} (${secs} s)` +
           (statut !== "OK" ? ` — ${g("Remarques DPE")}` : ""), dsStatusClass(statut));
       }

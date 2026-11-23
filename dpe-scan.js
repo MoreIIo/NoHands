@@ -25,13 +25,16 @@
 const DS_TYPE_DIAG = "Performance Energetique";
 
 // Colonnes écrites dans le tableau (créées si absentes), dans cet ordre.
+// Uniquement ce qui sert à la saisie du DPE dans SIGEO (formulaire
+// diag_manage) + statut, PDF à joindre et remarques de contrôle (v2.17.2).
+// Les totaux (kWh/an, kg CO2/an), la surface, l'adresse, le diagnostiqueur…
+// restent lus pour les recoupements mais ne sont plus écrits. Coûts et date
+// d'indexation : seulement pour un DPE établi depuis le 01/07/2021 (avant,
+// SIGEO n'a pas de champ d'estimation).
 const DS_COLS = [
-  "DPE analyse", "PDF analysé", "Fournisseur DPE", "Fournisseur (liste)", "N° FU", "Type diagnostic",
-  "Établi le", "Valable jusqu'au",
-  "Énergie primaire (kWh/m²/an)", "Énergie primaire totale (kWh/an)", "Classe énergie",
-  "GES (kg CO2/m²/an)", "GES total (kg CO2/an)", "Classe GES",
-  "Coût min (€/an)", "Coût max (€/an)", "N° ADEME", "Surface (m²)", "Adresse DPE",
-  "Diagnostiqueur", "N° certification", "Lecture", "Remarques DPE"
+  "DPE analyse", "PDF analysé", "N° FU", "Établi le", "Valable jusqu'au", "N° ADEME",
+  "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES",
+  "Coût min (€/an)", "Coût max (€/an)", "Prix indexés au", "Remarques DPE"
 ];
 
 // Liste fournisseurs fournie par Maëlle (modifiable dans le panneau).
@@ -175,6 +178,9 @@ const DS_RE = {
   // Ordre du flux PDF parfois mélangé : « par an entre et 1430 € 1980 € »
   coutSwap: /entre\s*et\s*(\d[\d ]{0,7}?)\s*(?:€|eur)\s*(\d[\d ]{0,7}?)\s*(?:€|eur)/,
   // Montants sur une autre ligne que « entre … et … par an » (polices de tailles différentes)
+  // « Prix moyens des énergies indexés au 1er janvier 2021 » (date de référence des prix)
+  prixRefLong: dsRe(`index[e]?s?\\s*(?:au|a\\s*la\\s*date\\s*du)\\s*[:;.]?\\s*${DS_DATE_LONG}`, "g"),
+  prixRef: dsRe(`index[e]?s?\\s*(?:au|a\\s*la\\s*date\\s*du)\\s*[:;.]?\\s*${DS_DATE}`, "g"),
   coutNear: /entre[^0-9€\n]{0,40}?\n?[^0-9€]{0,40}?(\d[\d ]{0,7}?)\s*(?:€|eur)[^0-9€]{0,25}?(\d[\d ]{0,7}?)\s*(?:€|eur)/,
   twoAmounts: /(?:^|[^0-9])(\d{1,3}(?: \d{3})?|\d{4,5})\s*[€¢][^\d€]{0,25}?(\d{1,3}(?: \d{3})?|\d{4,5})\s*[€¢]/,
   coutTotalRow: /energie\s*totale\s*pour\s*les[\s\S]{0,90}?entre\s*(\d[\d ]{0,7}?)\s*(?:[€¢]|e\b)\s*et\s*(\d[\d ]{0,7}?)\s*(?:[€¢]|e\b)/,
@@ -578,7 +584,7 @@ function dsNewRecord() {
   return {
     generation: null, nonOfficiel: false, societe: "", diagnostiqueur: "", certification: "", adresse: "", zone: "",
     etabli: null, valable: null, epM2: null, epTotal: null, lettreEp: "", gesM2: null, gesTotal: null, lettreGes: "",
-    coutMin: null, coutMax: null, ademe: "", surface: null, efM2: null, efTotal: null,
+    coutMin: null, coutMax: null, prixRef: null, ademe: "", surface: null, efM2: null, efTotal: null,
     remarques: [], notes: [], erreur: ""
   };
 }
@@ -702,7 +708,6 @@ function dsExtract(src, rec = dsNewRecord()) {
       rec.epTotal = dsParseNum(m[2]);
       const cost = dsParseNum(m[3]);
       rec.coutMin = cost; rec.coutMax = cost;
-      if (cost !== null) rec.notes.push("ancien DPE : montant annuel unique (pas de fourchette)");
       break;
     }
   }
@@ -727,7 +732,6 @@ function dsExtract(src, rec = dsNewRecord()) {
     }
     if (rec.gesM2 !== null && rec.surface) {
       rec.gesTotal = Math.round(rec.gesM2 * rec.surface);
-      rec.notes.push("GES total calculé (GES/m² × surface)");
     }
     if (rec.efTotal !== null && rec.surface) rec.efM2 = Math.round(rec.efTotal / rec.surface * 100) / 100;
   }
@@ -745,8 +749,13 @@ function dsExtract(src, rec = dsNewRecord()) {
 
   dsExtractPeople(src, rec);
 
+  rec.prixRef = dsFirstDate([...dpeTexts, src.totalsText, all].filter(Boolean), [DS_RE.prixRefLong, DS_RE.prixRef]);
+
   if (!rec.ademe && !rec.nonOfficiel) rec.remarques.push("n° ADEME non trouvé");
-  if (rec.coutMin === null) rec.remarques.push("estimation des coûts non trouvée");
+  if (dsCoutsUtiles(rec)) {
+    if (rec.coutMin === null) rec.remarques.push("estimation des coûts non trouvée");
+    else if (!rec.prixRef) rec.remarques.push("date d'indexation des prix non trouvée");
+  }
   return rec;
 }
 
@@ -1131,6 +1140,12 @@ function dsStatus(rec) {
   return dsMissing(rec).length || rec.remarques.length ? "À VÉRIFIER" : "OK";
 }
 
+// Estimations (coûts + date d'indexation) saisissables dans SIGEO seulement
+// pour un DPE établi depuis le 01/07/2021.
+function dsCoutsUtiles(rec) {
+  return !!rec.etabli && dsDateCmp(rec.etabli, { y: 2021, m: 7, d: 1 }) >= 0;
+}
+
 // Valeurs des colonnes DS_COLS pour un résultat.
 function dsRecordValues(rec, fileName) {
   if (rec.error) {
@@ -1141,21 +1156,19 @@ function dsRecordValues(rec, fileName) {
   const miss = dsMissing(rec);
   const rem = [...(miss.length ? [`non trouvé : ${miss.join(", ")}`] : []), ...rec.remarques, ...rec.notes];
   const sup = rec.supplier;
+  const couts = dsCoutsUtiles(rec);
   return [
-    dsStatus(rec), fileName || "", rec.societe || "", sup ? sup.entry.name : "", sup ? sup.entry.code : "", DS_TYPE_DIAG,
-    dsDateFr(rec.etabli), dsDateFr(rec.valable),
-    dsFmtNum(rec.epM2), dsFmtNum(rec.epTotal), rec.lettreEp || "",
-    dsFmtNum(rec.gesM2), dsFmtNum(rec.gesTotal), rec.lettreGes || "",
-    dsFmtNum(rec.coutMin), dsFmtNum(rec.coutMax), rec.ademe || "", dsFmtNum(rec.surface), rec.adresse || "",
-    rec.diagnostiqueur || "", rec.certification || "",
-    `${rec.methode || ""}${rec.page ? ` — page ${rec.page}/${rec.pages}` : ""}${rec.generation === "ancien" ? " — ancien DPE" : ""}`,
+    dsStatus(rec), fileName || "", sup ? sup.entry.code : "",
+    dsDateFr(rec.etabli), dsDateFr(rec.valable), rec.ademe || "",
+    dsFmtNum(rec.epM2), rec.lettreEp || "", dsFmtNum(rec.gesM2), rec.lettreGes || "",
+    couts ? dsFmtNum(rec.coutMin) : "", couts ? dsFmtNum(rec.coutMax) : "", couts ? dsDateFr(rec.prixRef) : "",
     rem.join(" ; ")
   ];
 }
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
-    DS_COLS, DS_TYPE_DIAG, DS_DEFAULT_SUPPLIERS, DS_FILE_RE, dsClean, dsNorm, dsKey, dsParseNum, dsFmtNum, dsDate, dsDateFr,
+    DS_COLS, DS_TYPE_DIAG, DS_DEFAULT_SUPPLIERS, dsCoutsUtiles, DS_FILE_RE, dsClean, dsNorm, dsKey, dsParseNum, dsFmtNum, dsDate, dsDateFr,
     dsPlusYearsMinusOneDay, dsFindAdemeStrict, dsRepairAdeme, dsLetters, dsParseTsv, dsWordsText, dsRowText,
     dsLabelPairsFromText, dsLabelPairsSpatial, dsPageScore, dsExtract, dsNewRecord, dsParseSuppliers, dsFindSupplier,
     dsLevenshtein, dsBaseName, dsNormIm, dsNormLot, dsParseFileName, dsAssignFiles, dsPdfPageText, dsReadPdf,

@@ -121,24 +121,26 @@ const ROWS = [
   const pick = (r, names) => names.map((n) => get(r, n));
   const MAIN = ["DPE analyse", "N° FU", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "N° ADEME"];
   assert.deepStrictEqual(pick(1, MAIN), ["OK", "0448957", "19/10/2022", "18/10/2032", "208", "D", "19", "C", "2275E1234567X"]);
-  assert.deepStrictEqual(pick(1, ["Fournisseur DPE", "Fournisseur (liste)", "Type diagnostic", "Coût min (€/an)", "Coût max (€/an)", "Surface (m²)", "Adresse DPE", "Diagnostiqueur", "PDF analysé"]),
-    ["ACADE", "ACADE", "Performance Energetique", "1230", "1700", "45,2", "12 rue Lamarck 75018 PARIS", "Jean DUPONT", "IM0393664_10_DPE_2022-10-19.pdf"]);
+  assert.deepStrictEqual(pick(1, ["Coût min (€/an)", "Coût max (€/an)", "Prix indexés au", "PDF analysé"]),
+    ["1230", "1700", "01/01/2021", "IM0393664_10_DPE_2022-10-19.pdf"]);
+  for (const gone of ["Fournisseur DPE", "Fournisseur (liste)", "Type diagnostic", "Énergie primaire totale (kWh/an)", "GES total (kg CO2/an)",
+    "Surface (m²)", "Adresse DPE", "Diagnostiqueur", "N° certification", "Lecture"]) assert.ok(!H.includes(gone), "colonne inutile à la saisie : " + gone);
   // Scan (rattaché par IM + lot), OCR Tesseract.js, SOCOTEC ≈ SOCOTECH, petite surface
-  assert.deepStrictEqual(pick(2, ["DPE analyse", "N° FU", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "Surface (m²)"]),
-    ["À VÉRIFIER", "0048730", "15/03/2025", "14/03/2035", "340", "E", "21", "C", "28,5"]);
+  assert.deepStrictEqual(pick(2, ["DPE analyse", "N° FU", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES"]),
+    ["À VÉRIFIER", "0048730", "15/03/2025", "14/03/2035", "340", "E", "21", "C"]);
   assert.strictEqual(get(2, "PDF analysé"), "IM0393664_11_DPE_2025-03-15.pdf");
-  assert.ok(/^OCR/.test(get(2, "Lecture")), get(2, "Lecture"));
   assert.ok(/rapproché/.test(get(2, "Remarques DPE")), get(2, "Remarques DPE"));
   // Ancien DPE
   assert.deepStrictEqual(pick(3, ["Établi le", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "N° FU"]),
     ["12/05/2014", "318,99", "E", "74,64", "F", "0394076x"]);
   assert.deepStrictEqual(pick(4, ["DPE analyse", "N° FU", "Remarques DPE"]), ["Pas de PDF", "", ""]);
-  assert.deepStrictEqual(pick(5, ["DPE analyse", "Fournisseur DPE", "N° FU"]), ["À VÉRIFIER", "DIAG EXPRESS SUD-OUEST", ""]);
+  assert.deepStrictEqual(pick(5, ["DPE analyse", "N° FU"]), ["À VÉRIFIER", ""]);
+  assert.ok(/absent de la liste : « DIAG EXPRESS SUD-OUEST »/.test(get(5, "Remarques DPE")), "nom du fournisseur dans les remarques");
   assert.deepStrictEqual(pick(6, ["DPE analyse", "Remarques DPE"]), ["PDF introuvable", "« IM0393668_6_DPE_2020-01-01.pdf » absent du dossier"]);
   // PDF sans ligne → ajouté en bas
   assert.strictEqual(out.rows.length, 8);
-  assert.deepStrictEqual([out.rows[7][1], out.rows[7][2], out.rows[7][12], get(7, "N° FU"), get(7, "Fournisseur (liste)")],
-    ["IM0400000", "7", "IM0400000_7_DPE_2024-01-01.pdf", "0425954", "AV ENVIRONNEMENT"]);
+  assert.deepStrictEqual([out.rows[7][1], out.rows[7][2], out.rows[7][12], get(7, "N° FU")],
+    ["IM0400000", "7", "IM0400000_7_DPE_2024-01-01.pdf", "0425954"]);
   assert.strictEqual(out.rows[1][0], "COUR DES M", "colonnes source intactes");
   assert.ok(/1 OK, 4 à vérifier, 0 échec\(s\), 2 sans PDF/.test(out.log), out.log);
   assert.ok(out.unk, "bouton « Ajouter les fournisseurs inconnus » visible");
@@ -159,8 +161,8 @@ const ROWS = [
   await panel.selectOption("#dsOcr", "never");
   await panel.click("#startBtn");
   await panel.waitForFunction(() => !isRunning && /Terminé/.test($("log").textContent), null, { timeout: 60000 });
-  const r6 = await panel.evaluate(() => { const H = state.rows[0]; return ["DPE analyse", "N° FU", "Fournisseur (liste)"].map((c) => state.rows[5][H.indexOf(c)]); });
-  assert.deepStrictEqual(r6, ["OK", "0612345", "DIAG EXPRESS SUD-OUEST"]);
+  const r6 = await panel.evaluate(() => { const H = state.rows[0]; return ["DPE analyse", "N° FU"].map((c) => state.rows[5][H.indexOf(c)]); });
+  assert.deepStrictEqual(r6, ["OK", "0612345"]);
   assert.strictEqual(await panel.evaluate(() => state.rows.length), 8, "pas de nouvel ajout hors plage");
 
   // Export Excel (bouton du bloc)
@@ -174,7 +176,7 @@ print(json.dumps([[c.value for c in r] for r in ws.iter_rows()]))`]).toString())
   const XH = xl[0];
   assert.strictEqual(xl.length, 8);
   assert.strictEqual(xl[1][XH.indexOf("N° FU")], "0448957", "n° FU exporté en texte (zéro conservé)");
-  assert.strictEqual(xl[7][XH.indexOf("Fournisseur (liste)")], "AV ENVIRONNEMENT");
+  assert.strictEqual(xl[7][XH.indexOf("N° FU")], "0425954");
   console.log("export :", dl.suggestedFilename(), XH.length, "colonnes");
 
   // Profil : réglages sauvegardés / restaurés

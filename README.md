@@ -557,16 +557,20 @@ de 6 caractères ou plus (sans chiffre) : rapproché mais « À VÉRIFIER »
 fin ; **Ajouter les fournisseurs inconnus à la liste** les met en bas de la
 liste, numéro à compléter.
 
-Colonnes écrites (créées si absentes) : `DPE analyse` (OK / À VÉRIFIER /
-ÉCHEC / Pas de PDF / PDF introuvable), `PDF analysé`, `Fournisseur DPE`,
-`Fournisseur (liste)`, `N° FU`, `Type diagnostic` (Performance
-Energetique), `Établi le`, `Valable jusqu'au`, `Énergie primaire
-(kWh/m²/an)`, `Énergie primaire totale (kWh/an)`, `Classe énergie`, `GES (kg
-CO2/m²/an)`, `GES total (kg CO2/an)`, `Classe GES`, `Coût min (€/an)`, `Coût
-max (€/an)`, `N° ADEME`, `Surface (m²)`, `Adresse DPE`, `Diagnostiqueur`, `N°
-certification`, `Lecture` (texte / OCR, page) et `Remarques DPE` (ce qui a
-fait passer la ligne « À VÉRIFIER » : valeur manquante, lue par OCR seule,
-écart étiquette / calcul, fournisseur rapproché ou absent…).
+Colonnes écrites (créées si absentes) — **uniquement ce qui sert à la saisie
+du DPE dans SIGEO** (v2.17.2) : `DPE analyse` (OK / À VÉRIFIER / ÉCHEC / Pas
+de PDF / PDF introuvable), `PDF analysé` (fichier à joindre), `N° FU`,
+`Établi le`, `Valable jusqu'au`, `N° ADEME`, `Énergie primaire (kWh/m²/an)`,
+`Classe énergie`, `GES (kg CO2/m²/an)`, `Classe GES`, `Coût min (€/an)`,
+`Coût max (€/an)` et `Prix indexés au` (date d'indexation des prix ; ces
+trois-là seulement pour un DPE établi depuis le 01/07/2021, SIGEO n'ayant pas
+d'estimation avant), et `Remarques DPE` (ce qui a fait passer la ligne
+« À VÉRIFIER » : valeur manquante, lue par OCR seule, écart étiquette /
+calcul, fournisseur rapproché ou absent de la liste — avec le nom lu…).
+Les totaux annuels, la surface, l'adresse, le diagnostiqueur et la
+certification restent lus pour les recoupements mais ne sont plus écrits.
+Le bouton « Colonnes de l'Analyse DPE » de l'étape de saisie utilise
+`{PDF analysé}` et `{Prix indexés au}`.
 
 ## 4. Onglet Export
 
@@ -717,7 +721,8 @@ par le journal et par la colonne résultat ; depuis 2.17.1 : PDF visible
 seulement après un nouvel « Enregistrer », PDF jamais visible puis relances
 sans nouvel upload).
 
-**Version** : 2.17.1 — **SIGEO : saisir un DPE** : faux négatif de la
+**Version** : 2.17.2 — **Analyse DPE** : n'écrit plus que les colonnes utiles à la saisie SIGEO (plus de totaux annuels, surface, adresse, diagnostiqueur, certification, lecture, fournisseur lu / de la liste, type) ; nouvelle colonne `Prix indexés au` ; coûts et date des prix seulement pour un DPE ≥ 01/07/2021 ; préréglage de l'étape de saisie : `{PDF analysé}`, `{Prix indexés au}`.
+2.17.1 — **SIGEO : saisir un DPE** : faux négatif de la
 vérification d'upload corrigé — PDF absent de la liste juste après l'upload
 → « Enregistrer » recliqué et liste revérifiée (3 tentatives, 10 s d'attente
 active chacune), jamais de nouvel upload ; avertissement si le document
