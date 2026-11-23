@@ -356,8 +356,11 @@ espaces retirés ; un doublon est renommé `(1)`.
 Colonnes écrites (créées si absentes) : **DPE présent** (OUI / NON /
 ERREUR), **Nb DPE** (plus d'un → ligne « à vérifier » dans le récap),
 **DPE nom SIGEO**, **DPE date**, **DPE section**, **DPE fichier**,
-**DPE statut** (`Téléchargé`, `Absent`, `KO téléchargement : …`,
-`Page introuvable`, ou `Trouvé (non téléchargé)` en vérification seule).
+**DPE statut**. Le texte de DPE statut se règle dans « Texte écrit dans DPE
+statut » : par défaut `OK & téléchargé`, `OK trouvé (non téléchargé)`
+(vérification seule), `KO pas trouvé`, `KO téléchargement : {raison}`,
+`Page introuvable`. Variables : `{nom}`, `{date}`, `{fichier}`, `{nb}`,
+`{section}`, `{raison}` et toute `{Colonne}` de la ligne.
 Session expirée → arrêt avec la ligne à partir de laquelle relancer.
 Pause entre lots réglable (1 s par défaut) pour ne pas surcharger SIGEO.
 
@@ -481,7 +484,9 @@ contre `tests/fixtures/sigeo-dpe-mock.js`), `node tests/sigeo-dpe.background.js`
 (service worker : PDF, page HTML supprimée, interruption) et
 `node tests/sigeo-dpe.panel.e2e.js`.
 
-**Version** : 2.13.2 — DPE SIGEO : téléchargement par l'URL
+**Version** : 2.13.3 — DPE SIGEO : textes de la colonne DPE statut
+personnalisables (défaut « OK & téléchargé » / « KO pas trouvé »).
+2.13.2 — DPE SIGEO : téléchargement par l'URL
 `ged_file_download` du `onclick` popup(…) via `chrome.downloads` dans le
 service worker (le POST `__doPostBack` renvoyait la page Documents) ;
 permission `downloads` dans le manifest ; variable `{nom}`.

@@ -3691,6 +3691,14 @@ $("lotTestBtn").addEventListener("click", async () => {
 
 const DPE_COLS = ["DPE présent", "Nb DPE", "DPE nom SIGEO", "DPE date", "DPE section", "DPE fichier", "DPE statut"];
 let dpeConfigApplied = false;
+// Textes de la colonne « DPE statut » (modifiables dans le panneau).
+const DPE_DEFAULT_LABELS = Object.freeze({
+  ok: "OK & téléchargé",
+  found: "OK trouvé (non téléchargé)",
+  absent: "KO pas trouvé",
+  ko: "KO téléchargement : {raison}",
+  page: "Page introuvable"
+});
 
 function getDpeConfig() {
   return {
@@ -3700,6 +3708,7 @@ function getDpeConfig() {
     name: $("dpeName").value.trim() || DPE_DEFAULT_NAME,
     timeout: parseInt($("dpeTimeout").value, 10) || 20000,
     delay: Math.max(0, parseInt($("dpeDelay").value, 10) || 0),
+    labels: Object.fromEntries(Array.from(document.querySelectorAll(".dpe-lbl")).map((i) => [i.dataset.k, i.value])),
     rules: {
       section: $("dpeRuleSection").value.trim(),
       include: $("dpeRuleInclude").value,
@@ -3726,6 +3735,24 @@ function applyDpeConfig(c) {
   $("dpeTimeout").value = c.timeout || 20000;
   $("dpeDelay").value = c.delay ?? 1000;
   applyDpeRules(c.rules || {});
+  applyDpeLabels(c.labels || {});
+}
+
+function applyDpeLabels(l = {}) {
+  document.querySelectorAll(".dpe-lbl").forEach((i) => { i.value = l[i.dataset.k] ?? DPE_DEFAULT_LABELS[i.dataset.k]; });
+}
+
+// Texte de « DPE statut » pour un résultat, d'après les libellés choisis.
+function dpeStatusLabel(cfg, res, row) {
+  const L = Object.assign({}, DPE_DEFAULT_LABELS, cfg.labels || {});
+  const key = res.status === "OK" ? (res.file ? "ok" : "found")
+    : res.status === "ABSENT" ? "absent"
+    : res.status === "PAGE" || res.status === "AUTH" ? "page" : "ko";
+  const c = res.chosen || {};
+  const vars = { nom: c.name || "", date: c.date || "", fichier: res.file || "", nb: String(res.count ?? ""),
+    section: c.section || "", raison: res.error || String(res.statut || "").replace(/^KO téléchargement : /, "") };
+  const txt = String(L[key] ?? "").replace(/\{(nom|date|fichier|nb|section|raison)\}/gi, (w, k) => vars[k.toLowerCase()]);
+  return resolveRowTemplate(txt, row) || res.statut;
 }
 
 // URL de la ligne ({Colonne} résolues) ; "" si une variable est introuvable.
@@ -3840,7 +3867,7 @@ async function runDpeExtraction() {
     if (stopRequested && res.error === "arrêté") { logLine("Arrêté par l'utilisateur.", "skip"); break; }
     const c = res.chosen;
     const vals = [res.present, res.status === "PAGE" || res.status === "AUTH" ? "" : String(res.count),
-      c ? c.name : "", c ? c.date : "", c ? c.section : "", res.file || "", res.statut];
+      c ? c.name : "", c ? c.date : "", c ? c.section : "", res.file || "", dpeStatusLabel(cfg, res, row)];
     idx.forEach((col, k) => setCellByIndex(row, col, vals[k]));
     (res.info || []).forEach((w) => {
       // « fiche lot → page Documents » : signalé une seule fois par exécution.
@@ -3848,7 +3875,7 @@ async function runDpeExtraction() {
       logLine(`Ligne ${rowNum} : ⚠ ${w}`, "skip");
     });
     const search = p.url ? p.url.replace(/^https?:\/\/[^/]+/, "") : "(URL vide)";
-    const recap = [res.statut, vals[1], vals[2], vals[3], vals[5]];
+    const recap = [vals[6], vals[1], vals[2], vals[3], vals[5]];
     if (res.status === "OK") {
       if (res.file) nDl++;
       const dup = res.count > 1 ? ` (${res.count} DPE : ${res.candidates.map((x) => `${x.name} ${x.date}`).join(" ; ")})` : "";
@@ -3884,6 +3911,7 @@ async function runDpeExtraction() {
 }
 
 $("dpeRulesReset").addEventListener("click", () => { applyDpeRules({}); persistWorkingConfig(); });
+$("dpeLabelsReset").addEventListener("click", () => { applyDpeLabels({}); persistWorkingConfig(); });
 $("dpeDownload").addEventListener("change", () => { if ($("dpeDownload").checked) requestDownloadsPermission(); updateExtractEstimate(); });
 ["dpeUrl", "dpeDelay"].forEach((id) => $(id).addEventListener("change", updateExtractEstimate));
 $("dpeTestBtn").addEventListener("click", async () => {

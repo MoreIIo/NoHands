@@ -111,11 +111,11 @@ const CHROME_STUB = `
   const [P, N, NOM, D, S, F, ST] = ["DPE présent", "Nb DPE", "DPE nom SIGEO", "DPE date", "DPE section", "DPE fichier", "DPE statut"].map(col);
   const r1 = out.rows[1];
   assert.deepStrictEqual([r1[P], r1[N], r1[NOM], r1[D], r1[S], r1[F], r1[ST]],
-    ["OUI", "1", "DPE 2022", "19/10/2022", "Diagnostics >> EPC", "IM0393664_10_DPE_2022-10-19.pdf", "Téléchargé"]);
+    ["OUI", "1", "DPE 2022", "19/10/2022", "Diagnostics >> EPC", "IM0393664_10_DPE_2022-10-19.pdf", "OK & téléchargé"]);
   const r2 = out.rows[2];
   assert.deepStrictEqual([r2[P], r2[N], r2[NOM], r2[S], r2[F], r2[ST]],
-    ["OUI", "2", "Diagnostic de performance énergétique", "Diagnostics Multys >> EPC", "IM0393664_11_DPE_2023-03-15.pdf", "Téléchargé"]);
-  assert.deepStrictEqual([out.rows[3][P], out.rows[3][N], out.rows[3][ST], out.rows[3][F]], ["NON", "0", "Absent", ""]);
+    ["OUI", "2", "Diagnostic de performance énergétique", "Diagnostics Multys >> EPC", "IM0393664_11_DPE_2023-03-15.pdf", "OK & téléchargé"]);
+  assert.deepStrictEqual([out.rows[3][P], out.rows[3][N], out.rows[3][ST], out.rows[3][F]], ["NON", "0", "KO pas trouvé", ""]);
   assert.deepStrictEqual([out.rows[4][P], out.rows[4][ST]], ["ERREUR", "Page introuvable"]);
   assert.strictEqual(out.rows[5][P], "OUI");
   assert.strictEqual(out.rows[5][ST], "KO téléchargement : SIGEO a renvoyé une page HTML (session expirée ?)");
@@ -126,6 +126,19 @@ const CHROME_STUB = `
   ]);
   assert.strictEqual(srv.stats.posts.length, 0, "aucun POST __doPostBack");
   assert.ok(/2 DPE téléchargé/.test(out.log), out.log);
+
+  // Textes personnalisés de « DPE statut » (variables + {Colonne})
+  await panel.click("#dpeLabels summary");
+  await panel.fill("#dpeLblOk", "OK {nom} du {date} ({Immeuble})");
+  await panel.fill("#dpeLblAbsent", "rien");
+  await panel.fill("#dpeLblPage", "pas de page");
+  await panel.fill("#endRow", "5");
+  await panel.click("#startBtn");
+  await panel.waitForFunction(() => !isRunning && /Terminé/.test($("log").textContent), null, { timeout: 90000 });
+  const out2 = await panel.evaluate(() => state.rows.map((r) => r[r.length - 1]));
+  assert.deepStrictEqual(out2.slice(1, 5), ["OK DPE 2022 du 19/10/2022 (COUR DES M)", "OK Diagnostic de performance énergétique du 15/03/2023 (RESIDENCE B)", "rien", "pas de page"]);
+  const lbl = await panel.evaluate(() => { const c = buildProfileConfig(); applyDpeConfig({}); const def = $("dpeLblAbsent").value; applyProfileConfig(c); return [def, $("dpeLblAbsent").value]; });
+  assert.deepStrictEqual(lbl, ["KO pas trouvé", "rien"]);
 
   // Profil : configuration sauvegardée / restaurée
   const prof = await panel.evaluate(() => {

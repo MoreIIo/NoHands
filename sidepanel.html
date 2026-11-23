@@ -479,6 +479,16 @@
         <input type="number" id="dpeDelay" value="1000" min="0" step="100" />
       </div>
       <p class="hint">Colonnes écrites (créées si absentes) : <code>DPE présent</code> (OUI / NON / ERREUR), <code>Nb DPE</code>, <code>DPE nom SIGEO</code>, <code>DPE date</code>, <code>DPE section</code>, <code>DPE fichier</code>, <code>DPE statut</code> (Téléchargé / Absent / KO téléchargement : … / Page introuvable).</p>
+      <details class="imx-adv" id="dpeLabels">
+        <summary>Texte écrit dans « DPE statut »</summary>
+        <p class="hint">Mets ce que tu veux. Variables : <code>{nom}</code> (nom SIGEO), <code>{date}</code>, <code>{fichier}</code>, <code>{nb}</code> (nombre de DPE), <code>{section}</code>, <code>{raison}</code> (cause d'une erreur), et toute <code>{Colonne}</code> de la ligne.</p>
+        <div class="field-row"><label class="imx-sel-label" for="dpeLblOk">DPE trouvé et téléchargé :</label><input type="text" class="dpe-lbl" data-k="ok" id="dpeLblOk" /></div>
+        <div class="field-row"><label class="imx-sel-label" for="dpeLblFound">DPE trouvé (vérification seule) :</label><input type="text" class="dpe-lbl" data-k="found" id="dpeLblFound" /></div>
+        <div class="field-row"><label class="imx-sel-label" for="dpeLblAbsent">aucun DPE :</label><input type="text" class="dpe-lbl" data-k="absent" id="dpeLblAbsent" /></div>
+        <div class="field-row"><label class="imx-sel-label" for="dpeLblKo">DPE trouvé, téléchargement raté :</label><input type="text" class="dpe-lbl" data-k="ko" id="dpeLblKo" /></div>
+        <div class="field-row"><label class="imx-sel-label" for="dpeLblPage">page Documents introuvable :</label><input type="text" class="dpe-lbl" data-k="page" id="dpeLblPage" /></div>
+        <div class="field-row"><button class="btn" id="dpeLabelsReset" type="button">Textes par défaut</button></div>
+      </details>
       <details class="imx-adv" id="dpeAdv">
         <summary>Règles de détection d'un DPE (regex, une par ligne)</summary>
         <p class="hint">Appliquées au nom normalisé : sans accents, minuscules, « ? » d'encodage abîmé supprimés (« chaudie?re » → « chaudiere »).</p>
