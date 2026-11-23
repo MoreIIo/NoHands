@@ -291,6 +291,7 @@
       <label><input type="radio" name="extractKind" value="standard" checked /> Standard (champs de recherche → résultats)</label>
       <label><input type="radio" name="extractKind" value="sigeoIm" /> Recherche IM SIGEO (adresse → N° E.I.)</label>
       <label><input type="radio" name="extractKind" value="sigeoLot" /> Recherche d'id interne de lot (IM + LT → id SIGEO)</label>
+      <label><input type="radio" name="extractKind" value="sigeoDpe" /> DPE SIGEO (vérifier + télécharger le plus récent)</label>
     </div>
 
     <div id="imExtractBox" hidden>
@@ -454,6 +455,53 @@
         <button class="btn" id="lotTestBtn" type="button" title="Lance la recherche pour la ligne de départ, sans rien écrire"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester sur la ligne de départ</button>
       </div>
       <p class="hint imx-test-result" id="lotTestResult"></p>
+    </div>
+
+    <div id="dpeExtractBox" hidden>
+      <p class="hint">Pour chaque ligne : la page <strong>Documents</strong> du lot est ouverte dans l'onglet cible, les sections dont le titre contient <strong>EPC</strong> (« Diagnostics &gt;&gt; EPC », « Diagnostics Multys &gt;&gt; EPC ») sont lues, les fichiers DPE sont repérés par leur <strong>nom</strong> (diag gaz/élec, entretiens chaudière… écartés) et seul le <strong>plus récent</strong> (colonne Date, puis année dans le nom) est téléchargé, par le même postback que le lien mais sans cliquer dessus. Si l'URL ouvre la fiche lot, le lien vers la page Documents est suivi automatiquement. Il faut être connecté à SIGEO dans l'onglet cible.</p>
+      <div class="field-row">
+        <input type="text" id="dpeUrl" placeholder="{URL lot}" title="URL de la page Documents (ou de la fiche lot). {Colonne} = valeur de la ligne, ex. {URL lot} ou …/lot_manage?id={ID interne}" style="flex:1;min-width:180px" />
+      </div>
+      <p class="hint">URL : <code>{Nom de colonne}</code> est remplacé par la valeur de la ligne. Par défaut <code>{URL lot}</code> (fiche lot → page Documents suivie).</p>
+      <div class="field-row">
+        <label class="checkbox-row" title="Décoché : vérifie seulement la présence des DPE (colonnes remplies, rien n'est téléchargé)."><input type="checkbox" id="dpeDownload" checked /> télécharger le DPE retenu</label>
+      </div>
+      <div class="field-row">
+        <label for="dpeFolder">Dossier :</label>
+        <input type="text" id="dpeFolder" value="DPE_SIGEO" title="Sous-dossier de Téléchargements" style="max-width:130px" />
+        <label for="dpeName">nom :</label>
+        <input type="text" id="dpeName" value="{IM}_{lot}_DPE_{date}" title="{Colonne} = valeur de la ligne, {date} = date SIGEO du fichier (aaaa-mm-jj). Extension ajoutée automatiquement." style="flex:1;min-width:140px" />
+      </div>
+      <div class="field-row">
+        <label for="dpeTimeout">Timeout (ms) :</label>
+        <input type="number" id="dpeTimeout" value="20000" min="2000" step="500" />
+        <label for="dpeDelay">pause entre lots (ms) :</label>
+        <input type="number" id="dpeDelay" value="1000" min="0" step="100" />
+      </div>
+      <p class="hint">Colonnes écrites (créées si absentes) : <code>DPE présent</code> (OUI / NON / ERREUR), <code>Nb DPE</code>, <code>DPE nom SIGEO</code>, <code>DPE date</code>, <code>DPE section</code>, <code>DPE fichier</code>, <code>DPE statut</code> (Téléchargé / Absent / KO téléchargement : … / Page introuvable).</p>
+      <details class="imx-adv" id="dpeAdv">
+        <summary>Règles de détection d'un DPE (regex, une par ligne)</summary>
+        <p class="hint">Appliquées au nom normalisé : sans accents, minuscules, « ? » d'encodage abîmé supprimés (« chaudie?re » → « chaudiere »).</p>
+        <div class="field-row">
+          <label class="imx-sel-label">titre de section :</label>
+          <input type="text" id="dpeRuleSection" placeholder="epc" />
+        </div>
+        <label class="imx-sel-label" for="dpeRuleInclude">DPE si le nom contient :</label>
+        <textarea id="dpeRuleInclude" rows="3" spellcheck="false"></textarea>
+        <label class="imx-sel-label" for="dpeRuleExclude">sauf s'il contient :</label>
+        <textarea id="dpeRuleExclude" rows="4" spellcheck="false"></textarea>
+        <div class="field-row">
+          <label class="imx-sel-label">exclusion ignorée si :</label>
+          <input type="text" id="dpeRuleKeep" placeholder="(?&lt;![a-z])dpe(?![a-z])" />
+        </div>
+        <div class="field-row">
+          <button class="btn" id="dpeRulesReset" type="button">Règles par défaut</button>
+        </div>
+      </details>
+      <div class="field-row">
+        <button class="btn" id="dpeTestBtn" type="button" title="Ouvre la page Documents de la ligne de départ et liste les DPE trouvés, sans rien télécharger ni écrire"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester sur la ligne de départ</button>
+      </div>
+      <p class="hint imx-test-result" id="dpeTestResult"></p>
     </div>
 
     <div id="stdExtractBox">
@@ -695,6 +743,7 @@
   <script src="lib/ocr/tesseract.min.js"></script>
   <script src="sigeo-im.js"></script>
   <script src="sigeo-lot.js"></script>
+  <script src="sigeo-dpe.js"></script>
   <script src="sidepanel.js"></script>
   <script src="update-check.js"></script>
 </body>

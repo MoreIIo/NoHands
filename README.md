@@ -204,8 +204,8 @@ deux modes :
 
 ## 3. Onglet Extraction (ex-OSA)
 
-**Type d'extraction** : *Standard* (ci-dessous), **Recherche IM SIGEO** ou
-**Recherche d'id interne de lot** (voir plus bas).
+**Type d'extraction** : *Standard* (ci-dessous), **Recherche IM SIGEO**,
+**Recherche d'id interne de lot** ou **DPE SIGEO** (voir plus bas).
 
 1. **Conditions** : ignorer certaines lignes (ex : colonne X = "NON").
 2. **Champs de recherche** : sélecteur CSS (bouton 🎯) + colonne à taper.
@@ -312,6 +312,52 @@ Réglages : statut (`actif` par défaut, vide = valeur de la page), URL de
 `lot_browse`, timeout, pause entre lignes ; sélecteurs avancés si les ids
 SIGEO changent. Un même couple IM/LT n'est cherché qu'une fois par exécution.
 
+### DPE SIGEO (vérifier + télécharger le DPE le plus récent par lot)
+
+À lancer sur le fichier produit par la recherche d'id de lot
+(`Immeuble | IM | lot | IM_format | ID interne | URL lot | Résultat lot`).
+
+1. Connecte-toi à SIGEO dans l'onglet cible, charge le fichier (Données).
+2. Choisis **DPE SIGEO**. **URL** : `{URL lot}` par défaut (la fiche lot ;
+   le lien vers la page Documents `…/popup.aspx/fr/fil/ged_multi_file_manager/…`
+   y est repéré et suivi). Si tu connais l'URL de la page Documents, mets-la
+   directement avec des `{Colonne}`, ex. `…/lot_manage?…={ID interne}`.
+3. **Tester sur la ligne de départ** : ouvre la page, liste les DPE trouvés et
+   le nom de fichier prévu, sans rien télécharger ni écrire.
+4. **Lancer** : la permission « Téléchargements » est demandée la première
+   fois (permission optionnelle de l'extension).
+
+Pour chaque ligne : attente de la page (« Chargement en cours... » disparu),
+lecture des sections dont le **titre** contient `EPC` (« Diagnostics >> EPC »,
+« Diagnostics Multys >> EPC » — repérées par leur texte, jamais par position
+ni par id), filtre des fichiers par leur **nom** normalisé (sans accents,
+« ? » d'encodage abîmé supprimés : `chaudie?re` → `chaudiere`) :
+DPE si `dpe` / `diagnostic de performance énergétique` / `performance
+énergétique`, sauf gaz, élec, chaudière, entretien, ENT, amiante, plomb,
+termite, Carrez, ERP / ERNMT — sauf si « DPE » figure dans le nom. Les règles
+(regex, une par ligne) sont modifiables dans « Règles de détection ».
+**Le plus récent** : date de la colonne Date, puis année `20xx` du nom, puis
+ordre du tableau.
+
+Téléchargement **sans cliquer** sur le lien : le formulaire de la page
+(`__VIEWSTATE`, `__EVENTVALIDATION`…) est renvoyé en `fetch` POST depuis
+l'onglet avec `__EVENTTARGET` = cible du `__doPostBack` du lien. Si la
+réponse est du HTML au lieu d'un fichier (ViewState refusé, session…), la
+ligne passe en `KO téléchargement : …`, c'est signalé dans le journal et la
+boucle continue (aucune autre méthode n'est tentée). Fichier enregistré dans
+`Téléchargements/DPE_SIGEO/` (configurable) sous le nom
+`{IM}_{lot}_DPE_{date}` + extension du serveur (`.pdf` par défaut), date ISO
+(`IM0393664_10_DPE_2022-10-19.pdf`), caractères interdits Windows retirés ;
+un doublon est renommé `(1)`.
+
+Colonnes écrites (créées si absentes) : **DPE présent** (OUI / NON /
+ERREUR), **Nb DPE** (plus d'un → ligne « à vérifier » dans le récap),
+**DPE nom SIGEO**, **DPE date**, **DPE section**, **DPE fichier**,
+**DPE statut** (`Téléchargé`, `Absent`, `KO téléchargement : …`,
+`Page introuvable`, ou `Trouvé (non téléchargé)` en vérification seule).
+Session expirée → arrêt avec la ligne à partir de laquelle relancer.
+Pause entre lots réglable (1 s par défaut) pour ne pas surcharger SIGEO.
+
 ## 4. Onglet Export
 
 Télécharge le fichier mis à jour en `.xlsx` (même feuille remplacée si le
@@ -407,6 +453,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── sidepanel.js       Logique complète
 ├── sigeo-im.js        Extraction « Recherche IM SIGEO » (parsing, recherche, pagination, filtrage)
 ├── sigeo-lot.js       Extraction « Recherche d'id interne de lot » (POST direct, repli onglet)
+├── sigeo-dpe.js       Extraction « DPE SIGEO » (page Documents, filtre, plus récent, téléchargement)
 ├── update-check.js    Vérification de mise à jour via GitHub
 ├── lib/xlsx.full.min.js  SheetJS (lecture/écriture Excel)
 ├── lib/pdf.min.js     pdf.js (Mozilla) — analyse PDF de la Toolbox
@@ -414,7 +461,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── lib/ocr/           Tesseract.js (OCR local) : lib, worker, cœur wasm, langue fra
 ├── icons/             Icônes de l'extension
 ├── test.html          Page de test locale des deux modes (non publiée)
-└── tests/             Tests des recherches IM et lot (SIGEO simulé, Playwright)
+└── tests/             Tests des recherches IM, lot et DPE (SIGEO simulé, jsdom / Playwright)
 ```
 
 Tests de la recherche IM (Node + Playwright + Chrome) :
@@ -425,8 +472,13 @@ permet aussi d'essayer la recherche à la main.
 Recherche de lot : `node tests/sigeo-lot.e2e.js` (POST direct, repli onglet,
 ambigu / introuvable, session expirée, contre un faux serveur ASP.NET :
 `tests/fixtures/sigeo-lot-server.js`) et `node tests/sigeo-lot.panel.e2e.js`.
+DPE : `node tests/sigeo-dpe.jsdom.js` (jsdom : filtre, plus récent, nom de
+fichier, attente du chargement, fiche → page Documents, POST → PDF ou HTML,
+contre `tests/fixtures/sigeo-dpe-mock.js`) et `node tests/sigeo-dpe.panel.e2e.js`.
 
-**Version** : 2.12.0 — nouveau type d'extraction **Recherche d'id interne de
+**Version** : 2.13.0 — nouveau type d'extraction **DPE SIGEO** (DPE le plus
+récent de chaque lot : vérification, téléchargement renommé, colonnes DPE).
+2.12.0 — nouveau type d'extraction **Recherche d'id interne de
 lot** (IM + LT → id interne SIGEO + URL de la fiche, par POST direct avec
 repli sur l'onglet).
 2.11.2 — Recherche IM : la valeur complète est d'abord tapée

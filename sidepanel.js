@@ -2817,6 +2817,7 @@ function updateExtractEstimate() {
   if (!el || isRunning) return;
   if (extractKind() === "sigeoIm") { el.textContent = imxEstimateText(); return; }
   if (extractKind() === "sigeoLot") { el.textContent = lotEstimateText(); return; }
+  if (extractKind() === "sigeoDpe") { el.textContent = dpeEstimateText(); return; }
   const est = estimateExtractionMs();
   if (!est || !est.total) { el.textContent = ""; return; }
   el.textContent = `Estimation : ~${formatDuration(est.totalMs)} pour ${est.total} ligne${est.total > 1 ? "s" : ""} (~${formatDuration(est.perRowMs)}/ligne).`;
@@ -2846,6 +2847,7 @@ async function runAutomation() {
   if (!state.rows.length) { logLine("Charge d'abord des données (onglet Données).", "err"); return; }
   if (extractKind() === "sigeoIm") return runImExtraction();
   if (extractKind() === "sigeoLot") return runLotExtraction();
+  if (extractKind() === "sigeoDpe") return runDpeExtraction();
 
   const conditions = getConditions();
   const outputs = getOutputs();
@@ -3090,7 +3092,8 @@ function syncExtractKindUI() {
   const kind = extractKind();
   $("imExtractBox").hidden = kind !== "sigeoIm";
   $("lotExtractBox").hidden = kind !== "sigeoLot";
-  $("stdExtractBox").hidden = kind === "sigeoIm" || kind === "sigeoLot";
+  $("dpeExtractBox").hidden = kind !== "sigeoDpe";
+  $("stdExtractBox").hidden = kind === "sigeoIm" || kind === "sigeoLot" || kind === "sigeoDpe";
   updateExtractEstimate();
 }
 
@@ -3128,7 +3131,7 @@ function getImxConfig() {
 let imxConfigApplied = false;
 function applyImxConfig(im, kind) {
   imxConfigApplied = true;
-  const r = document.querySelector(`input[name="extractKind"][value="${["sigeoIm", "sigeoLot"].includes(kind) ? kind : "standard"}"]`);
+  const r = document.querySelector(`input[name="extractKind"][value="${["sigeoIm", "sigeoLot", "sigeoDpe"].includes(kind) ? kind : "standard"}"]`);
   if (r) r.checked = true;
   const cols = getColumns();
   const guessAdr = (cols.find((c) => /adresse/i.test(c.name)) || cols[0] || {}).name || "";
@@ -3678,6 +3681,265 @@ $("lotTestBtn").addEventListener("click", async () => {
     fail(e.message || e);
   } finally {
     $("lotTestBtn").disabled = false;
+  }
+});
+
+/* ---------- Extraction « DPE SIGEO » (DPE le plus récent par lot) ----------
+   Logique (lecture de la page Documents, filtre, plus récent, POST
+   __doPostBack) : sigeo-dpe.js. Ici : l'interface de l'onglet Extraction,
+   l'adaptateur chrome.* (dont chrome.downloads) et la boucle sur les lignes. */
+
+const DPE_COLS = ["DPE présent", "Nb DPE", "DPE nom SIGEO", "DPE date", "DPE section", "DPE fichier", "DPE statut"];
+let dpeConfigApplied = false;
+
+function getDpeConfig() {
+  return {
+    url: $("dpeUrl").value.trim() || DPE_DEFAULT_URL,
+    download: $("dpeDownload").checked,
+    folder: $("dpeFolder").value.trim(),
+    name: $("dpeName").value.trim() || DPE_DEFAULT_NAME,
+    timeout: parseInt($("dpeTimeout").value, 10) || 20000,
+    delay: Math.max(0, parseInt($("dpeDelay").value, 10) || 0),
+    rules: {
+      section: $("dpeRuleSection").value.trim(),
+      include: $("dpeRuleInclude").value,
+      exclude: $("dpeRuleExclude").value,
+      keep: $("dpeRuleKeep").value.trim()
+    }
+  };
+}
+
+function applyDpeRules(r = {}) {
+  const lines = (v, d) => (v === undefined || v === null ? d : Array.isArray(v) ? v : String(v).split(/\r?\n/)).join("\n");
+  $("dpeRuleSection").value = r.section ?? DPE_DEFAULT_RULES.section;
+  $("dpeRuleInclude").value = lines(r.include, DPE_DEFAULT_RULES.include);
+  $("dpeRuleExclude").value = lines(r.exclude, DPE_DEFAULT_RULES.exclude);
+  $("dpeRuleKeep").value = r.keep ?? DPE_DEFAULT_RULES.keep;
+}
+
+function applyDpeConfig(c) {
+  dpeConfigApplied = true;
+  $("dpeUrl").value = c.url || DPE_DEFAULT_URL;
+  $("dpeDownload").checked = c.download !== false;
+  $("dpeFolder").value = c.folder ?? DPE_DEFAULT_FOLDER;
+  $("dpeName").value = c.name || DPE_DEFAULT_NAME;
+  $("dpeTimeout").value = c.timeout || 20000;
+  $("dpeDelay").value = c.delay ?? 1000;
+  applyDpeRules(c.rules || {});
+}
+
+// URL de la ligne ({Colonne} résolues) ; "" si une variable est introuvable.
+function dpeRowUrl(cfg, row) {
+  const u = resolveRowTemplate(cfg.url, row).trim();
+  return /\{[^{}]+\}/.test(u) ? "" : u;
+}
+
+function dpeEstimateText() {
+  if (!state.rows.length) return "";
+  const cfg = getDpeConfig();
+  const { startIdx, endIdx } = lotRowRange();
+  let n = 0;
+  for (let i = startIdx; i <= endIdx; i++) if (dpeRowUrl(cfg, state.rows[i] || [])) n++;
+  if (!n) return /\{[^{}]+\}/.test(resolveRowTemplate(cfg.url, state.rows[startIdx] || []))
+    ? "URL : colonne introuvable dans les données (" + cfg.url + ")." : "";
+  const per = 3000 + (cfg.download ? 1500 : 0) + cfg.delay;
+  return `Estimation : ${n} lot${n > 1 ? "s" : ""} → ~${formatDuration(n * per)}.`;
+}
+
+// Enregistre des octets (base64) dans Téléchargements/<dossier>/<nom>.
+async function dpeSaveFile(b64, filename, type) {
+  if (!chrome.downloads) return { ok: false, error: "permission « Téléchargements » non accordée" };
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes], { type: type || "application/pdf" }));
+  try {
+    const id = await chrome.downloads.download({ url, filename, conflictAction: "uniquify", saveAs: false });
+    // Attend la fin (ou l'échec) pour connaître le nom réel (uniquify).
+    const t0 = Date.now();
+    while (Date.now() - t0 < 30000) {
+      const [it] = await chrome.downloads.search({ id });
+      if (!it) break;
+      if (it.state === "complete") return { ok: true, filename: (it.filename || filename).split(/[\\/]/).pop() };
+      if (it.state === "interrupted") return { ok: false, error: "enregistrement interrompu (" + (it.error || "?") + ")" };
+      await sleep(150);
+    }
+    return { ok: true, filename: filename.split("/").pop() };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+}
+
+function dpeChromeAdapter(tabId, timeoutMs) {
+  const run = (target, cfg) => chrome.scripting.executeScript({ target, world: "ISOLATED", func: dpePageOp, args: [cfg] });
+  return {
+    navigate: (url) => navigateTabAndWait(tabId, url, true, timeoutMs),
+    execAll: async (cfg) => ((await run({ tabId, allFrames: true }, cfg)) || []).map((r) => ({ frameId: r.frameId, result: r.result })),
+    exec: async (frameId, cfg) => {
+      const res = await run({ tabId, frameIds: [frameId] }, cfg);
+      if (!res || !res[0]) throw new Error("frame injoignable");
+      return res[0].result;
+    },
+    save: dpeSaveFile,
+    sleep: (ms) => sleep(ms),
+    stopped: () => stopRequested,
+    log: (t, c) => logLine(t, c)
+  };
+}
+
+function dpeParams(cfg, row, rules) {
+  const folder = dpeFolder(cfg.folder);
+  return {
+    url: dpeRowUrl(cfg, row), rules, download: cfg.download,
+    timeoutMs: Math.max(2000, cfg.timeout),
+    name: (c, serverName) => (folder ? folder + "/" : "") +
+      dpeFileName(cfg.name, { date: c.iso, serverName }, (s) => resolveRowTemplate(s, row))
+  };
+}
+
+async function runDpeExtraction() {
+  const cfg = getDpeConfig();
+  // Demandée tout de suite (geste utilisateur) ; optionnelle dans le manifest.
+  if (cfg.download && !(await requestDownloadsPermission())) {
+    logLine("DPE SIGEO : la permission « Téléchargements » est nécessaire (ou décoche « télécharger le DPE retenu »).", "err");
+    return;
+  }
+  const rules = dpeCompileRules(cfg.rules);
+  if (rules.errors.length) { logLine("Règles DPE : " + rules.errors.join(" ; "), "err"); return; }
+  const conditions = getConditions();
+  const { startIdx, endIdx } = lotRowRange();
+  let tabId;
+  try { tabId = await resolveTargetTabId(); }
+  catch (err) { logLine(err.message, "err"); return; }
+
+  const createdCols = {};
+  const idx = DPE_COLS.map((c) => resolveOutputTarget(c, createdCols));
+  if (Object.keys(createdCols).length) renderColumns();
+
+  isRunning = true;
+  hasStartedRun = true;
+  stopRequested = false;
+  $("startBtn").disabled = true;
+  $("stopBtn").disabled = false;
+  $("log").innerHTML = "";
+  runLog = [];
+  lastRunOutputs = [{ col: "DPE statut" }, { col: "Nb DPE" }, { col: "DPE nom SIGEO" }, { col: "DPE date" }, { col: "DPE fichier" }];
+  const total = Math.max(0, endIdx - startIdx + 1);
+  let done = 0, nDl = 0, followSeen = false;
+  const runStart = Date.now();
+  runDurationMs = 0;
+  setProgress(0, total);
+  $("extractEstimate").textContent = "";
+  updateRunTiming(0, total, runStart);
+  updateDoneMarkers();
+  const ad = dpeChromeAdapter(tabId, Math.max(2000, cfg.timeout));
+  const tick = () => { done++; setProgress(done, total); updateRunTiming(done, total, runStart); };
+  logLine(`DPE SIGEO — ${cfg.download ? "vérification + téléchargement" : "vérification seule"}, ${total} ligne(s).`, "");
+
+  for (let i = startIdx; i <= endIdx; i++) {
+    if (stopRequested) { logLine("Arrêté par l'utilisateur.", "skip"); break; }
+    const row = state.rows[i] = state.rows[i] || [];
+    const rowNum = i + 1;
+    if (rowMatchesSkipCondition(row, conditions)) {
+      logLine(`Ligne ${rowNum} : ignorée (condition).`, "skip");
+      runLog.push({ row: rowNum, search: "", values: [], status: "skip", note: "Condition" });
+      tick(); continue;
+    }
+    const p = dpeParams(cfg, row, rules);
+    let res;
+    try { res = await dpeProcess(ad, p); }
+    catch (e) { res = { status: "ERREUR", present: "ERREUR", count: 0, chosen: null, file: "", statut: "KO téléchargement : " + (e.message || e), info: [] }; }
+    if (stopRequested && res.error === "arrêté") { logLine("Arrêté par l'utilisateur.", "skip"); break; }
+    const c = res.chosen;
+    const vals = [res.present, res.status === "PAGE" || res.status === "AUTH" ? "" : String(res.count),
+      c ? c.name : "", c ? c.date : "", c ? c.section : "", res.file || "", res.statut];
+    idx.forEach((col, k) => setCellByIndex(row, col, vals[k]));
+    (res.info || []).forEach((w) => {
+      // « fiche lot → page Documents » : signalé une seule fois par exécution.
+      if (/^page Documents ouverte depuis/.test(w)) { if (followSeen) return; followSeen = true; }
+      logLine(`Ligne ${rowNum} : ⚠ ${w}`, "skip");
+    });
+    const search = p.url ? p.url.replace(/^https?:\/\/[^/]+/, "") : "(URL vide)";
+    const recap = [res.statut, vals[1], vals[2], vals[3], vals[5]];
+    if (res.status === "OK") {
+      if (res.file) nDl++;
+      const dup = res.count > 1 ? ` (${res.count} DPE : ${res.candidates.map((x) => `${x.name} ${x.date}`).join(" ; ")})` : "";
+      logLine(`Ligne ${rowNum} : ${c.name} du ${c.date || "?"} [${c.section}]${res.file ? " → " + res.file : ""}${dup}`, "ok");
+      runLog.push({ row: rowNum, search, values: recap, status: "ok", check: res.count > 1 });
+    } else if (res.status === "ABSENT") {
+      logLine(`Ligne ${rowNum} : aucun DPE${res.sections && res.sections.length ? " (" + res.sections.join(", ") + ")" : ""}.`, "skip");
+      runLog.push({ row: rowNum, search, values: recap, status: "skip", label: "Absent" });
+    } else {
+      logLine(`Ligne ${rowNum} : ${res.statut}${res.error && !res.statut.includes(res.error) ? " — " + res.error : ""}`, "err");
+      runLog.push({ row: rowNum, search, values: recap, status: "err", note: res.error || res.statut });
+    }
+    tick();
+    if (res.status === "AUTH") {
+      logLine(`Session SIGEO expirée : reconnecte-toi dans l'onglet puis relance à partir de la ligne ${rowNum}.`, "err");
+      showStatus("Session SIGEO expirée — extraction arrêtée.", "error");
+      break;
+    }
+    if (cfg.delay && i < endIdx) await sleep(cfg.delay);
+  }
+
+  runDurationMs = Date.now() - runStart;
+  isRunning = false;
+  $("startBtn").disabled = false;
+  $("stopBtn").disabled = true;
+  $("progressTiming").textContent = `Terminé en ${formatDuration(runDurationMs)}`;
+  logLine(`Terminé en ${formatDuration(runDurationMs)}${cfg.download ? ` — ${nDl} DPE téléchargé(s) dans Téléchargements/${dpeFolder(cfg.folder) || ""}` : ""}.`, "ok");
+  renderResultSummary();
+  updateExtractEstimate();
+  renderPreview();
+  persistSession();
+  updateDoneMarkers();
+}
+
+$("dpeRulesReset").addEventListener("click", () => { applyDpeRules({}); persistWorkingConfig(); });
+$("dpeDownload").addEventListener("change", () => { if ($("dpeDownload").checked) requestDownloadsPermission(); updateExtractEstimate(); });
+["dpeUrl", "dpeDelay"].forEach((id) => $(id).addEventListener("change", updateExtractEstimate));
+$("dpeTestBtn").addEventListener("click", async () => {
+  const out = $("dpeTestResult");
+  if (isRunning) { showStatus("Une extraction est en cours.", "error"); return; }
+  const cfg = getDpeConfig();
+  const { startIdx } = lotRowRange();
+  const row = state.rows[startIdx];
+  const fail = (t) => { out.className = "hint imx-test-result err"; out.textContent = "✗ " + t; };
+  if (!row) return fail("Charge d'abord des données.");
+  const rules = dpeCompileRules(cfg.rules);
+  if (rules.errors.length) return fail("Règles : " + rules.errors.join(" ; "));
+  const p = dpeParams(cfg, row, rules);
+  p.download = false;
+  if (!p.url) return fail(`URL vide pour la ligne ${startIdx + 1} (${cfg.url}) : vérifie le nom de colonne.`);
+  out.className = "hint imx-test-result";
+  out.textContent = `Ouverture de la page Documents (ligne ${startIdx + 1})…`;
+  $("dpeTestBtn").disabled = true;
+  try {
+    const tabId = await resolveTargetTabId();
+    stopRequested = false;
+    const ad = dpeChromeAdapter(tabId, p.timeoutMs);
+    ad.log = (t) => { out.textContent += " " + t; };
+    const res = await dpeProcess(ad, p);
+    const c = res.chosen;
+    let txt;
+    if (c) {
+      const name = p.name(c, "");
+      txt = `✓ Ligne ${startIdx + 1} : ${res.count} DPE — retenu « ${c.name} » du ${c.date || "?"} [${c.section}] → ${name}` +
+        (res.count > 1 ? ` — autres : ${res.candidates.filter((x) => x !== c).map((x) => `${x.name} ${x.date}`).join(" ; ")}` : "");
+    } else if (res.status === "ABSENT") {
+      txt = `⚠ Ligne ${startIdx + 1} : aucun DPE — sections EPC : ${(res.sections || []).join(", ") || "aucune"}`;
+    } else {
+      txt = `✗ Ligne ${startIdx + 1} : ${res.statut}${res.error ? " — " + res.error : ""}`;
+    }
+    if ((res.info || []).length) txt += " — " + res.info.join(" ; ");
+    out.className = "hint imx-test-result " + (c ? "ok" : "err");
+    out.textContent = txt;
+  } catch (e) {
+    fail(e.message || e);
+  } finally {
+    $("dpeTestBtn").disabled = false;
   }
 });
 
@@ -7242,7 +7504,8 @@ function buildProfileConfig() {
       outputs: getOutputs(),
       kind: extractKind(),
       im: getImxConfig(),
-      lot: getLotConfig()
+      lot: getLotConfig(),
+      dpe: getDpeConfig()
     },
     scenario: {
       steps: getScenarioSteps(),
@@ -7300,6 +7563,7 @@ function applyProfileConfig(cfg) {
   $("endRow").value = ex.endRow || "";
   applyImxConfig(ex.im || {}, ex.kind || "standard");
   applyLotConfig(ex.lot || {});
+  applyDpeConfig(ex.dpe || {});
 
   const sc = cfg.scenario || {};
   $("scenarioSteps").innerHTML = "";
@@ -7567,6 +7831,7 @@ async function init() {
   // (sans cela, la liste « IM → écrire dans » pointerait sur la colonne A).
   if (!imxConfigApplied) applyImxConfig({}, "standard");
   if (!lotConfigApplied) applyLotConfig({});
+  if (!dpeConfigApplied) applyDpeConfig({});
 
   // Lignes par défaut dans l'onglet Extraction si vide
   if (!$("searchFieldsList").children.length) addSearchFieldRow();
