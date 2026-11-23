@@ -204,8 +204,8 @@ deux modes :
 
 ## 3. Onglet Extraction (ex-OSA)
 
-**Type d'extraction** : *Standard* (ci-dessous) ou **Recherche IM SIGEO**
-(voir plus bas).
+**Type d'extraction** : *Standard* (ci-dessous), **Recherche IM SIGEO** ou
+**Recherche d'id interne de lot** (voir plus bas).
 
 1. **Conditions** : ignorer certaines lignes (ex : colonne X = "NON").
 2. **Champs de recherche** : sélecteur CSS (bouton 🎯) + colonne à taper.
@@ -271,6 +271,46 @@ Adresse, Code postal), le bouton « Rechercher », la bascule « Par adresse »
 et le tableau sont détectés automatiquement ; sinon, désigne-les avec 🎯
 dans **Sélecteurs avancés**. **Tester sur la ligne de départ** lance la
 recherche sans rien écrire et affiche ce qui a été trouvé sur la page.
+
+### Recherche d'id interne de lot (IM + LT → id SIGEO)
+
+Les fiches lot SIGEO ont l'URL `…/sig_imm/lot_manage/syn/{IM}/{ID_INTERNE}` :
+l'id interne (ex. 28) n'a aucun rapport avec le numéro de lot (ex. 204). Ce
+type d'extraction le retrouve pour chaque ligne.
+
+1. Colle tes couples IM / LT depuis Excel dans l'onglet **Données** (IM avec
+   ou sans « IM » et zéros devant : `IM0393528`, `0393528`, `393528` ; LT avec
+   ou sans « LT » et zéros : `LT000204`, `204`).
+2. Choisis **Recherche d'id interne de lot**, puis les colonnes **IM** et
+   **LT** (devinées d'après les en-têtes : `IM`, `IM_format`, `lot`, `LT`…).
+3. Sois connecté(e) à SIGEO dans l'onglet cible, puis **Tester sur la ligne
+   de départ** et ▶ Démarrer.
+
+**Méthodes** :
+- *POST direct* (préférée) : depuis l'onglet SIGEO (même origine → cookies de
+  session), un `GET` de `lot_browse/syn` récupère `__VIEWSTATE`,
+  `__VIEWSTATEGENERATOR`, `__EVENTVALIDATION` et les autres champs, puis un
+  `POST` renvoie le formulaire avec IM (7 chiffres), LT, Niv. vide, Statut et
+  le bouton « Rechercher » du bloc *Par code* (`name=value` s'il s'agit d'un
+  bouton submit, `__EVENTTARGET` s'il s'agit d'un lien `__doPostBack`). Le
+  HTML reçu est lu avec `DOMParser`. L'onglet ne bouge pas.
+- *Onglet* (repli) : la page `lot_browse` est ouverte, les champs remplis,
+  « Rechercher » cliqué ; on attend la fin du postback (rechargement complet
+  ou UpdatePanel) puis on lit les liens.
+- *Auto* : POST direct ; si le serveur le refuse (HTTP 500, validation
+  d'événement, champ LT non renvoyé…), bascule sur l'onglet pour la suite.
+
+Dans les résultats, seuls les liens `a[href*="lot_manage"]` dont l'IM (dans
+l'URL) et le numéro `LT000204` (dans le texte, espaces insécables
+normalisés) correspondent numériquement sont retenus — la recherche SIGEO
+étant un « contient », LT 204 renvoie aussi LT 2040. Écrit : **ID interne**,
+**URL lot** (fiche) et **Résultat lot** : `OK — id 28`, `Introuvable`,
+`Ambigu — id 40 (…), id 41 (…)` (jamais de choix arbitraire) ou
+`ERREUR — …`. Si la page de connexion apparaît (session expirée),
+l'extraction **s'arrête** et indique la ligne à partir de laquelle relancer.
+Réglages : statut (`actif` par défaut, vide = valeur de la page), URL de
+`lot_browse`, timeout, pause entre lignes ; sélecteurs avancés si les ids
+SIGEO changent. Un même couple IM/LT n'est cherché qu'une fois par exécution.
 
 ## 4. Onglet Export
 
@@ -366,6 +406,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── sidepanel.css      Styles
 ├── sidepanel.js       Logique complète
 ├── sigeo-im.js        Extraction « Recherche IM SIGEO » (parsing, recherche, pagination, filtrage)
+├── sigeo-lot.js       Extraction « Recherche d'id interne de lot » (POST direct, repli onglet)
 ├── update-check.js    Vérification de mise à jour via GitHub
 ├── lib/xlsx.full.min.js  SheetJS (lecture/écriture Excel)
 ├── lib/pdf.min.js     pdf.js (Mozilla) — analyse PDF de la Toolbox
@@ -373,7 +414,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── lib/ocr/           Tesseract.js (OCR local) : lib, worker, cœur wasm, langue fra
 ├── icons/             Icônes de l'extension
 ├── test.html          Page de test locale des deux modes (non publiée)
-└── tests/             Tests de la recherche IM (page SIGEO simulée, Playwright)
+└── tests/             Tests des recherches IM et lot (SIGEO simulé, Playwright)
 ```
 
 Tests de la recherche IM (Node + Playwright + Chrome) :
@@ -381,8 +422,14 @@ Tests de la recherche IM (Node + Playwright + Chrome) :
 et complet) et `node tests/sigeo-im.panel.e2e.js` (onglet Extraction du
 vrai panneau). Ouvrir `tests/fixtures/sigeo-im-mock.html` dans Chrome
 permet aussi d'essayer la recherche à la main.
+Recherche de lot : `node tests/sigeo-lot.e2e.js` (POST direct, repli onglet,
+ambigu / introuvable, session expirée, contre un faux serveur ASP.NET :
+`tests/fixtures/sigeo-lot-server.js`) et `node tests/sigeo-lot.panel.e2e.js`.
 
-**Version** : 2.11.2 — Recherche IM : la valeur complète est d'abord tapée
+**Version** : 2.12.0 — nouveau type d'extraction **Recherche d'id interne de
+lot** (IM + LT → id interne SIGEO + URL de la fiche, par POST direct avec
+repli sur l'onglet).
+2.11.2 — Recherche IM : la valeur complète est d'abord tapée
 dans Nom (correspondance sur le Nom E.I. exact ou l'adresse), puis le nom de
 voie si rien n'est trouvé ; adresses SIGEO préfixées du nom reconnues.
 2.11.1 — la **Recherche IM SIGEO** passe dans l'onglet

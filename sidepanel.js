@@ -2816,6 +2816,7 @@ function updateExtractEstimate() {
   const el = $("extractEstimate");
   if (!el || isRunning) return;
   if (extractKind() === "sigeoIm") { el.textContent = imxEstimateText(); return; }
+  if (extractKind() === "sigeoLot") { el.textContent = lotEstimateText(); return; }
   const est = estimateExtractionMs();
   if (!est || !est.total) { el.textContent = ""; return; }
   el.textContent = `Estimation : ~${formatDuration(est.totalMs)} pour ${est.total} ligne${est.total > 1 ? "s" : ""} (~${formatDuration(est.perRowMs)}/ligne).`;
@@ -2844,6 +2845,7 @@ function resolveOutputTarget(ref, createdCols) {
 async function runAutomation() {
   if (!state.rows.length) { logLine("Charge d'abord des données (onglet Données).", "err"); return; }
   if (extractKind() === "sigeoIm") return runImExtraction();
+  if (extractKind() === "sigeoLot") return runLotExtraction();
 
   const conditions = getConditions();
   const outputs = getOutputs();
@@ -3085,9 +3087,10 @@ function extractKind() {
 }
 
 function syncExtractKindUI() {
-  const im = extractKind() === "sigeoIm";
-  $("imExtractBox").hidden = !im;
-  $("stdExtractBox").hidden = im;
+  const kind = extractKind();
+  $("imExtractBox").hidden = kind !== "sigeoIm";
+  $("lotExtractBox").hidden = kind !== "sigeoLot";
+  $("stdExtractBox").hidden = kind === "sigeoIm" || kind === "sigeoLot";
   updateExtractEstimate();
 }
 
@@ -3125,7 +3128,7 @@ function getImxConfig() {
 let imxConfigApplied = false;
 function applyImxConfig(im, kind) {
   imxConfigApplied = true;
-  const r = document.querySelector(`input[name="extractKind"][value="${kind === "sigeoIm" ? "sigeoIm" : "standard"}"]`);
+  const r = document.querySelector(`input[name="extractKind"][value="${["sigeoIm", "sigeoLot"].includes(kind) ? kind : "standard"}"]`);
   if (r) r.checked = true;
   const cols = getColumns();
   const guessAdr = (cols.find((c) => /adresse/i.test(c.name)) || cols[0] || {}).name || "";
@@ -3383,6 +3386,298 @@ $("imxTestBtn").addEventListener("click", async () => {
     out.textContent = "✗ " + (e.message || e);
   } finally {
     $("imxTestBtn").disabled = false;
+  }
+});
+
+/* ---------- Extraction « Recherche d'id interne de lot » (IM + LT → id SIGEO) ----------
+   Logique (POST direct, repli onglet, lecture des résultats) : sigeo-lot.js.
+   Ici : l'interface de l'onglet Extraction, l'adaptateur chrome.* et la
+   boucle sur les lignes. */
+
+let lotConfigApplied = false;
+let lotColsTouched = false; // l'utilisateur (ou un profil) a choisi les colonnes IM / LT
+
+function getLotConfig() {
+  return {
+    imCol: $("lotImCol").value,
+    ltCol: $("lotLtCol").value,
+    method: $("lotMethod").value,
+    statut: $("lotStatut").value.trim(),
+    url: $("lotUrl").value.trim() || LOT_DEFAULT_URL,
+    timeout: parseInt($("lotTimeout").value, 10) || 20000,
+    delay: Math.max(0, parseInt($("lotDelay").value, 10) || 0),
+    idCol: imxTargetValue("lotIdCol", "lotIdColNew"),
+    urlCol: imxTargetValue("lotUrlCol", "lotUrlColNew"),
+    statusCol: imxTargetValue("lotStatusCol", "lotStatusColNew"),
+    sel: Object.fromEntries(Array.from(document.querySelectorAll(".lot-sel"))
+      .map((i) => [i.dataset.k, i.value.trim()]).filter(([, v]) => v))
+  };
+}
+
+// Devine les colonnes IM / LT d'après les en-têtes (IM, IM_format, lot, LT…).
+function lotGuessCols() {
+  const cols = getColumns();
+  const find = (re) => (cols.find((c) => re.test(String(c.name).trim())) || {}).name || "";
+  const im = find(/^(N°\s*)?IM$/i) || find(/^IM[ _-]?format/i) || find(/^(code|n°|num[eé]ro)\s*(d'?\s*)?(IM|immeuble)$/i) || (cols[0] || {}).name || "";
+  const lt = find(/^(N°\s*)?(lot|LT)$/i) || find(/^(code|n°|num[eé]ro)\s*(de\s*)?(lot|LT)$/i) || find(/\blot\b|\bLT\b/i) ||
+    (cols.find((c) => c.name !== im) || {}).name || "";
+  return { im, lt };
+}
+
+function applyLotConfig(c) {
+  lotConfigApplied = true;
+  lotColsTouched = !!(c.imCol || c.ltCol);
+  const g = lotGuessCols();
+  fillColumnSelect($("lotImCol"), c.imCol || g.im);
+  fillColumnSelect($("lotLtCol"), c.ltCol || g.lt);
+  $("lotMethod").value = ["auto", "fetch", "ui"].includes(c.method) ? c.method : "auto";
+  $("lotStatut").value = c.statut ?? "actif";
+  $("lotUrl").value = c.url || LOT_DEFAULT_URL;
+  $("lotTimeout").value = c.timeout || 20000;
+  $("lotDelay").value = c.delay ?? 300;
+  imxSetTarget("lotIdCol", "lotIdColNew", c.idCol ?? "ID interne", "target");
+  imxSetTarget("lotUrlCol", "lotUrlColNew", c.urlCol ?? "URL lot", "targetopt");
+  imxSetTarget("lotStatusCol", "lotStatusColNew", c.statusCol ?? "Résultat lot", "targetopt");
+  document.querySelectorAll(".lot-sel").forEach((i) => { i.value = (c.sel || {})[i.dataset.k] || ""; });
+  if (c.sel && Object.keys(c.sel).length) $("lotAdv").open = true;
+}
+
+// Bornes de lignes communes à l'onglet Extraction.
+function lotRowRange() {
+  const startIdx = Math.max(0, (parseInt($("startRow").value, 10) || (dataStartIdx() + 1)) - 1);
+  const endRowInput = $("endRow").value.trim();
+  const endIdx = Math.min(state.rows.length - 1, endRowInput ? parseInt(endRowInput, 10) - 1 : state.rows.length - 1);
+  return { startIdx, endIdx };
+}
+
+function lotEstimateText() {
+  if (!state.rows.length) return "";
+  const cfg = getLotConfig();
+  const imIdx = colIndexByName(cfg.imCol), ltIdx = colIndexByName(cfg.ltCol);
+  if (imIdx < 0 || ltIdx < 0) return "";
+  const { startIdx, endIdx } = lotRowRange();
+  const keys = new Set();
+  let n = 0, bad = 0;
+  for (let i = startIdx; i <= endIdx; i++) {
+    const row = state.rows[i] || [];
+    const im = lotNormIm(getCellByIndex(row, imIdx)), lt = lotNormLt(getCellByIndex(row, ltIdx));
+    if (!im || !lt) { if (getCellByIndex(row, imIdx).trim() || getCellByIndex(row, ltIdx).trim()) bad++; continue; }
+    n++;
+    keys.add(im.num + "|" + lt);
+  }
+  if (!n && !bad) return "";
+  const per = (cfg.method === "ui" ? 2500 : 800) + cfg.delay;
+  return `Estimation : ${n} couple${n > 1 ? "s" : ""} IM/LT (${keys.size} différent${keys.size > 1 ? "s" : ""}) → ~${formatDuration(keys.size * per)}` +
+    (bad ? ` · ${bad} ligne${bad > 1 ? "s" : ""} avec IM ou LT illisible` : "") + ".";
+}
+
+// Adaptateur chrome.scripting pour l'orchestrateur de sigeo-lot.js.
+// fetch : monde ISOLATED de la page SIGEO (même origine → cookies de session) ;
+// repli onglet : monde MAIN (Sys.WebForms.PageRequestManager).
+function lotChromeAdapter(tabId, timeoutMs) {
+  const run = (target, cfg, world) => chrome.scripting.executeScript({ target, world: world || "ISOLATED", func: lotPageOp, args: [cfg] });
+  return {
+    tabUrl: async () => { try { return (await chrome.tabs.get(tabId)).url || ""; } catch (_) { return ""; } },
+    navigate: (url) => navigateTabAndWait(tabId, url, true, timeoutMs),
+    exec: async (frameId, cfg, world) => {
+      const res = await run({ tabId, frameIds: [frameId] }, cfg, world);
+      if (!res || !res[0]) throw new Error("frame injoignable");
+      return res[0].result;
+    },
+    execAll: async (cfg, world) => ((await run({ tabId, allFrames: true }, cfg, world)) || [])
+      .map((r) => ({ frameId: r.frameId, result: r.result })),
+    sleep: (ms) => sleep(ms),
+    stopped: () => stopRequested,
+    log: (t, c) => logLine(t, c)
+  };
+}
+
+function lotLookupParams(cfg, row) {
+  return {
+    im: getCellByIndex(row, colIndexByName(cfg.imCol)).trim(),
+    lt: getCellByIndex(row, colIndexByName(cfg.ltCol)).trim(),
+    url: cfg.url, statut: cfg.statut, sel: cfg.sel,
+    timeoutMs: Math.max(2000, cfg.timeout), method: cfg.method
+  };
+}
+
+// Diagnostic court de la page de l'onglet (champs / bouton détectés).
+async function lotDiagnose(tabId, cfg) {
+  try {
+    const res = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true }, world: "MAIN", func: lotPageOp, args: [{ op: "probe", sel: cfg.sel || {} }]
+    });
+    const pr = (res || []).map((r) => r.result).filter(Boolean).sort((a, b) => (b.fields.lt ? 1 : 0) - (a.fields.lt ? 1 : 0))[0];
+    if (!pr) return "";
+    if (!pr.fields.lt) return `Onglet : ${pr.login ? "page de connexion" : "pas sur lot_browse"} (${pr.url})`;
+    const f = pr.fields;
+    const pb = pr.postback ? (pr.postback.submitName ? `name=${pr.postback.submitName}` : pr.postback.target ? `__EVENTTARGET=${pr.postback.target}` : "submit") : "✗";
+    return `Onglet : LT ${f.lt ? "✓" : "✗"} · IM ${f.im ? "✓" : "✗"} · Niv ${f.niv ? "✓" : "✗"} · Statut ${f.statut ? "✓" : "✗"} · Rechercher ${pr.submit || "✗"} (${pb}) · ${pr.links} lien(s) lot`;
+  } catch (e) {
+    return "diagnostic impossible : " + (e.message || e);
+  }
+}
+
+async function runLotExtraction() {
+  const cfg = getLotConfig();
+  const conditions = getConditions();
+  const imIdx = colIndexByName(cfg.imCol), ltIdx = colIndexByName(cfg.ltCol);
+  if (imIdx < 0 || ltIdx < 0) { logLine("Recherche de lot : choisis les colonnes IM et LT.", "err"); return; }
+  if (!cfg.idCol && !cfg.urlCol && !cfg.statusCol) { logLine("Recherche de lot : choisis au moins une colonne où écrire.", "err"); return; }
+
+  const { startIdx, endIdx } = lotRowRange();
+  let tabId;
+  try { tabId = await resolveTargetTabId(); }
+  catch (err) { logLine(err.message, "err"); return; }
+
+  const createdCols = {};
+  const idIdx = cfg.idCol ? resolveOutputTarget(cfg.idCol, createdCols) : -1;
+  const urlIdx = cfg.urlCol ? resolveOutputTarget(cfg.urlCol, createdCols) : -1;
+  const stIdx = cfg.statusCol ? resolveOutputTarget(cfg.statusCol, createdCols) : -1;
+  if (Object.keys(createdCols).length) renderColumns();
+  const isSource = (i) => i === imIdx || i === ltIdx; // ne jamais effacer IM / LT
+
+  isRunning = true;
+  hasStartedRun = true;
+  stopRequested = false;
+  lotClearCache();
+  $("startBtn").disabled = true;
+  $("stopBtn").disabled = false;
+  $("log").innerHTML = "";
+  runLog = [];
+  lastRunOutputs = [{ col: cfg.statusCol || "Statut" }, { col: cfg.idCol || "ID interne" }, { col: cfg.urlCol || "URL" }];
+  const total = Math.max(0, endIdx - startIdx + 1);
+  let done = 0;
+  const runStart = Date.now();
+  runDurationMs = 0;
+  setProgress(0, total);
+  $("extractEstimate").textContent = "";
+  updateRunTiming(0, total, runStart);
+  updateDoneMarkers();
+  const ad = lotChromeAdapter(tabId, Math.max(2000, cfg.timeout));
+  const runState = {};
+  const tick = () => { done++; setProgress(done, total); updateRunTiming(done, total, runStart); };
+  logLine(`Recherche de lots — méthode ${cfg.method === "ui" ? "onglet" : cfg.method === "fetch" ? "POST direct" : "auto"}, ${total} ligne(s).`, "");
+
+  for (let idx = startIdx; idx <= endIdx; idx++) {
+    if (stopRequested) { logLine("Arrêté par l'utilisateur.", "skip"); break; }
+    const row = state.rows[idx] = state.rows[idx] || [];
+    const rowNum = idx + 1;
+    if (rowMatchesSkipCondition(row, conditions)) {
+      logLine(`Ligne ${rowNum} : ignorée (condition).`, "skip");
+      runLog.push({ row: rowNum, search: "", values: [], status: "skip", note: "Condition" });
+      tick(); continue;
+    }
+    const p = lotLookupParams(cfg, row);
+    const search = `IM ${p.im} / LT ${p.lt}`;
+    if (!p.im && !p.lt) {
+      logLine(`Ligne ${rowNum} : ignorée (IM et LT vides).`, "skip");
+      runLog.push({ row: rowNum, search: "", values: [], status: "skip", note: "IM/LT vides" });
+      tick(); continue;
+    }
+    let res;
+    try { res = await lotLookup(ad, p, runState); }
+    catch (e) { res = { status: "ERREUR", matches: [], error: e.message || String(e) }; }
+    if (stopRequested && res.status === "ERREUR") { logLine("Arrêté par l'utilisateur.", "skip"); break; }
+    const text = lotStatusText(res);
+    const m = res.status === "OK" ? res.matches[0] : null;
+    if (stIdx >= 0) setCellByIndex(row, stIdx, text);
+    if (idIdx >= 0 && (m || !isSource(idIdx))) setCellByIndex(row, idIdx, m ? m.id : "");
+    if (urlIdx >= 0 && (m || !isSource(urlIdx))) setCellByIndex(row, urlIdx, m ? m.url : "");
+    (res.info || []).forEach((w) => logLine(`Ligne ${rowNum} : ⚠ ${w}`, "skip"));
+    const via = res.cached ? " [cache]" : res.via ? ` [${res.via === "fetch" ? "POST direct" : "onglet"}]` : "";
+    if (m) {
+      logLine(`Ligne ${rowNum} (${search}) : OK — id ${m.id} · ${m.label}${via}`, "ok");
+      runLog.push({ row: rowNum, search, values: [text, m.id, m.url], status: "ok" });
+    } else if (res.status === "AUTH" || res.status === "ERREUR") {
+      logLine(`Ligne ${rowNum} (${search}) : ${text}${via}`, "err");
+      runLog.push({ row: rowNum, search, values: [text, "", ""], status: "err", note: res.error || "session expirée" });
+    } else {
+      const extra = res.status === "INTROUVABLE" && res.others && res.others.length
+        ? ` (autres lots renvoyés : ${res.others.map((o) => `IM ${o.im} ${o.label || "id " + o.id}`).join(" ; ")})` : "";
+      logLine(`Ligne ${rowNum} (${search}) : ${text}${extra}${via}`, "skip");
+      runLog.push({ row: rowNum, search, values: [text, "", ""], status: "skip", label: res.status === "AMBIGU" ? "Ambigu" : "Introuvable", check: true });
+    }
+    tick();
+    if (res.status === "AUTH") {
+      logLine(`Session SIGEO expirée : reconnecte-toi dans l'onglet puis relance à partir de la ligne ${rowNum}.`, "err");
+      showStatus("Session SIGEO expirée — extraction arrêtée.", "error");
+      break;
+    }
+    if (cfg.delay && idx < endIdx && !res.cached) await sleep(cfg.delay);
+  }
+
+  runDurationMs = Date.now() - runStart;
+  isRunning = false;
+  $("startBtn").disabled = false;
+  $("stopBtn").disabled = true;
+  $("progressTiming").textContent = `Terminé en ${formatDuration(runDurationMs)}`;
+  logLine(`Terminé en ${formatDuration(runDurationMs)}.`, "ok");
+  renderResultSummary();
+  updateExtractEstimate();
+  renderPreview();
+  persistSession();
+  updateDoneMarkers();
+}
+
+[["lotIdCol", "lotIdColNew"], ["lotUrlCol", "lotUrlColNew"], ["lotStatusCol", "lotStatusColNew"]].forEach(([s, n]) => {
+  $(s).addEventListener("change", () => { $(n).style.display = $(s).value === "__other__" ? "block" : "none"; });
+});
+["lotImCol", "lotLtCol"].forEach((id) => $(id).addEventListener("change", () => { lotColsTouched = true; updateExtractEstimate(); }));
+["lotMethod", "lotDelay"].forEach((id) => $(id).addEventListener("change", updateExtractEstimate));
+// En passant sur ce type, colonnes devinées d'après les données actuelles (si pas encore choisies).
+document.querySelectorAll('input[name="extractKind"]').forEach((r) => r.addEventListener("change", () => {
+  if (extractKind() !== "sigeoLot" || lotColsTouched) return;
+  const g = lotGuessCols();
+  fillColumnSelect($("lotImCol"), g.im);
+  fillColumnSelect($("lotLtCol"), g.lt);
+  updateExtractEstimate();
+}));
+document.querySelectorAll(".lot-pick").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const picked = await pickTargetOnActiveTab();
+    if (!picked) return;
+    const v = picked.selector || picked.name || picked.id;
+    if (!v) return;
+    document.querySelector(`.lot-sel[data-k="${btn.dataset.k}"]`).value = v;
+    persistWorkingConfig();
+  });
+});
+$("lotTestBtn").addEventListener("click", async () => {
+  const out = $("lotTestResult");
+  if (isRunning) { showStatus("Une extraction est en cours.", "error"); return; }
+  const cfg = getLotConfig();
+  const { startIdx } = lotRowRange();
+  const row = state.rows[startIdx];
+  const fail = (t) => { out.className = "hint imx-test-result err"; out.textContent = "✗ " + t; };
+  if (!row) return fail("Charge d'abord des données.");
+  if (colIndexByName(cfg.imCol) < 0 || colIndexByName(cfg.ltCol) < 0) return fail("Choisis les colonnes IM et LT.");
+  const p = lotLookupParams(cfg, row);
+  out.className = "hint imx-test-result";
+  out.textContent = `Recherche pour la ligne ${startIdx + 1} (IM ${p.im} / LT ${p.lt})…`;
+  $("lotTestBtn").disabled = true;
+  try {
+    const tabId = await resolveTargetTabId();
+    stopRequested = false;
+    lotClearCache();
+    const ad = lotChromeAdapter(tabId, p.timeoutMs);
+    ad.log = (t) => { out.textContent += " " + t; };
+    const res = await lotLookup(ad, p, {});
+    const m = res.status === "OK" ? res.matches[0] : null;
+    let txt = `${m ? "✓" : res.status === "ERREUR" || res.status === "AUTH" ? "✗" : "⚠"} Ligne ${startIdx + 1} (IM ${p.im} / LT ${p.lt}) → ${lotStatusText(res)}` +
+      (m ? ` — ${m.label} — ${m.url}` : "") +
+      (res.via ? ` [${res.via === "fetch" ? "POST direct" : "onglet"}${res.button ? ", bouton " + res.button : ""}]` : "") +
+      ((res.info || []).length ? " — " + res.info.join(" ; ") : "");
+    if (!m) {
+      const diag = await lotDiagnose(tabId, cfg);
+      if (diag) txt += " — " + diag;
+    }
+    out.className = "hint imx-test-result " + (m ? "ok" : "err");
+    out.textContent = txt;
+  } catch (e) {
+    fail(e.message || e);
+  } finally {
+    $("lotTestBtn").disabled = false;
   }
 });
 
@@ -6946,7 +7241,8 @@ function buildProfileConfig() {
       endRow: $("endRow").value,
       outputs: getOutputs(),
       kind: extractKind(),
-      im: getImxConfig()
+      im: getImxConfig(),
+      lot: getLotConfig()
     },
     scenario: {
       steps: getScenarioSteps(),
@@ -7003,6 +7299,7 @@ function applyProfileConfig(cfg) {
   $("startRow").value = ex.startRow || (dataStartIdx() + 1);
   $("endRow").value = ex.endRow || "";
   applyImxConfig(ex.im || {}, ex.kind || "standard");
+  applyLotConfig(ex.lot || {});
 
   const sc = cfg.scenario || {};
   $("scenarioSteps").innerHTML = "";
@@ -7269,6 +7566,7 @@ async function init() {
   // Recherche IM : valeurs par défaut si aucune configuration restaurée
   // (sans cela, la liste « IM → écrire dans » pointerait sur la colonne A).
   if (!imxConfigApplied) applyImxConfig({}, "standard");
+  if (!lotConfigApplied) applyLotConfig({});
 
   // Lignes par défaut dans l'onglet Extraction si vide
   if (!$("searchFieldsList").children.length) addSearchFieldRow();

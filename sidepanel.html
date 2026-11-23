@@ -290,6 +290,7 @@
     <div class="radio-row radio-col">
       <label><input type="radio" name="extractKind" value="standard" checked /> Standard (champs de recherche → résultats)</label>
       <label><input type="radio" name="extractKind" value="sigeoIm" /> Recherche IM SIGEO (adresse → N° E.I.)</label>
+      <label><input type="radio" name="extractKind" value="sigeoLot" /> Recherche d'id interne de lot (IM + LT → id SIGEO)</label>
     </div>
 
     <div id="imExtractBox" hidden>
@@ -380,6 +381,79 @@
         <button class="btn" id="imxTestBtn" type="button" title="Lance la recherche pour la ligne de départ, sans rien écrire"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester sur la ligne de départ</button>
       </div>
       <p class="hint imx-test-result" id="imxTestResult"></p>
+    </div>
+
+    <div id="lotExtractBox" hidden>
+      <p class="hint">Pour chaque ligne : la recherche de lots SIGEO (<code>lot_browse</code>, bloc « Par code ») est envoyée avec l'<strong>IM</strong> et le <strong>LT</strong> de la ligne, puis le lien <code>lot_manage/syn/{IM}/{id}</code> dont le numéro LT correspond exactement est lu. 1 lot → OK, aucun → Introuvable, plusieurs → Ambigu. IM accepté avec ou sans « IM » et zéros devant (IM0393528, 0393528, 393528) ; LT avec ou sans « LT » et zéros (LT000204, 204). Colle tes couples IM / LT depuis Excel dans l'onglet <strong>Données</strong>. Il faut être connecté à SIGEO dans l'onglet cible : si la session a expiré, l'extraction s'arrête.</p>
+      <div class="field-row">
+        <label for="lotImCol">Colonne IM :</label>
+        <select id="lotImCol" data-colselect="plain"></select>
+        <label for="lotLtCol">LT :</label>
+        <select id="lotLtCol" data-colselect="plain"></select>
+      </div>
+      <div class="field-row">
+        <label for="lotMethod">Méthode :</label>
+        <select id="lotMethod" title="POST direct : la recherche est envoyée en arrière-plan depuis l'onglet SIGEO (rapide, l'onglet ne bouge pas). Onglet : les champs de la page lot_browse sont remplis et « Rechercher » est cliqué. Auto : POST direct, et repli sur l'onglet si le serveur le refuse.">
+          <option value="auto">Auto (POST direct, repli onglet)</option>
+          <option value="fetch">POST direct seulement</option>
+          <option value="ui">Onglet seulement</option>
+        </select>
+        <label for="lotStatut">statut :</label>
+        <input type="text" id="lotStatut" value="actif" title="Valeur (ou libellé) de la liste Statut. Vide = valeur par défaut de la page." style="max-width:90px" />
+      </div>
+      <div class="field-row">
+        <input type="text" id="lotUrl" placeholder="URL de lot_browse" title="Page de recherche des lots" style="flex:1;min-width:180px" />
+      </div>
+      <div class="field-row">
+        <label for="lotTimeout">Timeout (ms) :</label>
+        <input type="number" id="lotTimeout" value="20000" min="2000" step="500" />
+        <label for="lotDelay">pause entre lignes (ms) :</label>
+        <input type="number" id="lotDelay" value="300" min="0" step="100" />
+      </div>
+      <div class="field-row">
+        <label for="lotIdCol">Id interne → écrire dans :</label>
+        <select id="lotIdCol" data-colselect="target"></select>
+        <input type="text" class="new-col-input" id="lotIdColNew" placeholder="lettre (C) ou nom de nouvelle colonne" value="ID interne" style="display:none" />
+      </div>
+      <div class="field-row">
+        <label for="lotUrlCol">URL fiche → écrire dans :</label>
+        <select id="lotUrlCol" data-colselect="targetopt"></select>
+        <input type="text" class="new-col-input" id="lotUrlColNew" placeholder="lettre (C) ou nom de nouvelle colonne" value="URL lot" style="display:none" />
+      </div>
+      <div class="field-row">
+        <label for="lotStatusCol">Statut → écrire dans :</label>
+        <select id="lotStatusCol" data-colselect="targetopt"></select>
+        <input type="text" class="new-col-input" id="lotStatusColNew" placeholder="lettre (C) ou nom de nouvelle colonne" value="Résultat lot" style="display:none" />
+      </div>
+      <p class="hint">Id et URL : écrits seulement si le statut est OK (sinon vidés). Statut : <code>OK — id 28</code>, <code>Introuvable</code>, <code>Ambigu — id 28 (N° LT000204 …), id 31 (…)</code> ou <code>ERREUR — …</code>.</p>
+      <details class="imx-adv" id="lotAdv">
+        <summary>Sélecteurs avancés (vide = valeurs SIGEO connues)</summary>
+          <div class="field-row">
+            <label class="imx-sel-label">champ LT :</label>
+            <input type="text" class="lot-sel" data-k="lt" placeholder="#body_x_txtLotId_x_txtLotId" />
+          </div>
+          <div class="field-row">
+            <label class="imx-sel-label">champ IM :</label>
+            <input type="text" class="lot-sel" data-k="im" placeholder="#body_x_txtImmId_x_txtImmId" />
+          </div>
+          <div class="field-row">
+            <label class="imx-sel-label">champ Niv. :</label>
+            <input type="text" class="lot-sel" data-k="niv" placeholder="#body_x_txtBatNiv_x_txtBatNiv" />
+          </div>
+          <div class="field-row">
+            <label class="imx-sel-label">liste Statut :</label>
+            <input type="text" class="lot-sel" data-k="statut" placeholder="#body_x_ddlLotStatut_ddlLotStatut" />
+          </div>
+          <div class="field-row">
+            <label class="imx-sel-label">bouton Rechercher :</label>
+            <input type="text" class="lot-sel" data-k="submit" placeholder="auto (libellé « Rechercher »)" />
+            <button class="btn pick icon-only lot-pick" data-k="submit" title="Choisir sur la page" type="button"><svg class="icon"><use href="#icon-target"/></svg></button>
+          </div>
+      </details>
+      <div class="field-row">
+        <button class="btn" id="lotTestBtn" type="button" title="Lance la recherche pour la ligne de départ, sans rien écrire"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester sur la ligne de départ</button>
+      </div>
+      <p class="hint imx-test-result" id="lotTestResult"></p>
     </div>
 
     <div id="stdExtractBox">
@@ -620,6 +694,7 @@
   <script src="lib/pdf.min.js"></script>
   <script src="lib/ocr/tesseract.min.js"></script>
   <script src="sigeo-im.js"></script>
+  <script src="sigeo-lot.js"></script>
   <script src="sidepanel.js"></script>
   <script src="update-check.js"></script>
 </body>
