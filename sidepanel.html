@@ -473,7 +473,11 @@
       <div class="field-row">
         <input type="text" id="dpeUrl" placeholder="{URL lot}" title="URL de la page Documents (ou de la fiche lot). {Colonne} = valeur de la ligne, ex. {URL lot} ou …/lot_manage?id={ID interne}" style="flex:1;min-width:180px" />
       </div>
-      <p class="hint">URL : <code>{Nom de colonne}</code> est remplacé par la valeur de la ligne. Par défaut <code>{URL lot}</code> (fiche lot → page Documents suivie).</p>
+      <div class="field-row">
+        <label for="dpeUrlSyn" title="Si aucun DPE n'est trouvé en gérance (ou si la page est introuvable), la même recherche est faite dans cette fiche lot syndic. Vide = pas de repli.">Repli syndic :</label>
+        <input type="text" id="dpeUrlSyn" placeholder="vide = pas de recherche en syndic" style="flex:1;min-width:180px" />
+      </div>
+      <p class="hint">URL : <code>{Nom de colonne}</code> est remplacé par la valeur de la ligne. Par défaut <code>{URL lot}</code> (fiche lot → page Documents suivie). Si rien n'est trouvé en gérance, la fiche lot <strong>syndic</strong> est vérifiée : par défaut <code>…/page.aspx/fr/sig_imm/lot_manage/syn/{IM_format}/{lot}</code> (ex. <code>…/syn/393151/90</code>). La colonne <code>DPE source</code> indique où le DPE a été trouvé.</p>
       <div class="field-row">
         <label class="checkbox-row" title="Décoché : vérifie seulement la présence des DPE (colonnes remplies, rien n'est téléchargé)."><input type="checkbox" id="dpeDownload" checked /> télécharger le DPE retenu</label>
       </div>

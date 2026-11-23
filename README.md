@@ -497,12 +497,21 @@ espaces retirés ; un doublon est renommé `(1)`.
 
 Colonnes écrites (créées si absentes) : **DPE présent** (OUI / NON /
 ERREUR), **Nb DPE** (plus d'un → ligne « à vérifier » dans le récap),
-**DPE nom SIGEO**, **DPE date**, **DPE section**, **DPE fichier**,
-**DPE statut**. Le texte de DPE statut se règle dans « Texte écrit dans DPE
+**DPE nom SIGEO**, **DPE date**, **DPE section**, **DPE source**
+(gérance / syndic / gérance + syndic), **DPE fichier**, **DPE statut**.
+
+**Repli syndic** (v2.17.3) : si la page gérance (`metier=ger`) ne contient
+aucun DPE, ou est introuvable (URL vide, page absente), la même recherche est
+faite dans la fiche lot syndic, par défaut
+`http://sigeo.evoriel.net/page.aspx/fr/sig_imm/lot_manage/syn/{IM_format}/{lot}`
+(ex. `…/syn/393151/90`) ; le lien vers la page Documents y est suivi même si
+la fiche contient d'autres tableaux. Champ « Repli syndic » vide = pas de
+repli. Pas de repli quand un DPE est trouvé en gérance (même si son
+téléchargement échoue) ni quand la session est expirée. Le texte de DPE statut se règle dans « Texte écrit dans DPE
 statut » : par défaut `OK & téléchargé`, `OK trouvé (non téléchargé)`
 (vérification seule), `KO pas trouvé`, `KO téléchargement : {raison}`,
 `Page introuvable`. Variables : `{nom}`, `{date}`, `{fichier}`, `{nb}`,
-`{section}`, `{raison}` et toute `{Colonne}` de la ligne.
+`{section}`, `{source}`, `{raison}` et toute `{Colonne}` de la ligne.
 Session expirée → arrêt avec la ligne à partir de laquelle relancer.
 Pause entre lots réglable (1 s par défaut) pour ne pas surcharger SIGEO.
 
@@ -721,7 +730,8 @@ par le journal et par la colonne résultat ; depuis 2.17.1 : PDF visible
 seulement après un nouvel « Enregistrer », PDF jamais visible puis relances
 sans nouvel upload).
 
-**Version** : 2.17.2 — **Analyse DPE** : n'écrit plus que les colonnes utiles à la saisie SIGEO (plus de totaux annuels, surface, adresse, diagnostiqueur, certification, lecture, fournisseur lu / de la liste, type) ; nouvelle colonne `Prix indexés au` ; coûts et date des prix seulement pour un DPE ≥ 01/07/2021 ; préréglage de l'étape de saisie : `{PDF analysé}`, `{Prix indexés au}`.
+**Version** : 2.17.3 — **DPE SIGEO** : si aucun DPE n'est trouvé en gérance (ou si la page est introuvable), la fiche lot **syndic** est vérifiée (`…/page.aspx/fr/sig_imm/lot_manage/syn/{IM_format}/{lot}`, champ « Repli syndic », vide = désactivé) ; nouvelle colonne `DPE source` (gérance / syndic / gérance + syndic), variable `{source}` dans les textes de statut ; la page Documents est suivie depuis une fiche lot qui contient d'autres tableaux.
+2.17.2 — **Analyse DPE** : n'écrit plus que les colonnes utiles à la saisie SIGEO (plus de totaux annuels, surface, adresse, diagnostiqueur, certification, lecture, fournisseur lu / de la liste, type) ; nouvelle colonne `Prix indexés au` ; coûts et date des prix seulement pour un DPE ≥ 01/07/2021 ; préréglage de l'étape de saisie : `{PDF analysé}`, `{Prix indexés au}`.
 2.17.1 — **SIGEO : saisir un DPE** : faux négatif de la
 vérification d'upload corrigé — PDF absent de la liste juste après l'upload
 → « Enregistrer » recliqué et liste revérifiée (3 tentatives, 10 s d'attente

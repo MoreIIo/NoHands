@@ -84,7 +84,14 @@ const LOTS = {
   // Le DPE renvoie du HTML au lieu d'un PDF (ViewState rejeté côté serveur).
   H: {
     "Diagnostics >> EPC": [["DPE 2020", "RapportDiagnosticLot", "03/03/2020"]]
-  }
+  },
+  // Lot S : pas de DPE en gérance, mais un en syndic (metier=syn).
+  S: { "Diagnostics >> EPC": [["DIAG GAZ 2021", "RapportDiagnosticLot", "05/05/2021"]] },
+  S_syn: { "Diagnostics >> EPC": [["DPE 2023", "RapportDiagnosticLot", "10/02/2023"], ["DIAG ELEC 2023", "RapportDiagnosticLot", "10/02/2023"]] },
+  // Lot T : rien ni en gérance ni en syndic.
+  T: { "Diagnostics >> EPC": [] },
+  // Page Documents d'un lot sans données : sections vides.
+  EMPTY: { "Diagnostics >> EPC": [], "Divers >> Autres": [] }
 };
 
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
@@ -147,10 +154,13 @@ ${!loaded && delay ? `<script>setTimeout(function(){
 </form></body></html>`;
 }
 
-// Fiche lot : la page Documents s'ouvre par un window.open.
-function fichePage(lot, origin) {
-  return `<!DOCTYPE html><html><body><form><h1>Lot ${lot}</h1>
-<a href="#" onclick="window.open('${origin}/popup.aspx/fr/fil/ged_multi_file_manager/sig_imm/lot_manage?lot=${lot}&amp;x=1','docs');return false;">Documents</a>
+// Fiche lot : la page Documents s'ouvre par un window.open. En syndic
+// (metier « syn »), la fiche contient aussi un tableau sans rapport (liste
+// des copropriétaires) : la page Documents doit quand même être suivie.
+function fichePage(lot, origin, metier = "") {
+  const extra = metier === "syn" ? `<table><tr><td><a href="javascript:__doPostBack('body$x$grdCopro','Select$0')">DUPONT Jean</a></td><td>12/01/2019</td></tr></table>` : "";
+  return `<!DOCTYPE html><html><body><form><h1>Lot ${lot}${metier ? " (" + metier + ")" : ""}</h1>${extra}
+<a href="#" onclick="window.open('${origin}/popup.aspx/fr/fil/ged_multi_file_manager/sig_imm/lot_manage?${metier ? "metier=" + metier + "&amp;" : ""}lot=${lot}&amp;x=1','docs');return false;">Documents</a>
 </form></body></html>`;
 }
 
@@ -188,8 +198,16 @@ function start() {
       return res.end('<html><body><form><input type="password" name="pw"></form></body></html>');
     }
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    if (u.pathname.includes("ged_multi_file_manager")) return res.end(docsPage(lot, { loaded: false, delay: 400 }));
-    if (u.pathname.includes("lot_manage/syn")) return res.end(fichePage(lot, `http://127.0.0.1:${server.address().port}`));
+    if (u.pathname.includes("ged_multi_file_manager")) {
+      const key = u.searchParams.get("metier") === "syn" ? lot + "_syn" : lot;
+      return res.end(docsPage(LOTS[key] ? key : "EMPTY", { loaded: false, delay: 400 }));
+    }
+    if (u.pathname.includes("lot_manage/syn")) {
+      // …/syn/{immeuble}/{lot} ; ?lot=… (anciens tests) = fiche gérance.
+      const pm = u.pathname.match(/lot_manage\/syn\/\d+\/(\w+)$/);
+      const syn = !u.searchParams.has("lot");
+      return res.end(fichePage(syn && pm ? pm[1] : lot, `http://127.0.0.1:${server.address().port}`, syn ? "syn" : ""));
+    }
     res.end("<html><body>ok</body></html>");
   });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => {

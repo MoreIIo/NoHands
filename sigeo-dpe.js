@@ -43,6 +43,10 @@ const DPE_DEFAULT_RULES = Object.freeze({
 const DPE_DEFAULT_NAME = "{IM}_{lot}_DPE_{date}";
 const DPE_DEFAULT_FOLDER = "DPE_SIGEO";
 const DPE_DEFAULT_URL = "{URL lot}";
+// Repli quand rien n'est trouvé en gérance (metier=ger) : la fiche lot en
+// syndic, …/page.aspx/fr/sig_imm/lot_manage/syn/{immeuble}/{lot}
+// (ex. …/syn/393151/90) ; la page Documents y est suivie automatiquement.
+const DPE_DEFAULT_URL_SYN = "http://sigeo.evoriel.net/page.aspx/fr/sig_imm/lot_manage/syn/{IM_format}/{lot}";
 
 /* ---------------------------------------------------------------- *
  * 1. Logique pure                                                  *
@@ -321,8 +325,10 @@ function dpePageOp(cfg) {
  *              candidates, file, statut, error?, info[] } */
 
 // Attend la page Documents (polling 250 ms) ; suit le lien
-// ged_multi_file_manager si l'URL ouverte est la fiche lot.
-async function dpeOpenDocs(ad, url, timeoutMs, info) {
+// ged_multi_file_manager si l'URL ouverte est la fiche lot — y compris
+// quand la fiche lot (ex. syndic) contient déjà des tableaux mais aucune
+// section recherchée (wants(page) faux).
+async function dpeOpenDocs(ad, url, timeoutMs, info, wants) {
   const nav = await ad.navigate(url);
   if (!nav.ok) return { error: "ouverture impossible : " + (nav.error || url) };
   let followed = false;
@@ -336,7 +342,17 @@ async function dpeOpenDocs(ad, url, timeoutMs, info) {
     const doc = frames.filter((f) => f.result.isDocPage)
       .sort((a, b) => (b.result.titles.length - a.result.titles.length))[0];
     last = doc || frames[0] || null;
-    if (doc && doc.result.ready && (doc.result.titles.length || doc.result.sections.length)) return { frameId: doc.frameId, page: doc.result };
+    if (doc && doc.result.ready && (doc.result.titles.length || doc.result.sections.length)) {
+      const link = frames.map((f) => f.result.gedLinks || []).flat()[0];
+      if (!followed && wants && !wants(doc.result) && link && !/ged_multi_file_manager/i.test(doc.result.url || "")) {
+        info.push("page Documents ouverte depuis la fiche lot : " + link);
+        followed = true;
+        const n2 = await ad.navigate(link);
+        if (!n2.ok) return { error: "ouverture de la page Documents impossible : " + (n2.error || link) };
+        continue;
+      }
+      return { frameId: doc.frameId, page: doc.result };
+    }
     if (login) return { auth: true };
     if (!doc && !followed && Date.now() - t0 > 300) {
       const link = frames.map((f) => f.result.gedLinks || []).flat()[0];
@@ -356,14 +372,37 @@ async function dpeOpenDocs(ad, url, timeoutMs, info) {
   }
 }
 
+// Gérance d'abord (p.url) ; si aucun DPE n'y est trouvé (ou la page est
+// introuvable) et qu'une URL syndic est fournie (p.urlSyn), même recherche
+// en syndic. res.source : « gérance », « syndic » ou « gérance + syndic ».
 async function dpeProcess(ad, p) {
+  const g = await dpeProcessOne(ad, p);
+  g.source = "gérance";
+  if (!p.urlSyn || ad.stopped() || !(g.status === "ABSENT" || g.status === "PAGE")) return g;
+  const info = g.info.slice();
+  info.push(`${g.status === "ABSENT" ? "aucun DPE en gérance" + (g.sections && g.sections.length ? " (" + g.sections.join(", ") + ")" : "") : "gérance : " + (g.error || g.statut)} → recherche en syndic`);
+  const s = await dpeProcessOne(ad, Object.assign({}, p, { url: p.urlSyn }));
+  s.source = "syndic";
+  s.info = info.concat(s.info.map((x) => "syndic : " + x));
+  if (!(s.status === "ABSENT" || s.status === "PAGE")) return s;
+  // Ni en gérance ni en syndic.
+  const both = (g.sections || []).map((t) => "gérance : " + t).concat((s.sections || []).map((t) => "syndic : " + t));
+  if (g.status === "ABSENT" || s.status === "ABSENT") {
+    const err = [g.status === "PAGE" ? "gérance : " + g.error : "", s.status === "PAGE" ? "syndic : " + s.error : ""].filter(Boolean).join(" ; ");
+    return Object.assign(s.status === "ABSENT" ? s : g, { status: "ABSENT", present: "NON", statut: "Absent", count: 0, chosen: null, candidates: [],
+      sections: both, source: "gérance + syndic", info: s.info, error: err || undefined });
+  }
+  return Object.assign(s, { source: "gérance + syndic", error: `gérance : ${g.error} ; syndic : ${s.error}` });
+}
+
+async function dpeProcessOne(ad, p) {
   const info = [];
   const rules = p.rules && p.rules.include ? p.rules : dpeCompileRules(p.rules);
   rules.errors.forEach((e) => info.push(e));
   const base = { present: "ERREUR", count: 0, chosen: null, candidates: [], file: "", info };
   if (!p.url) return Object.assign(base, { status: "PAGE", statut: "Page introuvable", error: "URL de la page Documents vide" });
   const timeout = Math.max(2000, p.timeoutMs || 20000);
-  const open = await dpeOpenDocs(ad, p.url, timeout, info);
+  const open = await dpeOpenDocs(ad, p.url, timeout, info, (pg) => (pg.sections || []).some((s) => dpeIsSection(s.title, rules)));
   if (open.auth) return Object.assign(base, { status: "AUTH", statut: "Page introuvable", error: "session SIGEO expirée (page de connexion)" });
   if (open.error) return Object.assign(base, { status: "PAGE", statut: "Page introuvable", error: open.error });
 
@@ -394,7 +433,7 @@ async function dpeProcess(ad, p) {
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
-    DPE_DEFAULT_RULES, DPE_DEFAULT_NAME, DPE_DEFAULT_FOLDER, DPE_DEFAULT_URL,
+    DPE_DEFAULT_RULES, DPE_DEFAULT_NAME, DPE_DEFAULT_FOLDER, DPE_DEFAULT_URL, DPE_DEFAULT_URL_SYN, dpeProcessOne,
     dpeFold, dpeCompileRules, dpeIsSection, dpeIsDpe, dpeParseDate, dpeSelect,
     dpeSanitize, dpeFileName, dpeFolder, dpePageOp, dpeOpenDocs, dpeProcess
   };

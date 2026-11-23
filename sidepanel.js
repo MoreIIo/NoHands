@@ -3698,7 +3698,7 @@ $("lotTestBtn").addEventListener("click", async () => {
    __doPostBack) : sigeo-dpe.js. Ici : l'interface de l'onglet Extraction,
    l'adaptateur chrome.* (dont chrome.downloads) et la boucle sur les lignes. */
 
-const DPE_COLS = ["DPE présent", "Nb DPE", "DPE nom SIGEO", "DPE date", "DPE section", "DPE fichier", "DPE statut"];
+const DPE_COLS = ["DPE présent", "Nb DPE", "DPE nom SIGEO", "DPE date", "DPE section", "DPE source", "DPE fichier", "DPE statut"];
 let dpeConfigApplied = false;
 // Textes de la colonne « DPE statut » (modifiables dans le panneau).
 const DPE_DEFAULT_LABELS = Object.freeze({
@@ -3712,6 +3712,7 @@ const DPE_DEFAULT_LABELS = Object.freeze({
 function getDpeConfig() {
   return {
     url: $("dpeUrl").value.trim() || DPE_DEFAULT_URL,
+    urlSyn: $("dpeUrlSyn").value.trim(),
     download: $("dpeDownload").checked,
     folder: $("dpeFolder").value.trim(),
     name: $("dpeName").value.trim() || DPE_DEFAULT_NAME,
@@ -3738,6 +3739,7 @@ function applyDpeRules(r = {}) {
 function applyDpeConfig(c) {
   dpeConfigApplied = true;
   $("dpeUrl").value = c.url || DPE_DEFAULT_URL;
+  $("dpeUrlSyn").value = c.urlSyn ?? DPE_DEFAULT_URL_SYN;
   $("dpeDownload").checked = c.download !== false;
   $("dpeFolder").value = c.folder ?? DPE_DEFAULT_FOLDER;
   $("dpeName").value = c.name || DPE_DEFAULT_NAME;
@@ -3759,14 +3761,22 @@ function dpeStatusLabel(cfg, res, row) {
     : res.status === "PAGE" || res.status === "AUTH" ? "page" : "ko";
   const c = res.chosen || {};
   const vars = { nom: c.name || "", date: c.date || "", fichier: res.file || "", nb: String(res.count ?? ""),
-    section: c.section || "", raison: res.error || String(res.statut || "").replace(/^KO téléchargement : /, "") };
-  const txt = String(L[key] ?? "").replace(/\{(nom|date|fichier|nb|section|raison)\}/gi, (w, k) => vars[k.toLowerCase()]);
+    section: c.section || "", source: res.source || "", raison: res.error || String(res.statut || "").replace(/^KO téléchargement : /, "") };
+  const txt = String(L[key] ?? "").replace(/\{(nom|date|fichier|nb|section|source|raison)\}/gi, (w, k) => vars[k.toLowerCase()]);
   return resolveRowTemplate(txt, row) || res.statut;
 }
 
-// URL de la ligne ({Colonne} résolues) ; "" si une variable est introuvable.
-function dpeRowUrl(cfg, row) {
-  const u = resolveRowTemplate(cfg.url, row).trim();
+// URL de la ligne ({Colonne} résolues) ; "" si une variable est introuvable
+// ou vide (ex. …/syn/{IM_format}/{lot} avec un lot vide).
+function dpeRowUrl(cfg, row, key = "url") {
+  const tpl = String(cfg[key] || "");
+  if (!tpl) return "";
+  if (key === "urlSyn") {
+    const vals = []; let missing = false;
+    tpl.replace(/\{([^{}]+)\}/g, (w, n) => { const v = String(resolveRowTemplate(w, row) ?? ""); if (v === w) missing = true; vals.push(v.trim()); return w; });
+    if (missing || vals.some((v) => !v)) return "";
+  }
+  const u = resolveRowTemplate(tpl, row).trim();
   return /\{[^{}]+\}/.test(u) ? "" : u;
 }
 
@@ -3814,7 +3824,7 @@ function dpeChromeAdapter(tabId, timeoutMs) {
 function dpeParams(cfg, row, rules) {
   const folder = dpeFolder(cfg.folder);
   return {
-    url: dpeRowUrl(cfg, row), rules, download: cfg.download,
+    url: dpeRowUrl(cfg, row), urlSyn: dpeRowUrl(cfg, row, "urlSyn"), rules, download: cfg.download,
     timeoutMs: Math.max(2000, cfg.timeout),
     name: (c) => (folder ? folder + "/" : "") +
       dpeFileName(cfg.name, { date: c.iso, nom: c.name, serverName: c.name }, (s) => resolveRowTemplate(s, row))
@@ -3876,22 +3886,23 @@ async function runDpeExtraction() {
     if (stopRequested && res.error === "arrêté") { logLine("Arrêté par l'utilisateur.", "skip"); break; }
     const c = res.chosen;
     const vals = [res.present, res.status === "PAGE" || res.status === "AUTH" ? "" : String(res.count),
-      c ? c.name : "", c ? c.date : "", c ? c.section : "", res.file || "", dpeStatusLabel(cfg, res, row)];
+      c ? c.name : "", c ? c.date : "", c ? c.section : "", res.source || "", res.file || "", dpeStatusLabel(cfg, res, row)];
     idx.forEach((col, k) => setCellByIndex(row, col, vals[k]));
     (res.info || []).forEach((w) => {
       // « fiche lot → page Documents » : signalé une seule fois par exécution.
       if (/^page Documents ouverte depuis/.test(w)) { if (followSeen) return; followSeen = true; }
       logLine(`Ligne ${rowNum} : ⚠ ${w}`, "skip");
     });
-    const search = p.url ? p.url.replace(/^https?:\/\/[^/]+/, "") : "(URL vide)";
-    const recap = [vals[6], vals[1], vals[2], vals[3], vals[5]];
+    const shownUrl = res.source === "syndic" ? p.urlSyn : p.url;
+    const search = shownUrl ? shownUrl.replace(/^https?:\/\/[^/]+/, "") + (res.source === "syndic" ? " (syndic)" : "") : "(URL vide)";
+    const recap = [vals[7], vals[1], vals[2], vals[3], vals[6]];
     if (res.status === "OK") {
       if (res.file) nDl++;
       const dup = res.count > 1 ? ` (${res.count} DPE : ${res.candidates.map((x) => `${x.name} ${x.date}`).join(" ; ")})` : "";
-      logLine(`Ligne ${rowNum} : ${c.name} du ${c.date || "?"} [${c.section}]${res.file ? " → " + res.file : ""}${dup}`, "ok");
+      logLine(`Ligne ${rowNum} : ${c.name} du ${c.date || "?"} [${res.source === "syndic" ? "syndic — " : ""}${c.section}]${res.file ? " → " + res.file : ""}${dup}`, "ok");
       runLog.push({ row: rowNum, search, values: recap, status: "ok", check: res.count > 1 });
     } else if (res.status === "ABSENT") {
-      logLine(`Ligne ${rowNum} : aucun DPE${res.sections && res.sections.length ? " (" + res.sections.join(", ") + ")" : ""}.`, "skip");
+      logLine(`Ligne ${rowNum} : aucun DPE${res.source === "gérance + syndic" ? " en gérance ni en syndic" : ""}${res.sections && res.sections.length ? " (" + res.sections.join(", ") + ")" : ""}.`, "skip");
       runLog.push({ row: rowNum, search, values: recap, status: "skip", label: "Absent" });
     } else {
       logLine(`Ligne ${rowNum} : ${res.statut}${res.error && !res.statut.includes(res.error) ? " — " + res.error : ""}`, "err");
@@ -3949,7 +3960,7 @@ $("dpeTestBtn").addEventListener("click", async () => {
     let txt;
     if (c) {
       const name = p.name(c);
-      txt = `✓ Ligne ${startIdx + 1} : ${res.count} DPE — retenu « ${c.name} » du ${c.date || "?"} [${c.section}] → ${name}` +
+      txt = `✓ Ligne ${startIdx + 1} : ${res.count} DPE${res.source === "syndic" ? " (syndic)" : ""} — retenu « ${c.name} » du ${c.date || "?"} [${c.section}] → ${name}` +
         (res.count > 1 ? ` — autres : ${res.candidates.filter((x) => x !== c).map((x) => `${x.name} ${x.date}`).join(" ; ")}` : "");
     } else if (res.status === "ABSENT") {
       txt = `⚠ Ligne ${startIdx + 1} : aucun DPE — sections EPC : ${(res.sections || []).join(", ") || "aucune"}`;

@@ -75,19 +75,24 @@ const CHROME_STUB = `
       ["RESIDENCE B", "IM0393664", "11", "393664", "2", u.B, "OK — id 2"],
       ["RESIDENCE C", "IM0393665", "3", "393665", "3", u.C, "OK — id 3"],
       ["SANS URL", "IM0393666", "4", "393666", "", "", "Introuvable"],
-      ["RESIDENCE H", "IM0393667", "5", "393667", "5", u.H, "OK — id 5"]
+      ["RESIDENCE H", "IM0393667", "5", "393667", "5", u.H, "OK — id 5"],
+      ["RESIDENCE S", "IM0393670", "S", "393670", "6", u.S, "OK — id 6"],
+      ["RESIDENCE T", "IM0393671", "T", "393671", "7", u.T, "OK — id 7"]
     ];
     renderColumns();
     showTab("extraction");
-  }, { A: srv.ficheUrl("A"), B: srv.docsUrl("B"), C: srv.docsUrl("C"), H: srv.docsUrl("H") });
+  }, { A: srv.ficheUrl("A"), B: srv.docsUrl("B"), C: srv.docsUrl("C"), H: srv.docsUrl("H"), S: srv.docsUrl("S"), T: srv.docsUrl("T") });
   await panel.check('input[name="extractKind"][value="sigeoDpe"]');
   const ui = await panel.evaluate(() => ({ dpe: !$("dpeExtractBox").hidden, std: !$("stdExtractBox").hidden, lot: !$("lotExtractBox").hidden, cfg: getDpeConfig(), est: $("extractEstimate").textContent }));
   console.log("UI :", JSON.stringify(ui));
   assert.ok(ui.dpe && !ui.std && !ui.lot, "seul le bloc DPE est visible");
   assert.strictEqual(ui.cfg.url, "{URL lot}");
+  assert.strictEqual(ui.cfg.urlSyn, "http://sigeo.evoriel.net/page.aspx/fr/sig_imm/lot_manage/syn/{IM_format}/{lot}", "repli syndic par défaut");
+  // Faux SIGEO : même chemin, autre hôte.
+  await panel.fill("#dpeUrlSyn", srv.origin + "/page.aspx/fr/sig_imm/lot_manage/syn/{IM_format}/{lot}");
   assert.strictEqual(ui.cfg.folder, "DPE_SIGEO");
   assert.strictEqual(ui.cfg.name, "{IM}_{lot}_DPE_{date}");
-  assert.ok(/4 lots/.test(ui.est), "estimation : " + ui.est);
+  assert.ok(/6 lots/.test(ui.est), "estimation : " + ui.est);
   await panel.fill("#dpeDelay", "0");
 
   // Tester (fiche lot → page Documents, ne télécharge ni n'écrit rien)
@@ -108,24 +113,36 @@ const CHROME_STUB = `
   console.log("--- journal ---\n" + out.log + "\n--- récap ---\n" + out.recap);
   const H = out.rows[0];
   const col = (n) => { const i = H.indexOf(n); assert.ok(i >= 7, "colonne " + n); return i; };
-  const [P, N, NOM, D, S, F, ST] = ["DPE présent", "Nb DPE", "DPE nom SIGEO", "DPE date", "DPE section", "DPE fichier", "DPE statut"].map(col);
+  const [P, N, NOM, D, S, SRC, F, ST] = ["DPE présent", "Nb DPE", "DPE nom SIGEO", "DPE date", "DPE section", "DPE source", "DPE fichier", "DPE statut"].map(col);
   const r1 = out.rows[1];
-  assert.deepStrictEqual([r1[P], r1[N], r1[NOM], r1[D], r1[S], r1[F], r1[ST]],
-    ["OUI", "1", "DPE 2022", "19/10/2022", "Diagnostics >> EPC", "IM0393664_10_DPE_2022-10-19.pdf", "OK & téléchargé"]);
+  assert.deepStrictEqual([r1[P], r1[N], r1[NOM], r1[D], r1[S], r1[SRC], r1[F], r1[ST]],
+    ["OUI", "1", "DPE 2022", "19/10/2022", "Diagnostics >> EPC", "gérance", "IM0393664_10_DPE_2022-10-19.pdf", "OK & téléchargé"]);
   const r2 = out.rows[2];
   assert.deepStrictEqual([r2[P], r2[N], r2[NOM], r2[S], r2[F], r2[ST]],
     ["OUI", "2", "Diagnostic de performance énergétique", "Diagnostics Multys >> EPC", "IM0393664_11_DPE_2023-03-15.pdf", "OK & téléchargé"]);
-  assert.deepStrictEqual([out.rows[3][P], out.rows[3][N], out.rows[3][ST], out.rows[3][F]], ["NON", "0", "KO pas trouvé", ""]);
-  assert.deepStrictEqual([out.rows[4][P], out.rows[4][ST]], ["ERREUR", "Page introuvable"]);
+  assert.deepStrictEqual([out.rows[3][P], out.rows[3][N], out.rows[3][ST], out.rows[3][F], out.rows[3][SRC]], ["NON", "0", "KO pas trouvé", "", "gérance + syndic"]);
+  // Pas d'URL gérance : la fiche syndic est quand même vérifiée
+  assert.deepStrictEqual([out.rows[4][P], out.rows[4][ST], out.rows[4][SRC]], ["NON", "KO pas trouvé", "gérance + syndic"]);
   assert.strictEqual(out.rows[5][P], "OUI");
+  assert.strictEqual(out.rows[5][SRC], "gérance", "trouvé en gérance (téléchargement KO) : pas de recherche en syndic");
+  // Lot S : rien en gérance → trouvé en syndic (fiche lot syndic → page Documents)
+  const r6 = out.rows[6];
+  assert.deepStrictEqual([r6[P], r6[N], r6[NOM], r6[D], r6[SRC], r6[F], r6[ST]],
+    ["OUI", "1", "DPE 2023", "10/02/2023", "syndic", "IM0393670_S_DPE_2023-02-10.pdf", "OK & téléchargé"]);
+  assert.ok(/Ligne 7 : ⚠ aucun DPE en gérance \(Diagnostics >> EPC\) → recherche en syndic/.test(out.log), out.log);
+  assert.ok(/Ligne 7 : DPE 2023 du 10\/02\/2023 \[syndic — Diagnostics >> EPC\]/.test(out.log), out.log);
+  // Lot T : ni gérance ni syndic
+  assert.deepStrictEqual([out.rows[7][P], out.rows[7][ST], out.rows[7][SRC]], ["NON", "KO pas trouvé", "gérance + syndic"]);
+  assert.ok(/Ligne 8 : aucun DPE en gérance ni en syndic/.test(out.log), out.log);
   assert.strictEqual(out.rows[5][ST], "KO téléchargement : SIGEO a renvoyé une page HTML (session expirée ?)");
   assert.strictEqual(out.rows[1][5], srv.ficheUrl("A"), "colonnes source intactes");
   assert.deepStrictEqual(bg.map((d) => [d.url.replace(srv.origin, ""), d.filename, d.head]), [
     ["/bare.aspx/fr/fil/ged_file_download/A03", "DPE_SIGEO/IM0393664_10_DPE_2022-10-19.pdf", "%PDF-"],
-    ["/bare.aspx/fr/fil/ged_file_download/B10", "DPE_SIGEO/IM0393664_11_DPE_2023-03-15.pdf", "%PDF-"]
+    ["/bare.aspx/fr/fil/ged_file_download/B10", "DPE_SIGEO/IM0393664_11_DPE_2023-03-15.pdf", "%PDF-"],
+    ["/bare.aspx/fr/fil/ged_file_download/S_syn00", "DPE_SIGEO/IM0393670_S_DPE_2023-02-10.pdf", "%PDF-"]
   ]);
   assert.strictEqual(srv.stats.posts.length, 0, "aucun POST __doPostBack");
-  assert.ok(/2 DPE téléchargé/.test(out.log), out.log);
+  assert.ok(/3 DPE téléchargé/.test(out.log), out.log);
 
   // Textes personnalisés de « DPE statut » (variables + {Colonne})
   await panel.click("#dpeLabels summary");
@@ -136,17 +153,17 @@ const CHROME_STUB = `
   await panel.click("#startBtn");
   await panel.waitForFunction(() => !isRunning && /Terminé/.test($("log").textContent), null, { timeout: 90000 });
   const out2 = await panel.evaluate(() => state.rows.map((r) => r[r.length - 1]));
-  assert.deepStrictEqual(out2.slice(1, 5), ["OK DPE 2022 du 19/10/2022 (COUR DES M)", "OK Diagnostic de performance énergétique du 15/03/2023 (RESIDENCE B)", "rien", "pas de page"]);
+  assert.deepStrictEqual(out2.slice(1, 5), ["OK DPE 2022 du 19/10/2022 (COUR DES M)", "OK Diagnostic de performance énergétique du 15/03/2023 (RESIDENCE B)", "rien", "rien"]);
   const lbl = await panel.evaluate(() => { const c = buildProfileConfig(); applyDpeConfig({}); const def = $("dpeLblAbsent").value; applyProfileConfig(c); return [def, $("dpeLblAbsent").value]; });
   assert.deepStrictEqual(lbl, ["KO pas trouvé", "rien"]);
 
   // Profil : configuration sauvegardée / restaurée
   const prof = await panel.evaluate(() => {
-    $("dpeFolder").value = "DPE/2026"; $("dpeRuleExclude").value = "gaz";
+    $("dpeFolder").value = "DPE/2026"; $("dpeRuleExclude").value = "gaz"; $("dpeUrlSyn").value = "";
     const c = buildProfileConfig(); applyDpeConfig({}); applyProfileConfig(c);
-    return { kind: c.extraction.kind, after: extractKind(), folder: $("dpeFolder").value, excl: $("dpeRuleExclude").value };
+    return { kind: c.extraction.kind, after: extractKind(), folder: $("dpeFolder").value, excl: $("dpeRuleExclude").value, syn: $("dpeUrlSyn").value };
   });
-  assert.deepStrictEqual(prof, { kind: "sigeoDpe", after: "sigeoDpe", folder: "DPE/2026", excl: "gaz" });
+  assert.deepStrictEqual(prof, { kind: "sigeoDpe", after: "sigeoDpe", folder: "DPE/2026", excl: "gaz", syn: "" }, "repli syndic désactivable et conservé");
 
   assert.deepStrictEqual(errors, [], "erreurs JS du panneau");
   console.log("\n✓ onglet Extraction (DPE SIGEO) OK");
