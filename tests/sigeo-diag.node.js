@@ -242,10 +242,37 @@ check("plan : phase B complète, avertissements", () => {
   p = D.diagPlan(snap(), v);
   assert.ok(p.warnings.includes("bloc « coûts annuels » non affiché : coûts non saisis"));
   assert.ok(p.warnings.some((w) => /case « Nouvelles valeurs du DPE » non affichée/.test(w)));
-  p = D.diagPlan(snap({ f: { ademe: { mode: "absent", input: null, labelText: "" } } }), REALV);
-  assert.ok(p.warnings.some((w) => /champ N° ADEME absent sur la page : N° 2021L2000833E non saisi/.test(w)), p.warnings.join(" | "));
-  p = D.diagPlan(snap({ f: { ademe: { mode: "hidden", input: { present: true, visible: false, value: "" }, labelText: "" } } }), REALV);
-  assert.ok(p.warnings.some((w) => /champ N° ADEME masqué/.test(w)));
+});
+
+check("règle de présence de l'ADEME : ademeSaisissableAvantEnreg", () => {
+  const f = D.ademeSaisissableAvantEnreg;
+  assert.strictEqual(f("30/06/2021"), false);
+  assert.strictEqual(f("01/07/2021"), true);
+  assert.strictEqual(f("24/11/2020"), false);
+  assert.strictEqual(f("12/09/2022"), true);
+  assert.strictEqual(f("1/7/2021"), true, "zéros de tête normalisés");
+  assert.strictEqual(f(""), false);
+  assert.strictEqual(f("n'importe quoi"), false);
+});
+
+check("plan : ADEME absent (plus d'avertissement), différé, libellé prioritaire", () => {
+  const OLD = Object.assign({}, REALV, { dateEtabli: "24/11/2020", ademe: "2021N1001671X" });
+  // champ absent → écart non saisissable, plus de simple avertissement
+  let p = D.diagPlan(snap({ f: { ademe: { mode: "absent", input: null, labelText: "" } } }), OLD);
+  const a = p.specs.find((x) => x.key === "ademe");
+  assert.deepStrictEqual([a.ok, a.missing, a.act], [false, true, null]);
+  assert.ok(!p.warnings.some((w) => /ADEME/.test(w)), p.warnings.join(" | "));
+  assert.strictEqual(D.diagGapText([a]), "1 écart(s) : N° ADEME attendu « 2021N1001671X », relu « » (champ absent)");
+  // DPE < 01/07/2021 en création : ADEME différé, absent du plan
+  p = D.diagPlan(snap({ f: { ademe: { mode: "absent", input: null, labelText: "" } } }), OLD, { ademeDeferred: true });
+  assert.ok(!p.specs.some((x) => x.key === "ademe") && !p.warnings.some((w) => /ADEME/.test(w)));
+  // enregistré : lu dans le libellé, non saisissable
+  p = D.diagPlan(snap({ f: { ademe: { mode: "label", input: null, labelText: " 2021n1001671x " } } }), OLD);
+  const l = p.specs.find((x) => x.key === "ademe");
+  assert.deepStrictEqual([l.ok, l.act], [true, null]);
+  // input vide après le 1er enregistrement → saisissable
+  p = D.diagPlan(snap({ f: { ademe: { mode: "input", input: { present: true, visible: true, value: "", id: "body_x_textIdDpe_x_textIdDpe" }, labelText: "" } } }), OLD);
+  assert.strictEqual(p.specs.find((x) => x.key === "ademe").act.id, "body_x_textIdDpe_x_textIdDpe");
 });
 
 check("plan : lettres du DPE forcées seulement si SIGEO calcule autre chose", () => {
@@ -320,6 +347,27 @@ check("fireAndSettle : rechargement, calme, navigation en attente, délai", asyn
   assert.strictEqual(await D.diagCapped(Promise.resolve(7), 50), 7);
 });
 
+check("date : performanceEnergetique(el) dans la page, repli __doPostBack", () => {
+  const calls = [];
+  const el = { id: "body_x_txtDateReal_x_txtDateReal", name: "body$x$txtDateReal$x$txtDateReal", getAttribute: () => null };
+  const saved = { window: global.window, document: global.document };
+  global.document = { getElementById: (id) => id === el.id ? el : null };
+  try {
+    global.window = { performanceEnergetique: (e) => calls.push(["P", e === el]), __doPostBack: (t, a) => calls.push(["D", t, a]) };
+    assert.deepStrictEqual(D.diagMainHandler({ mode: "date", id: el.id }), { ok: true, via: "performanceEnergetique" });
+    assert.deepStrictEqual(calls, [["P", true]], "pas de double postback");
+    calls.length = 0;
+    global.window = { performanceEnergetique: () => { throw new Error("boum"); }, __doPostBack: (t, a) => calls.push(["D", t, a]) };
+    let r = D.diagMainHandler({ mode: "date", id: el.id });
+    assert.deepStrictEqual([r.ok, r.via, calls], [true, "__doPostBack", [["D", "body$x$txtDateReal$x$txtDateReal", ""]]], "repli avec l'UniqueID");
+    assert.ok(/boum/.test(r.note));
+    global.window = {};
+    r = D.diagMainHandler({ mode: "date", id: el.id });
+    assert.ok(!r.ok && /performanceEnergetique absente/.test(r.error) && /__doPostBack absente/.test(r.error), r.error);
+    assert.strictEqual(D.diagMainHandler({ mode: "date", id: "x" }).ok, false);
+  } finally { global.window = saved.window; global.document = saved.document; }
+});
+
 check("repli : handler onchange appelé instruction par instruction (monde MAIN)", () => {
   const calls = [];
   const el = { id: "d", value: "08/10/2020", getAttribute: (a) => a === "onchange" ? "javascript:ValidatorOnChange(event); performanceEnergetique(this); return x.y('a\\'b', 2);" : null };
@@ -350,6 +398,7 @@ check("HTML de l'étape et lecture des réglages", () => {
   assert.strictEqual(Object.keys(D.DIAG_PRESETS.analyse).length, D.DIAG_FIELDS.length);
   assert.strictEqual(D.DIAG_PRESETS.analyse.lettre_ep_forcee, "{Classe énergie}");
   assert.strictEqual(D.DIAG_IDS.ademe, "body_x_textIdDpe_x_textIdDpe");
+  assert.strictEqual(D.DIAG_CODES.ademeAbsent, "ADEME_CHAMP_ABSENT");
   assert.strictEqual(D.DIAG_DEFAULTS.timeoutMs, 15000);
   assert.ok(/scn-diag-timeout"[^>]*value="15000"/.test(D.diagStepHtml({ diagTimeout: 20000 }, String)), "ancien défaut 20 s → 15 s");
   assert.ok(/scn-diag-timeout"[^>]*value="30000"/.test(D.diagStepHtml({ diagTimeout: 30000 }, String)), "valeur personnalisée conservée");

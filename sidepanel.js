@@ -6712,7 +6712,8 @@ function diagAdapter(tabId, prefix, batch, timeoutMs) {
       const r = await run({ tabId, frameIds: [frameId] }, cfg);
       return r && r[0] ? r[0].result : null;
     },
-    // Repli « Établi le » : handler onchange appelé dans le monde de la page.
+    // Monde de la page, même frame que le formulaire : « Établi le »
+    // (performanceEnergetique, repli __doPostBack) ou handler onchange.
     execMain: async (cfg) => {
       const r = await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, world: "MAIN", func: diagMainHandler, args: [cfg] });
       return r && r[0] ? r[0].result : null;
@@ -6752,6 +6753,11 @@ async function execDiagStep(step, rowIdx, tabId, opts = {}) {
     const cur = idx >= 0 ? getCellByIndex(row, idx).trim() : "";
     if (/^OK\b/.test(cur)) return { ok: true, stop: true, info: `ligne déjà saisie (« ${scnTrunc(cur, 50)} ») — ignorée` };
   }
+  // Fiche déjà créée par un passage précédent (« fiche DPE {id} créée mais
+  // incomplète ») : reprise en modification, jamais de second DPE.
+  const prevIdx = resultCol ? diagColIdx(resultCol) : -1;
+  const prevMatch = (prevIdx >= 0 ? getCellByIndex(row, prevIdx) : "").match(/fiche DPE (\d+) (?:créée|mise à jour) mais incomplète/);
+  const knownIdDiag = prevMatch ? prevMatch[1] : "";
 
   const norm = diagNormalizeData(diagRowData(step, rowIdx));
   if (norm.errors.length) {
@@ -6779,7 +6785,7 @@ async function execDiagStep(step, rowIdx, tabId, opts = {}) {
     values: norm.v, warnings: norm.warnings, url,
     attach: step.diagAttach !== false, desc: step.diagDesc, simulate: !!step.diagSimulate,
     batch, confirmUpload: step.diagConfirm !== false, debug: !!step.diagDebug, forceLetters: step.diagForceLetters !== false,
-    timeoutMs: T, uploadTimeoutMs: step.diagUploadTimeout, rowLabel: "L" + (rowIdx + 1)
+    timeoutMs: T, uploadTimeoutMs: step.diagUploadTimeout, rowLabel: "L" + (rowIdx + 1), knownIdDiag
   });
   const w = r.warnings.length ? ` ⚠ ${r.warnings.join(" ; ")}` : "";
   if (!r.ok) {

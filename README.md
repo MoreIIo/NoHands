@@ -248,15 +248,27 @@ deux modes :
      Établi le → Conso EP → GES. Pour chacun : relire le DOM, ne remplir que
      si la valeur normalisée diffère, fireAndSettle, vérifier qu'elle a tenu
      (3 essais). Sur la vraie page, un `change` synthétique sur « Établi le »
-     n'atteint pas le postback : si rien ne se passe, le handler `onchange`
-     est appelé directement dans le monde de la page (instruction par
-     instruction : `ValidatorOnChange(event); performanceEnergetique(this)`).
+     n'atteint pas `performanceEnergetique` : après l'écriture de la date,
+     `performanceEnergetique(el)` est appelé **directement dans le monde de
+     la page** (`chrome.scripting.executeScript({ world: "MAIN" })`, même
+     frame ; repli `__doPostBack(date)`), puis le rechargement est attendu et
+     « Valable jusqu'au » comparé au calcul (journal `✓` / `✗`).
      « Valable jusqu'au » n'est **jamais** saisi : il doit valoir le calcul
      SIGEO (avant 2013 et dès le 01/07/2021 : +10 ans −1 jour ; 2013–2017 :
      31/12/2022 ; 01/2018–06/2021 : 31/12/2024), sinon « Établi le » est
      redéclenché.
+   - **N° ADEME** (règle vérifiée le 23/11/2026) : en création, l'input
+     `body_x_textIdDpe_x_textIdDpe` n'existe que si Type = DPE et « Établi
+     le » ≥ 01/07/2021 (`ademeSaisissableAvantEnreg`). Dans ce cas il **doit**
+     être là après le rechargement de la date, sinon `ADEME_CHAMP_ABSENT` et
+     rien n'est enregistré. Pour un DPE plus ancien, il est saisi **après le
+     1er enregistrement** : Enregistrer n°1 (id de la fiche lu dans l'URL ou
+     `form.action` et journalisé avec le lien), saisie + relecture du N°,
+     Enregistrer n°2. Une fois enregistré, le N° est un texte dans
+     `span#body_x_labelIdDpe` (lu en priorité sur l'input). En simulation,
+     le N° d'un DPE d'avant 07/2021 n'est pas tenté (indiqué au journal).
    - **Phase B** — ensuite seulement, les champs sans postback : N° ADEME
-     (`body_x_textIdDpe_x_textIdDpe`), date début validité, estimations,
+     (DPE ≥ 07/2021), date début validité, estimations,
      date de référence des prix, lettres forcées, cases, résultat,
      commentaire (valeur + `input`/`change`). **Lettres** : jamais comparées
      au PDF ; si la lettre du DPE diffère de celle calculée par SIGEO, elle
@@ -277,6 +289,10 @@ deux modes :
      grille de `body_x_upcDiag`.
    - **Reprise** : tout rechargement inattendu fait repartir de la phase A
      d'après le DOM (aucun champ n'est sauté parce qu'il avait été « fait »).
+     Un échec après l'Enregistrer n°1 est signalé « fiche DPE {id} créée mais
+     incomplète (ADEME/PDF manquant…) : {lien} ». Une relance rouvre cette
+     fiche en **modification** (journal de session, colonne résultat, ou URL
+     qui contient déjà l'id) : jamais de second DPE.
    - **Journal** : pour chaque champ `attendu « … » · avant « … » · après « … »`
      et une ligne `↻ postback (champ)` à chaque rechargement.
    La popup reste ouverte. Champ ADEME absent alors qu'un N° est fourni →
@@ -685,9 +701,20 @@ rechargements pendant la saisie et la confirmation, relances sans doublon)
 et `node tests/sigeo-diag.realcase.e2e.js` (cas réel 448957 / 08/10/2020 /
 2021L2000833E / 224 / 52,6 en simulation puis enregistré, serveur lent,
 `ADEME_INVALIDE`, `VALEUR_TROP_LONGUE`, `ECART_AVANT_ENREG`,
-`ECART_APRES_ENREG`, `POSTBACK_TIMEOUT`, lettre forcée).
+`ECART_APRES_ENREG`, `POSTBACK_TIMEOUT`, lettre forcée ; depuis 2.17.0 :
+ancien DPE 24/11/2020 + ADEME 2021N1001671X → 2 enregistrements, nouveau DPE
+→ 1 seul, `ADEME_CHAMP_ABSENT`, fiche incomplète puis reprise sans doublon
+par le journal et par la colonne résultat).
 
-**Version** : 2.16.0 — **SIGEO : saisir un DPE** fiabilisée face aux
+**Version** : 2.17.0 — **SIGEO : saisir un DPE** : « Établi le » déclenché
+par `performanceEnergetique(el)` dans le monde de la page (repli
+`__doPostBack`) ; N° ADEME saisissable avant enregistrement seulement si le
+DPE est établi depuis le 01/07/2021, sinon **enregistrement en deux temps**
+(Enregistrer n°1, N° ADEME, Enregistrer n°2) ; `ADEME_CHAMP_ABSENT` au lieu
+d'un avertissement ; N° relu dans `span#body_x_labelIdDpe` en priorité ;
+« fiche DPE {id} créée mais incomplète » + reprise en modification (journal,
+colonne résultat, URL avec id), jamais de second DPE.
+2.16.0 — **SIGEO : saisir un DPE** fiabilisée face aux
 postbacks complets : `docId` par document (content.js + fonction injectée),
 fireAndSettle (rechargement ou 1,5 s de calme, 15 s → `POSTBACK_TIMEOUT`),
 repli par appel direct du handler sur « Établi le », remplissage en phases

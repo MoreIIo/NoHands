@@ -7,20 +7,26 @@
 //   - Type (changeType) → affiche le bloc consommations ;
 //   - Fournisseur : onchange → __doPostBack (cfg.fouPostback, défaut oui), bouton
 //     « Sélectionner » de type submit ;
-//   - Établi le : onchange = ValidatorOnChange(event); performanceEnergetique(this)
-//     → calcule « Valable jusqu'au » (input caché + libellé) puis postback ; comme
-//     sur la vraie page, un change SYNTHÉTIQUE n'atteint pas le postback
-//     (cfg.dateSynthetic = false par défaut) — appeler le handler, si ;
-//   - N° ADEME : input body_x_textIdDpe_x_textIdDpe affiché dès que le type est
-//     choisi (quelle que soit la date, cfg.ademeFrom pour restreindre), toujours
-//     un champ de saisie après enregistrement (cfg.ademeAfterSave = "input" ;
-//     "label" → span#body_x_labelIdDpe) ;
+//   - Établi le : onchange = ValidatorOnChange('body_x_txtDateReal_x_txtDateReal');
+//     performanceEnergetique(this) → calcule « Valable jusqu'au » (input caché +
+//     libellé) puis __doPostBack(date) ; comme sur la vraie page, un change
+//     SYNTHÉTIQUE n'atteint pas performanceEnergetique (cfg.dateSynthetic =
+//     false par défaut) — l'appeler directement dans la page, si ;
+//   - N° ADEME (faits vérifiés le 23/11/2026) : en CRÉATION, l'input
+//     body_x_textIdDpe_x_textIdDpe (avec span#body_x_titreIdDpe et les
+//     estimations) n'est généré au rechargement que si Type = DPE ET « Établi
+//     le » ≥ 01/07/2021 (quel que soit le champ qui a provoqué le rechargement) ;
+//     une fois la fiche enregistrée, l'input est présent quelle que soit la date
+//     tant qu'aucun N° n'est enregistré, puis le N° devient un texte non
+//     modifiable dans span#body_x_labelIdDpe (cfg.ademeNever : jamais d'input
+//     en création, pour simuler un champ manquant) ;
+//   - cfg.refuseUpdate : tout Enregistrer sur une fiche existante est refusé ;
 //   - Date début validité : body_x_txtDateDebValid_x_txtDateDebValid (sans postback) ;
 //   - cfg.clearOnChange = "dateDeb,comment" : la page vide ces champs au change
 //     (valeur refusée côté client) ; cfg.corruptOnSave = "ademe,ges" : le serveur
 //     enregistre une autre valeur (ADEME vidé, GES + 1) → écarts après enregistrement ;
-//   - les cases n'apparaissent qu'après la date (DPE ≥ 07/2021), les coûts
-//     annuels seulement après la conso (vérifie qu'on revérifie à chaque postback) ;
+//   - les cases et les coûts annuels n'apparaissent qu'avec une date ≥ 07/2021
+//     (revérifiés après chaque postback) ;
 //   - conso / GES → postback, lettres calculées, valeurs réaffichées « 320,00 » ;
 //   - Fournisseur et Description : onkeydown = press(cmdSave) → Entrée = Enregistrer
 //     (compté dans stats.enterSaves : doit rester à 0) ;
@@ -32,7 +38,7 @@
 //   const srv = await require("./sigeo-diag-server.js").start();
 const http = require("http");
 
-const SUPPLIERS = { "448957": "ACADE Diagnostic", "528825": "EXPERT IMMOBILIER", "410962": "DIAG A FAIRE" };
+const SUPPLIERS = { "448957": "ACADE Diagnostic", "528825": "EXPERT IMMOBILIER", "410962": "DIAG A FAIRE", "590971": "DIAG IMMO 590971" };
 
 function esc(s) { return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"); }
 function parseDate(s) {
@@ -100,11 +106,10 @@ function render(url, d, opts) {
   const cons = num(d.conso), ges = num(d.ges);
   const showConso = !!d.type;
   const dateDone = !!parseDate(d.dateReal) && opts.dateKnown;
-  const ademeFrom = parseDate(cfg.ademeFrom || "");
-  const ademeLabel = saved && cfg.ademeAfterSave === "label";
-  const showAdeme = showConso && !ademeLabel && (!ademeFrom || ((parseDate(d.dateReal) || { ts: 0 }).ts >= ademeFrom.ts));
+  const ademeLabel = saved && !!d.ademe;
+  const showAdeme = showConso && !ademeLabel && (saved || (isNew2021(d.dateReal) && !cfg.ademeNever));
   const showCases = dateDone && isNew2021(d.dateReal);
-  const showCouts = showConso && cons !== null && isNew2021(d.dateReal);
+  const showCouts = showConso && isNew2021(d.dateReal);
   const msgs = opts.msgs || [];
   const clear = String(cfg.clearOnChange || "").split(",").map((x) => x.trim()).filter(Boolean);
   const clr = (k) => clear.includes(k) ? ` onchange="this.value=''"` : "";
@@ -138,8 +143,8 @@ function render(url, d, opts) {
 </table>
 <div id="div_conso" style="${showConso ? "" : "display:none"}">
 <table class="dpe">
-  <tr><td>Établi le</td><td>Valable jusqu'au</td><td><span id="body_x_titreIdDpe">N° ADEME</span></td></tr>
-  <tr><td>${inp("dateReal", 'maxlength="10" onchange="ValidatorOnChange(event); performanceEnergetique(this);"')}</td>
+  <tr><td>Établi le</td><td>Valable jusqu'au</td><td>${showAdeme || ademeLabel ? `<span id="body_x_titreIdDpe">N° ADEME</span>` : ""}</td></tr>
+  <tr><td>${inp("dateReal", `maxlength="10" onchange="ValidatorOnChange('body_x_txtDateReal_x_txtDateReal'); performanceEnergetique(this);"`)}</td>
       <td><label id="fake_txtDateFinValid_x_txtDateFinValid">${esc(d.dateFin)}</label><input type="text" style="display:none" id="${idOf(N.dateFin)}" name="${N.dateFin}" value="${esc(d.dateFin)}"></td>
       <td>${ademeLabel ? `<span id="body_x_labelIdDpe">${esc(d.ademe)}</span>` : showAdeme ? inp("ademe", 'maxlength="13"') : ""}</td></tr>
   <tr><td>Date début validité</td><td>${inp("dateDeb", 'maxlength="10"')}</td><td></td></tr>
@@ -186,9 +191,8 @@ function press(btn) {
   return true;
 }
 function changeType() { __doPostBack("${N.type}", ""); }
-function ValidatorOnChange(event) {
-  if (!event) event = window.event;
-  var t = event.srcElement || event.target; // comme WebUIValidation.js
+function ValidatorOnChange(x) {
+  var t = typeof x === "string" ? document.getElementById(x) : ((x || window.event).srcElement || (x || window.event).target);
   return !!t;
 }
 var NH_DATE_SYNTHETIC = ${cfg.dateSynthetic ? "true" : "false"};
@@ -221,7 +225,7 @@ async function start(cfg = {}) {
   const store = new Map(); // id → données enregistrées
   const flash = new Map();
   const stats = { saves: 0, creates: 0, updates: 0, uploads: 0, enterSaves: 0, saveCloses: 0, posts: 0, refused: 0 };
-  const config = Object.assign({ redirect: false, delayMs: 0, fouPostback: true, dateSynthetic: false, ademeAfterSave: "input", ademeFrom: "" }, cfg);
+  const config = Object.assign({ redirect: false, delayMs: 0, fouPostback: true, dateSynthetic: false, ademeNever: false, refuseUpdate: false }, cfg);
   let nextId = 1147729;
 
   const server = http.createServer((req, res) => {
@@ -260,7 +264,8 @@ async function start(cfg = {}) {
         if (fields[N[k]] !== undefined) d[k] = fields[N[k]];
       }
       if (fields[N.dateFin] !== undefined) d.dateFin = fields[N.dateFin];
-      if (fields[N.ademe] !== undefined && (!saved || config.ademeAfterSave !== "label")) d.ademe = fields[N.ademe];
+      // N° ADEME modifiable tant qu'il n'est pas enregistré (ensuite : texte seul).
+      if (fields[N.ademe] !== undefined && !(saved && store.get(id).ademe)) d.ademe = fields[N.ademe];
       d.altitude = fields[N.altitude] !== undefined;
       d.nouvelles = fields[N.nouvelles] !== undefined;
       const dateKnown = !!fields.__dateKnown || target === N.dateReal;
@@ -277,6 +282,7 @@ async function start(cfg = {}) {
         if (!parseDate(d.dateReal)) errs.push("La date de réalisation est invalide.");
         if (num(d.conso) === null || num(d.ges) === null) errs.push("Consommation / émission invalides.");
         if (!saved && isNew2021(d.dateReal) && !/^\d{4}[A-Z]\d{7}[A-Z]$/.test(d.ademe)) errs.push("Le N° ADEME est obligatoire pour un DPE établi depuis le 01/07/2021.");
+        if (saved && config.refuseUpdate) errs.push("Mise à jour refusée (test).");
         if (errs.length) {
           stats.refused++;
           msgs = errs.map((t) => ({ cls: "errormsg", text: t }));

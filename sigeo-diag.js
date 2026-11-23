@@ -25,6 +25,19 @@
  *     C contrôle avant enregistrement (2 nouvelles saisies max),
  *     D Enregistrer + contrôle après, E upload du PDF.
  *     Tout rechargement inattendu fait repartir de la phase A.
+ * v2.17.0 (faits vérifiés sur SIGEO le 23/11/2026) :
+ *   - « Établi le » : un change synthétique n'atteint pas
+ *     performanceEnergetique ; après l'écriture, performanceEnergetique(el)
+ *     est appelé directement dans le monde de la page (repli __doPostBack).
+ *   - En création, l'input N° ADEME n'existe que si Type = DPE ET « Établi
+ *     le » ≥ 01/07/2021 (ademeSaisissableAvantEnreg). Sinon il apparaît après
+ *     le 1er enregistrement : enregistrement en deux temps (Enregistrer n°1,
+ *     N° ADEME, Enregistrer n°2). Champ attendu mais absent → ADEME_CHAMP_ABSENT,
+ *     rien n'est enregistré. Une fois enregistré avec une valeur, le N° est un
+ *     texte dans span#body_x_labelIdDpe.
+ *   - Échec après l'Enregistrer n°1 : « fiche DPE {id} créée mais incomplète »
+ *     (+ lien) ; une reprise rouvre cette fiche (journal, colonne résultat ou
+ *     URL avec id) en modification — jamais de second DPE.
  *
  * Garde-fous : jamais de touche Entrée (Fournisseur et Description
  * déclenchent Enregistrer), jamais « Enreg. et fermer » ; enregistrement
@@ -121,7 +134,7 @@ const DIAG_DEFAULTS = Object.freeze({
 // Codes d'erreur (en tête du message, donc de la colonne résultat).
 const DIAG_CODES = Object.freeze({
   timeout: "POSTBACK_TIMEOUT", before: "ECART_AVANT_ENREG", after: "ECART_APRES_ENREG",
-  tooLong: "VALEUR_TROP_LONGUE", ademe: "ADEME_INVALIDE"
+  tooLong: "VALEUR_TROP_LONGUE", ademe: "ADEME_INVALIDE", ademeAbsent: "ADEME_CHAMP_ABSENT"
 });
 
 /* ---------------------------------------------------------------- *
@@ -212,10 +225,17 @@ function diagExpectedValidity(date) {
   return plus10();
 }
 
-// Le champ N° ADEME n'apparaît (hypothèse) que pour un DPE ≥ 01/07/2021.
+// DPE « nouveau format » : établi le 01/07/2021 ou après.
 function diagIsNewDpe(date) {
-  const ts = diagDateTs(date);
+  const ts = diagDateTs(diagDate(date).value || "");
   return Number.isFinite(ts) && ts >= Date.UTC(2021, 6, 1);
+}
+// Règle vérifiée sur SIGEO (23/11/2026) : en CRÉATION, l'input N° ADEME
+// (#body_x_textIdDpe_x_textIdDpe) n'est généré au rechargement que si
+// Type = DPE ET « Établi le » ≥ 01/07/2021. Sinon le N° ADEME ne peut être
+// saisi qu'après le 1er enregistrement de la fiche.
+function ademeSaisissableAvantEnreg(dateEtabli) {
+  return diagIsNewDpe(dateEtabli);
 }
 
 // Texte → nombre (null si illisible). « 1 234,5 kWh/m²/an » → 1234.5 ;
@@ -646,7 +666,8 @@ function diagPageOp(cfg) {
     const a = ademeEl();
     const inp = a.el ? info(a.el) : null;
     return {
-      mode: inp && inp.visible ? "input" : (labelText ? "label" : (inp ? "hidden" : "absent")),
+      // N° enregistré (texte non modifiable) prioritaire sur l'input.
+      mode: labelText ? "label" : (inp && inp.visible ? "input" : (inp ? "hidden" : "absent")),
       input: inp, via: a.via, labelText, title: !!byId(ID.ademeTitle)
     };
   }
@@ -710,8 +731,11 @@ function diagPageOp(cfg) {
   function snapshot() {
     const up = urlParts(location.href);
     const form = byId("mainForm") || doc.forms[0];
-    let ap = null;
-    try { ap = form && form.getAttribute("action") ? urlParts(new URL(form.getAttribute("action"), location.href).href) : null; } catch (_) { /* ignoré */ }
+    let ap = null, formAction = "";
+    try {
+      formAction = form && form.getAttribute("action") ? new URL(form.getAttribute("action"), location.href).href : "";
+      ap = formAction ? urlParts(formAction) : null;
+    } catch (_) { /* ignoré */ }
     const idDiag = (up && up.idDiag !== "0" && up.idDiag) || (ap && ap.idDiag !== "0" && ap.idDiag) || (up ? up.idDiag : "");
     const g = (k) => info(byId(ID[k]));
     const f = {
@@ -737,7 +761,7 @@ function diagPageOp(cfg) {
     const needSave = /veuillez enregistrer le diagnostic/.test(fold(doc.body ? doc.body.textContent : ""));
     const save = byId(ID.save);
     return {
-      docId, leaving: leaving(), url: location.href, readyState: doc.readyState, title: doc.title,
+      docId, leaving: leaving(), url: location.href, formAction, readyState: doc.readyState, title: doc.title,
       login: !!doc.querySelector('input[type="password"]'),
       isDiag: /\/diag_manage\//i.test(location.href) && !!byId(ID.type),
       lotId: up ? up.lotId : "", idDiag,
@@ -907,6 +931,22 @@ function diagPageOp(cfg) {
 function diagMainHandler(cfg) {
   const el = document.getElementById(cfg.id);
   if (!el) return { ok: false, error: `champ introuvable (${cfg.id})` };
+  // « Établi le » (mode "date") : performanceEnergetique(el) calcule
+  // « Valable jusqu'au » puis fait __doPostBack(date) ; repli : __doPostBack
+  // direct (UniqueID = name, à défaut id).
+  if (cfg.mode === "date") {
+    const tries = [];
+    const msg = (e) => String((e && e.message) || e);
+    if (typeof window.performanceEnergetique === "function") {
+      try { window.performanceEnergetique(el); return { ok: true, via: "performanceEnergetique" }; }
+      catch (e) { tries.push("performanceEnergetique : " + msg(e)); }
+    } else tries.push("performanceEnergetique absente de la page");
+    if (typeof window.__doPostBack === "function") {
+      try { window.__doPostBack(el.name || el.id, ""); return { ok: true, via: "__doPostBack", note: tries.join(" ; ") }; }
+      catch (e) { tries.push("__doPostBack : " + msg(e)); }
+    } else tries.push("__doPostBack absente de la page");
+    return { ok: false, error: tries.join(" ; ") };
+  }
   const code = String(el.getAttribute(cfg.attr || "onchange") || "").replace(/^\s*javascript:/i, "");
   if (!code.trim()) return { ok: false, error: "aucun handler " + (cfg.attr || "onchange") };
   const ev = new Event("change", { bubbles: true });
@@ -1010,16 +1050,23 @@ function diagPlan(s, v, opts = {}) {
   add({ key: "ges", label: "Émission GES", phase: "A", kind: "num", act: { kind: "value", id: I.ges }, want: v.ges, got: val("ges") });
 
   // — Phase B (sans postback)
+  // N° ADEME : lu dans span#body_x_labelIdDpe s'il existe (enregistré), sinon
+  // dans l'input. opts.ademeDeferred (DPE < 01/07/2021 en création) : saisi
+  // après le 1er enregistrement, absent du plan d'ici là. Champ absent : écart
+  // non saisissable (ADEME_CHAMP_ABSENT est levé avant, par l'orchestrateur).
   const A = F.ademe || { mode: "absent" };
-  if (v.ademe) {
-    if (A.mode === "input") {
-      add({ key: "ademe", label: "N° ADEME", phase: "B", kind: "ademe", act: { kind: "value", locate: "ademe", id: A.input.id },
-        want: v.ademe, got: A.input.value, field: A.input });
-    } else if (A.mode === "label") {
+  if (v.ademe && !opts.ademeDeferred) {
+    if (A.mode === "label") {
       add({ key: "ademe", label: "N° ADEME", phase: "B", kind: "ademe", act: null, want: v.ademe, got: A.labelText,
         field: { present: true, visible: true, pb: false } });
-    } else warnings.push(`champ N° ADEME ${A.mode === "hidden" ? "masqué" : "absent"} sur la page : N° ${v.ademe} non saisi`);
-  } else if (A.mode === "input" && diagIsNewDpe(v.dateEtabli)) warnings.push("champ N° ADEME affiché mais N° ADEME vide dans les données");
+    } else if (A.mode === "input") {
+      add({ key: "ademe", label: "N° ADEME", phase: "B", kind: "ademe", act: { kind: "value", locate: "ademe", id: A.input.id },
+        want: v.ademe, got: A.input.value, field: A.input });
+    } else {
+      add({ key: "ademe", label: "N° ADEME", phase: "B", kind: "ademe", act: null, want: v.ademe, got: "", missing: true,
+        field: { present: false, visible: false, pb: false } });
+    }
+  } else if (!v.ademe && A.mode === "input" && diagIsNewDpe(v.dateEtabli)) warnings.push("champ N° ADEME affiché mais N° ADEME vide dans les données");
 
   if (v.dateDeb) {
     const f = fld("dateDeb");
@@ -1076,7 +1123,7 @@ function diagCompare(s, v, opts = {}) {
 
 // « 2 écart(s) : N° ADEME attendu « … », relu « … » ; … » (TOUS les écarts).
 function diagGapText(gaps) {
-  return `${gaps.length} écart(s) : ` + gaps.map((g) => `${g.label} attendu ${diagQ(diagShow(g.kind, g.want))}, relu ${diagQ(diagShow(g.kind, g.got))}`).join(" ; ");
+  return `${gaps.length} écart(s) : ` + gaps.map((g) => `${g.label} attendu ${diagQ(diagShow(g.kind, g.want))}, relu ${diagQ(diagShow(g.kind, g.got))}${g.missing ? " (champ absent)" : ""}`).join(" ; ");
 }
 
 /* ---------------------------------------------------------------- *
@@ -1151,11 +1198,12 @@ async function diagSettle(ad, read, docBefore, o = {}) {
  *   log(text, cls), sleep(ms), now(), stopped()
  * }
  * p = { values, warnings, url, attach, desc, simulate, batch, confirmUpload,
- *       forceLetters, debug, timeoutMs, uploadTimeoutMs, settleMs, rowLabel }
+ *       forceLetters, debug, timeoutMs, uploadTimeoutMs, settleMs, rowLabel,
+ *       knownIdDiag (fiche déjà créée d'après la colonne résultat) }
  * → { ok, status, code, error?, warnings[], idDiag, file, info } */
 async function diagProcess(ad, p) {
   const v = p.values;
-  const opts = { forceLetters: p.forceLetters !== false };
+  const opts = { forceLetters: p.forceLetters !== false, ademeDeferred: false };
   const warnings = [];
   const res = { ok: false, status: "ERREUR", code: "", warnings, idDiag: "", file: "", info: "" };
   const T = Math.max(3000, p.timeoutMs || DIAG_DEFAULTS.timeoutMs);
@@ -1165,8 +1213,18 @@ async function diagProcess(ad, p) {
   const sec = (ms) => Math.round(ms / 1000);
   const log = (t, c) => { if (ad.log) ad.log(t, c); };
   const warn = (w) => { if (!warnings.includes(w)) { warnings.push(w); log("⚠ " + w, "skip"); } };
+  // Fiche enregistrée pendant ce passage (Enregistrer n°1 réussi) : tout
+  // échec ultérieur le signale, avec le lien, pour une reprise sans doublon.
+  let saved1 = null, ademeConfirmed = false, pdfDone = false;
   const fail = (msg, status = "ERREUR", code = "") => {
     const c = code || (String(msg).match(/^([A-Z_]{8,}) — /) || [])[1] || "";
+    if (saved1) {
+      const miss = [v.ademe && !ademeConfirmed ? "ADEME" : "", p.attach && !pdfDone ? "PDF" : ""].filter(Boolean);
+      const note = `fiche DPE ${saved1.id || "(id introuvable)"} ${saved1.isNew ? "créée" : "mise à jour"} mais incomplète` +
+        `${miss.length ? ` (${miss.join("/")} manquant${miss.length > 1 ? "s" : ""})` : ""} : ${saved1.url}`;
+      log(note, "skip");
+      msg = `${msg} — ${note}`;
+    }
     return Object.assign(res, { ok: false, status, code: c, error: msg });
   };
   const E = (error, status = "ERREUR", code = "") => ({ error, status, code });
@@ -1214,8 +1272,11 @@ async function diagProcess(ad, p) {
     return m.errors;
   };
 
-  // — 1. Ouverture de la fiche (facultative) ; un DPE déjà enregistré dans
-  //   cette session est rouvert au lieu d'en créer un second.
+  // — 1. Ouverture de la fiche (facultative). Un DPE déjà créé (journal de
+  //   session, ou colonne résultat « fiche DPE {id} créée mais incomplète »)
+  //   est rouvert en modification : jamais de second DPE. Une URL qui porte
+  //   déjà un idDiag est ouverte telle quelle (modification).
+  const known = String(p.knownIdDiag || "").replace(/\D/g, "");
   if (p.url) {
     let url = p.url;
     const parts = diagUrlParts(url);
@@ -1224,6 +1285,9 @@ async function diagProcess(ad, p) {
       if (j0 && j0.idDiag) {
         url = diagUrlWithId(url, j0.idDiag);
         log(`DPE déjà enregistré pendant cette session (id ${j0.idDiag}) : réouverture de la fiche au lieu d'une création`);
+      } else if (known) {
+        url = diagUrlWithId(url, known);
+        log(`fiche DPE ${known} déjà créée (colonne résultat) : réouverture en modification au lieu d'une création`);
       }
     }
     const nav = await ad.navigate(url);
@@ -1249,6 +1313,9 @@ async function diagProcess(ad, p) {
   if (v.ademe && diagAdemeKey(shownAdeme) && diagAdemeKey(shownAdeme) !== v.ademe) {
     return fail(`mauvaise fiche : N° ADEME affiché ${diagAdemeKey(shownAdeme)} ≠ ${v.ademe} — rien n'a été modifié`, "PAGE");
   }
+  if (!s.saved && known) {
+    return fail(`la colonne résultat indique la fiche DPE ${known} déjà créée : ouvre-la (…/${known}) au lieu d'en créer une autre — aucun nouvel enregistrement`, "DOUBLON");
+  }
   if (!s.saved && J) {
     if (J.idDiag || ["saved", "uploading", "done"].includes(J.phase)) {
       return fail(`ce DPE a déjà été enregistré pendant cette session (fiche ${J.idDiag || "id inconnu"}) : ouvre la fiche existante${J.idDiag ? " (…/" + J.idDiag + ")" : ""} ou vide l'historique DPE — aucun nouvel enregistrement`, "DOUBLON");
@@ -1257,7 +1324,17 @@ async function diagProcess(ad, p) {
       return fail("un enregistrement de ce DPE a été lancé sans confirmation (rechargement pendant l'enregistrement ?) : vérifie dans SIGEO ; s'il n'existe pas, vide l'historique DPE puis relance", "DOUBLON");
     }
   }
-  log(`fiche ${s.lotId || "?"} · ${s.saved ? "diagnostic déjà enregistré (id " + (s.idDiag || "?") + ")" : "création"} · type ${s.f.type.text || s.f.type.value || "(vide)"}`);
+  log(`fiche ${s.lotId || "?"} · ${s.saved ? "diagnostic déjà enregistré (id " + (s.idDiag || "?") + ") : modification" : "création"} · type ${s.f.type.text || s.f.type.value || "(vide)"}`);
+
+  // N° ADEME : saisissable avant l'enregistrement seulement pour un DPE
+  // ≥ 01/07/2021 ; sinon (création) après le 1er enregistrement.
+  const ademeAvant = ademeSaisissableAvantEnreg(v.dateEtabli);
+  opts.ademeDeferred = !!v.ademe && !s.saved && !ademeAvant;
+  if (opts.ademeDeferred) {
+    log(p.simulate
+      ? "simulation : DPE avant 01/07/2021 — N° ADEME non tenté (il n'est saisissable qu'après le 1er enregistrement)"
+      : "ADEME saisi après 1er enregistrement (DPE avant 01/07/2021)");
+  }
 
   // — Fichier : retenu et contrôlé AVANT toute saisie (rien n'est enregistré si le PDF manque).
   let fileRef = null, bytes = null, fileChk = null;
@@ -1316,16 +1393,27 @@ async function diagProcess(ad, p) {
     if (pe0) return E(pe0, s0.login ? "AUTH" : "PAGE");
     const loading0 = await tabLoading();
     if (sp.note) log(sp.note);
+    // « Établi le » : un change synthétique n'atteint pas performanceEnergetique
+    // (vérifié) → écriture synchrone puis appel direct dans le monde de la page.
+    const isDate = sp.key === "dateReal" && !!ad.execMain;
     let r;
-    try { r = await ad.exec({ op: "fire", action: actOf(sp) }); } catch (e) { r = { ok: false, error: e.message || String(e) }; }
+    try { r = await ad.exec({ op: isDate ? "write" : "fire", action: actOf(sp) }); } catch (e) { r = { ok: false, error: e.message || String(e) }; }
     if (!r || !r.ok) {
       if (r && r.code) return E(`${r.code} — ${r.error}`, "ERREUR", r.code);
       return E(`saisie impossible (${sp.label}) : ${(r && r.error) || "page indisponible"}`);
     }
     changed = true;
-    let w = await settle(s0.docId, { ignoreLoading: loading0 });
     let how = "";
-    if (!w.stopped && !w.timeout && !w.reloaded && r.pb && ad.execMain) {
+    if (isDate && !r.leaving) {
+      let m;
+      try { m = await ad.execMain({ mode: "date", id: sp.act.id }); } catch (e) { m = { ok: false, error: e.message || String(e) }; }
+      if (m && m.ok) {
+        how = ` (${m.via} appelé)`;
+        log(`${sp.label} : ${m.via}() appelé dans la page${m.via === "__doPostBack" ? " — repli" : ""}${m.note ? " (" + m.note + ")" : ""}`);
+      } else log(`${sp.label} : déclenchement dans la page impossible — ${(m && m.error) || "résultat vide"}`, "skip");
+    }
+    let w = await settle(s0.docId, { ignoreLoading: loading0 });
+    if (!isDate && !w.stopped && !w.timeout && !w.reloaded && r.pb && ad.execMain) {
       // Champ à postback resté sans effet : le change synthétique n'a pas
       // atteint le postback (« Établi le ») → appel direct du handler.
       log(`${sp.label} : pas de postback après le change synthétique → appel direct du handler onchange`, "skip");
@@ -1342,6 +1430,10 @@ async function diagProcess(ad, p) {
     if (w.reloaded) log(`↻ postback (${sp.label})`);
     log(`${sp.label} : attendu ${diagQ(diagShow(sp.kind, sp.want))} · avant ${diagQ(diagShow(sp.kind, r.before))} · après ${diagQ(gotAfter(s1, sp))}` +
       `${w.reloaded ? "" : " — sans postback" + how}${why ? " — " + why : ""}`);
+    if (sp.key === "dateReal" && s1) {
+      const fin = s1.f.dateFin, got = fin.shown ?? fin.value, exp = diagExpectedValidity(v.dateEtabli);
+      log(`Valable jusqu'au : relu ${diagQ(diagNorm(got))} · calcul attendu ${exp || "?"} ${exp && diagSame("date", got, exp) ? "✓" : "✗"}`);
+    }
     if (w.reloaded) {
       const pe1 = pageError(s1);
       if (pe1) return E(pe1, s1.login ? "AUTH" : "PAGE");
@@ -1436,6 +1528,15 @@ async function diagProcess(ad, p) {
     if (st.restarts > 4) return fail("saisie non stabilisée : trop de rechargements inattendus");
     const a = await phaseA();
     if (a.error) return fail(a.error, a.status, a.code);
+    // Après le rechargement de la date, l'input N° ADEME DOIT exister pour un
+    // DPE ≥ 01/07/2021 (et pour une fiche déjà enregistrée sans N°) : sinon
+    // ADEME_CHAMP_ABSENT et aucun enregistrement.
+    const am = a.snap.f.ademe.mode;
+    if (!opts.ademeDeferred && am !== "input" && am !== "label" && (v.ademe || (!a.snap.saved && ademeAvant))) {
+      return fail(`${DIAG_CODES.ademeAbsent} — champ N° ADEME (#${DIAG_IDS.ademe}) ${am === "hidden" ? "masqué" : "absent"} après le rechargement de la date` +
+        `${!a.snap.saved && ademeAvant ? ` alors que le DPE est établi le ${v.dateEtabli} (≥ 01/07/2021) — type DPE et date bien pris en compte ?` : ""} — rien n'a été enregistré`,
+        "ERREUR", DIAG_CODES.ademeAbsent);
+    }
     const b = await phaseB();
     if (b.error) return fail(b.error, b.status, b.code);
     if (b.restart !== undefined) {
@@ -1463,49 +1564,99 @@ async function diagProcess(ad, p) {
 
   if (p.simulate) {
     return Object.assign(res, { ok: true, status: "SIMULATION", idDiag: s.idDiag !== "0" ? s.idDiag : "",
-      info: `simulation : formulaire rempli et contrôlé (${finalPlan.specs.length} valeurs : ${summary(finalPlan)}), non enregistré` });
+      info: `simulation : formulaire rempli et contrôlé (${finalPlan.specs.length} valeurs : ${summary(finalPlan)})` +
+        `${opts.ademeDeferred ? `, N° ADEME ${v.ademe} non tenté (DPE avant 01/07/2021 : saisi après le 1er enregistrement)` : ""}, non enregistré` });
   }
 
-  // — Phase D : Enregistrer (une seule fois ; jamais « Enreg. et fermer »)
-  if (!s.saved || changed) {
-    if (!s.saveBtn.present) return fail("bouton « Enregistrer » introuvable");
-    const isNew = !s.saved;
+  // — Phase D : Enregistrer (jamais « Enreg. et fermer ») — en deux temps si
+  //   le N° ADEME n'est saisissable qu'après le 1er enregistrement.
+  const ficheUrl = (snap, id) => {
+    if (id && new RegExp("/" + id + "(?:[/?#]|$)").test(snap.url)) return snap.url;
+    if (id && snap.formAction && new RegExp("/" + id + "(?:[/?#]|$)").test(snap.formAction)) return snap.formAction;
+    return id ? diagUrlWithId(snap.url, id) : snap.url;
+  };
+  const saveOnce = async (n, isNew) => {
+    if (!s.saveBtn.present) return E("bouton « Enregistrer » introuvable");
     if (isNew) await ad.journalSet(key, { phase: "saving", row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
     const before = s.docId;
     const r = await ad.exec({ op: "save" });
-    if (!r || !r.ok) return fail("Enregistrer : " + ((r && r.error) || "page indisponible"));
-    log(isNew ? "Enregistrer → création du diagnostic" : "Enregistrer → mise à jour du diagnostic");
+    if (!r || !r.ok) return E(`Enregistrer n°${n} : ${(r && r.error) || "page indisponible"}`);
+    log(`Enregistrer n°${n} → ${isNew ? "création du diagnostic" : "mise à jour du diagnostic"}`);
     const w = await settle(before, { mustReload: true });
-    if (w.stopped) return fail("arrêté pendant l'enregistrement — vérifie dans SIGEO", "ARRÊT");
-    if (w.timeout) return fail(`${DIAG_CODES.timeout} — pas de rechargement terminé ${sec(T)} s après « Enregistrer » — vérifie dans SIGEO si le diagnostic a été créé`, "ERREUR", DIAG_CODES.timeout);
+    if (w.stopped) return E(`arrêté pendant l'enregistrement n°${n} — vérifie dans SIGEO`, "ARRÊT");
+    if (w.timeout) return E(`${DIAG_CODES.timeout} — pas de rechargement terminé ${sec(T)} s après « Enregistrer » n°${n} — vérifie dans SIGEO si le diagnostic a été ${isNew ? "créé" : "mis à jour"}`, "ERREUR", DIAG_CODES.timeout);
     s = w.snap;
-    log("↻ postback (Enregistrer)");
+    log(`↻ postback (Enregistrer n°${n})`);
     const e = pageError(s);
-    if (e) return fail(e, s.login ? "AUTH" : "PAGE");
+    if (e) return E(e, s.login ? "AUTH" : "PAGE");
     const m = diagClassifyMessages(s.messages);
     m.infos.forEach((t) => log("SIGEO : " + t));
     if (m.errors.length) {
       if (isNew) await ad.journalSet(key, { phase: "filling", row: p.rowLabel || "", lotId: s.lotId, t: ad.now(), refus: m.errors.join(" | ") });
-      return fail("SIGEO a refusé l'enregistrement : " + m.errors.join(" | "), "REFUS");
+      return E(`SIGEO a refusé l'enregistrement${n > 1 ? " n°" + n : ""} : ${m.errors.join(" | ")}`, "REFUS");
     }
-    if (!m.success) return fail("pas de message « Enregistrement réussi ! » après Enregistrer — vérifie dans SIGEO");
-    if (!s.attach.present || s.needSave) return fail("enregistré, mais le bloc « Joindre un document » n'apparaît pas");
-    res.idDiag = s.idDiag && s.idDiag !== "0" ? s.idDiag : "";
-    await ad.journalSet(key, { phase: "saved", idDiag: res.idDiag, url: s.url, row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
-    log(`enregistrement réussi${res.idDiag ? " — diagnostic " + res.idDiag : ""}`, "ok");
+    if (!m.success) return E(`pas de message « Enregistrement réussi ! » après Enregistrer n°${n} — vérifie dans SIGEO`);
+    if (!s.attach.present || s.needSave) return E(`enregistré (n°${n}), mais le bloc « Joindre un document » n'apparaît pas`);
+    const id = s.idDiag && s.idDiag !== "0" ? s.idDiag : "";
+    if (id) res.idDiag = id;
+    await ad.journalSet(key, { phase: "saved", idDiag: res.idDiag, url: ficheUrl(s, res.idDiag), row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
+    return { ok: true };
+  };
+
+  if (!s.saved || changed) {
+    const isNew = !s.saved;
+    const r1 = await saveOnce(1, isNew);
+    if (r1.error) return fail(r1.error, r1.status, r1.code);
+    saved1 = { id: res.idDiag, url: ficheUrl(s, res.idDiag), isNew };
+    if (isNew && !res.idDiag) warn("id du diagnostic introuvable dans l'URL et dans form.action");
+    log(`enregistrement n°1 réussi — fiche DPE ${res.idDiag || "(id introuvable)"} ${isNew ? "créée" : "mise à jour"} : ${saved1.url}`, "ok");
   } else {
     res.idDiag = s.idDiag && s.idDiag !== "0" ? s.idDiag : "";
-    if (!J) await ad.journalSet(key, { phase: "saved", idDiag: res.idDiag, url: s.url, row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
+    if (!J) await ad.journalSet(key, { phase: "saved", idDiag: res.idDiag, url: ficheUrl(s, res.idDiag), row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
     log("diagnostic déjà enregistré et conforme : pas de nouvel enregistrement");
   }
 
-  // — Contrôle APRÈS enregistrement (même comparateur), avant tout upload
+  // — N° ADEME pas encore enregistré (DPE < 01/07/2021 : le champ n'apparaît
+  //   qu'après le 1er enregistrement) : saisi, relu, puis Enregistrer n°2.
+  //   Enregistré = texte dans span#body_x_labelIdDpe (comparé au contrôle).
+  opts.ademeDeferred = false;
+  if (v.ademe) {
+    const A = s.f.ademe;
+    if (A.mode === "input") {
+      const sp = { key: "ademe", label: "N° ADEME", kind: "ademe", want: v.ademe, act: { kind: "value", locate: "ademe", id: A.input.id } };
+      const w0 = await stable();
+      if (w0.stopped) return fail("arrêté par l'utilisateur", "ARRÊT");
+      if (w0.timeout) return fail(`${DIAG_CODES.timeout} — page toujours en rechargement avant la saisie du N° ADEME`, "ERREUR", DIAG_CODES.timeout);
+      s = w0.snap;
+      let r;
+      try { r = await ad.exec({ op: "write", action: actOf(sp) }); } catch (e) { r = { ok: false, error: e.message || String(e) }; }
+      if (!r || !r.ok) return fail(r && r.code ? `${r.code} — ${r.error}` : `saisie du N° ADEME impossible : ${(r && r.error) || "page indisponible"}`, "ERREUR", (r && r.code) || "");
+      log(`N° ADEME : attendu ${diagQ(v.ademe)} · avant ${diagQ(diagNorm(r.before))} · après ${diagQ(diagNorm(r.after))} (après le 1er enregistrement)`);
+      if (r.leaving || (r.docId && r.docId !== s.docId)) return fail("la page s'est rechargée pendant la saisie du N° ADEME — relance l'étape (la fiche sera reprise en modification)");
+      const s2 = await read();
+      const relu = s2 && s2.f.ademe.input ? s2.f.ademe.input.value : "";
+      if (!s2 || s2.docId !== s.docId || diagAdemeKey(relu) !== v.ademe) {
+        return fail(`${DIAG_CODES.before} — N° ADEME non retenu par la page : relu ${diagQ(diagNorm(relu))} au lieu de ${diagQ(v.ademe)}`, "ERREUR", DIAG_CODES.before);
+      }
+      s = s2;
+      const r2 = await saveOnce(2, false);
+      if (r2.error) return fail(r2.error, r2.status, r2.code);
+      log(`enregistrement n°2 réussi — N° ADEME ${v.ademe} sur la fiche DPE ${res.idDiag || "?"}`, "ok");
+    } else if (A.mode !== "label") {
+      return fail(`${DIAG_CODES.ademeAbsent} — champ N° ADEME (#${DIAG_IDS.ademe}) ${A.mode === "hidden" ? "masqué" : "absent"} après l'enregistrement — N° ${v.ademe} non saisi, upload annulé`, "ERREUR", DIAG_CODES.ademeAbsent);
+    }
+  }
+
+  // — Contrôle APRÈS enregistrement (même comparateur), avant tout upload.
+  //   N° ADEME lu dans span#body_x_labelIdDpe s'il existe, sinon dans l'input.
   const pa = diagPlan(s, v, opts);
   pa.warnings.forEach(warn);
   const bad = pa.specs.filter((x) => !x.ok);
-  if (bad.length) return fail(`${DIAG_CODES.after} — ${diagGapText(bad)} — upload annulé`, "ERREUR", DIAG_CODES.after);
   const ademeSpec = pa.specs.find((x) => x.key === "ademe");
+  ademeConfirmed = !v.ademe || !!(ademeSpec && ademeSpec.ok);
+  if (bad.length) return fail(`${DIAG_CODES.after} — ${diagGapText(bad)} — upload annulé`, "ERREUR", DIAG_CODES.after);
   const ademeOk = ademeSpec && ademeSpec.ok ? diagAdemeKey(ademeSpec.got) : "";
+  if (ademeOk) log(`N° ADEME relu après enregistrement : ${ademeOk} (${s.f.ademe.mode === "label" ? "texte enregistré" : "champ de saisie"})`);
   log(`contrôle après enregistrement : ${pa.specs.length} valeur(s) conforme(s) · ${summary(pa)}`, "ok");
   const fn = s.f.fouName || {};
   if (fn.name) log(`fournisseur : ${v.fou} — ${fn.name}`);
@@ -1593,6 +1744,7 @@ async function diagProcess(ad, p) {
   }
   if (!diagRowHasFile(row, name)) warn(`nom ${name} non retrouvé dans la ligne « ${desc} » (${row.join(" · ")})`);
   await ad.journalSet(key, { phase: "done", idDiag: res.idDiag, file: name, row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
+  pdfDone = true;
   log(`PDF joint : ${s.grid.count} document(s) — ${row.join(" · ")}`, "ok");
   return Object.assign(res, { ok: true, status: "OK", file: name, info: `${okInfo()} — PDF joint (${name})` });
 }
@@ -1691,7 +1843,7 @@ function diagStepRead(el) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     DIAG_IDS, DIAG_FIELDS, DIAG_PRESETS, DIAG_DEFAULTS,
-    diagNorm, diagFold, diagDate, diagDateEq, diagSerialToDate, diagExpectedValidity, diagIsNewDpe,
+    diagNorm, diagFold, diagDate, diagDateEq, diagSerialToDate, diagExpectedValidity, diagIsNewDpe, ademeSaisissableAvantEnreg,
     diagParseNum, diagNum, diagNumEq, diagBool, diagLetter, diagAdeme, diagAdemeKey, diagType, diagNormalizeData,
     diagSame, diagShow, diagQ, DIAG_CODES, DIAG_PHASE_A,
     diagMatchFile, diagCheckFileAdeme, diagIsPdf, diagToBase64, diagFmtSize,

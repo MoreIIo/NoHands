@@ -5,7 +5,7 @@
 //   NODE_PATH=$(npm root -g) node tests/sigeo-diag.panel.e2e.js
 // Critères vérifiés :
 //   1. DPE ≥ 07/2021 (ADEME + coûts) saisi de bout en bout, PDF joint « DPE », compteur à 1 ;
-//   2. DPE d'avant 07/2021 : N° ADEME saisi aussi (champ présent quelle que soit la date) ;
+//   2. DPE d'avant 07/2021 : N° ADEME saisi après le 1er enregistrement (Enregistrer n°2) ;
 //   3. fichier absent / ambigu / mauvais ADEME / pas un PDF → arrêt AVANT toute saisie ;
 //   4. refus serveur après Enregistrer → arrêt, texte de #msgbody dans le journal ;
 //   5. rechargements (pendant la confirmation, pendant la saisie, relance, page /0)
@@ -185,7 +185,7 @@ const { makePdf, COLS, row } = H;
   const res = {};
   for (let r = 2; r <= 8; r++) res[r + 1] = await cell(r, "Saisie DPE");
   console.log(res);
-  // 2. ancien DPE (2019) : N° ADEME saisi aussi, validité 2018–06/2021 → 31/12/2024
+  // 2. ancien DPE (2019) : N° ADEME saisi après le 1er enregistrement, validité 2018–06/2021 → 31/12/2024
   assert.ok(/^OK — diagnostic \d+, ADEME 1975V1000123A — PDF joint \(IM0393600_12_DPE_2019-05-12\.pdf\)/.test(res[3]), res[3]);
   d = lotDiags("393600")[0];
   assert.ok(d && d.ademe === "1975V1000123A" && d.dateFin === "31/12/2024" && d.docs.length === 1, JSON.stringify(d));
