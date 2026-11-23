@@ -300,7 +300,13 @@ function diagLetter(input) {
 
 const DIAG_ADEME_FMT = /^\d{4}[A-Z]\d{7}[A-Z]$/;
 const diagAdemeKey = (s) => diagNorm(s).toUpperCase().replace(/\s+/g, "");
+// N° ADEME « non communiqué » : NC, non communiqué, non trouvé, [NON EMIS
+// ADEME], aucun, néant, -, 99999… → pas de N° à saisir (ni d'erreur).
+const DIAG_ADEME_NC = /^(n\.?\s*c\.?|non\s*communique|non\s*trouve|non\s*emis(\s*(a|l')?\s*ademe)?|non\s*enregistre|aucun|neant|sans|inconnu|-+|9{4,}|0{4,})$/;
 function diagAdeme(input) {
+  const raw = diagNorm(input);
+  const f = diagFold(raw).replace(/^[\[(«"\s]+|[\])»"\s.]+$/g, "");
+  if (raw && DIAG_ADEME_NC.test(f)) return { ok: true, value: "", plausible: true, nc: true, raw };
   const s = diagAdemeKey(input);
   return { ok: true, value: s, plausible: !s || DIAG_ADEME_FMT.test(s) };
 }
@@ -354,8 +360,10 @@ function diagNormalizeData(raw, now = Date.now()) {
 
   const a = diagAdeme(txt("numero_ademe"));
   v.ademe = a.value;
+  v.ademeNc = !!a.nc;
+  if (a.nc) warnings.push(`N° ADEME non communiqué (« ${a.raw} ») : non saisi`);
   if (v.ademe && !a.plausible) errors.push(`${DIAG_CODES.ademe} — « ${v.ademe} » : format attendu 4 chiffres, 1 lettre, 7 chiffres, 1 lettre (ex. 2021L2000833E)`);
-  if (!v.ademe && v.dateEtabli && diagIsNewDpe(v.dateEtabli)) warnings.push(`N° ADEME vide pour un DPE établi le ${v.dateEtabli}`);
+  if (!v.ademe && !a.nc && v.dateEtabli && diagIsNewDpe(v.dateEtabli)) warnings.push(`N° ADEME vide pour un DPE établi le ${v.dateEtabli}`);
 
   const num = (k, key, maxLen, required) => {
     const r = diagNum(g(k).text, g(k).cell, maxLen);
@@ -1070,7 +1078,7 @@ function diagPlan(s, v, opts = {}) {
       add({ key: "ademe", label: "N° ADEME", phase: "B", kind: "ademe", act: null, want: v.ademe, got: "", missing: true,
         field: { present: false, visible: false, pb: false } });
     }
-  } else if (!v.ademe && A.mode === "input" && diagIsNewDpe(v.dateEtabli)) warnings.push("champ N° ADEME affiché mais N° ADEME vide dans les données");
+  } else if (!v.ademe && !v.ademeNc && A.mode === "input" && diagIsNewDpe(v.dateEtabli)) warnings.push("champ N° ADEME affiché mais N° ADEME vide dans les données");
 
   if (v.dateDeb) {
     const f = fld("dateDeb");
@@ -1767,7 +1775,9 @@ async function diagProcess(ad, p) {
     none: "pas de N° ADEME (DPE sans champ ADEME) : fichier retenu par son nom"
   }[chk.status];
   if (chk.status === "unknown" && p.batch && !p.confirmUpload) return fail(`${chkTxt} — upload refusé en batch sans confirmation`, "FICHIER");
-  if (!p.batch || p.confirmUpload || chk.status === "unknown") {
+  // Confirmation avant upload selon l'option (ligne active comme boucle) ;
+  // toujours demandée si le N° ADEME du PDF n'a pas pu être vérifié.
+  if (p.confirmUpload || chk.status === "unknown") {
     const ok = await ad.confirm({
       row: p.rowLabel || "", lot: v.lot || s.lotId, fiche: res.idDiag || s.idDiag || "", ademe: ref,
       ademeSrc: ademeOk ? "confirmé par SIGEO" : (ref ? "données de la ligne" : ""),
@@ -1883,7 +1893,7 @@ function diagStepHtml(step, esc) {
         <input type="file" class="scn-diag-folderinput" webkitdirectory multiple hidden />
       </div>
       <div class="scn-row scn-only-diag">
-        <label class="checkbox-row" title="En boucle, chaque upload attend ta confirmation (toujours le cas sur la ligne active)"><input type="checkbox" class="scn-diag-confirm" ${step.diagConfirm === false ? "" : "checked"} /> boucle : confirmer chaque upload</label>
+        <label class="checkbox-row" title="Coché : chaque upload attend un clic sur « Joindre ». Décoché : le PDF est joint automatiquement à la fin (ligne active et boucle) ; une confirmation reste demandée si le N° ADEME du PDF n'a pas pu être vérifié (scan)."><input type="checkbox" class="scn-diag-confirm" ${step.diagConfirm === false ? "" : "checked"} /> confirmer avant de joindre le PDF</label>
         <label class="checkbox-row" title="Remplit et contrôle tout, sans cliquer Enregistrer ni joindre le PDF"><input type="checkbox" class="scn-diag-simulate" ${step.diagSimulate ? "checked" : ""} /> simulation</label>
       </div>
       <div class="scn-row scn-only-diag">

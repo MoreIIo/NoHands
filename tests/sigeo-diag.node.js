@@ -96,6 +96,24 @@ check("type, oui/non, lettres, ADEME", () => {
   assert.deepStrictEqual(D.diagAdeme(" 2021l2000833e"), { ok: true, value: "2021L2000833E", plausible: true });
   assert.strictEqual(D.diagAdeme("ABC").plausible, false);
   assert.strictEqual(D.diagAdeme("2021L200083").plausible, false);
+  // N° non communiqué : pas d'erreur, rien à saisir
+  for (const x of ["NC", "nc", "N.C.", "non communiqué", "Non trouvé", "[NON EMIS ADEME]", "non émis", "99999", "-", "aucun"]) {
+    const r = D.diagAdeme(x);
+    assert.ok(r.nc && r.value === "" && r.plausible, "NC : " + x);
+  }
+  assert.ok(!D.diagAdeme("2021N1001671X").nc);
+});
+
+check("données de la ligne : N° ADEME « NC »", () => {
+  const raw = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { text: v }]));
+  const r = D.diagNormalizeData(raw({ code_fournisseur: "448957", date_etabli: "30/04/2025", numero_ademe: "NC", conso_ep: "107", emission_ges: "5" }), Date.UTC(2026, 10, 23));
+  assert.deepStrictEqual(r.errors, [], "plus d'ADEME_INVALIDE pour NC");
+  assert.deepStrictEqual([r.v.ademe, r.v.ademeNc], ["", true]);
+  assert.ok(r.warnings.includes("N° ADEME non communiqué (« NC ») : non saisi"), r.warnings.join(" | "));
+  assert.ok(!r.warnings.some((w) => /N° ADEME vide/.test(w)));
+  const p = D.diagPlan(snap({ f: { ademe: { mode: "input", input: { present: true, visible: true, value: "", id: "x" }, labelText: "" } } }),
+    Object.assign({}, REALV, { ademe: "", ademeNc: true, dateEtabli: "30/04/2025" }));
+  assert.ok(!p.specs.some((x) => x.key === "ademe") && !p.warnings.some((w) => /ADEME/.test(w)));
 });
 
 check("données de la ligne : obligatoires, colonnes absentes, avertissements", () => {

@@ -162,5 +162,10 @@ function unitTests() {
   assert.strictEqual(g(E, "DPE analyse"), "À VÉRIFIER");
   assert.ok(/absent de la liste : « DIAG EXPRESS SUD-OUEST »/.test(g(E, "Remarques DPE")), g(E, "Remarques DPE"));
   assert.strictEqual(g(E, "Classe énergie"), "C");
+  // N° ADEME absent : « NC » (évaluation thermique / non émis ADEME) ou « non trouvé »
+  const ix = ds.DS_COLS.indexOf("N° ADEME");
+  const r0 = Object.assign(ds.dsNewRecord(), { etabli: { y: 2025, m: 4, d: 30 } });
+  assert.strictEqual(ds.dsRecordValues(r0, "x.pdf")[ix], "non trouvé");
+  assert.strictEqual(ds.dsRecordValues(Object.assign(r0, { nonOfficiel: true }), "x.pdf")[ix], "NC");
   console.log("\n✓ moteur Analyse DPE OK");
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -22,7 +22,9 @@
 //  13. PDF absent de la liste juste après l'upload : « Enregistrer » recliqué,
 //      document vu au 2e → OK avec avertissement, un seul upload ;
 //  14. PDF jamais visible : erreur après 3 tentatives, puis relances sans
-//      nouvel upload jusqu'à ce qu'il apparaisse.
+//      nouvel upload jusqu'à ce qu'il apparaisse ;
+//  15. N° ADEME « NC » : rien de saisi, pas d'erreur ; PDF joint
+//      automatiquement sur la ligne active (confirmation décochée).
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -78,7 +80,8 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
     /* L13 */ row({ code_fournisseur: "448957", date_etabli: "15/03/2024", numero_ademe: "2475E1234567X", conso_ep: "320", emission_ges: "9",
       lettre_ep_forcee: "D", lettre_ges_forcee: "B", cout_min: "1240", cout_max: "1680", date_prix: "01/01/2021", lot: "590012" }),
     /* L14 */ row(Object.assign({}, NEW, { lot: "590013" })),
-    /* L15 */ row(Object.assign({}, NEW, { lot: "590014" }))
+    /* L15 */ row(Object.assign({}, NEW, { lot: "590014" })),
+    /* L16 */ row(Object.assign({}, OLD, { lot: "590015", numero_ademe: "NC", fichier_dpe: "DPE_2021N1001671X.pdf" }))
   ]]);
 
   await panel.evaluate((u) => {
@@ -284,6 +287,19 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
   assert.ok(/^OK — diagnostic \d+, ADEME 2222E0000001A — PDF joint \(DPE_2222E0000001A\.pdf\), visible après 1 nouvel\(s\) enregistrement\(s\) ⚠ document « DPE » apparu après le 1er nouvel enregistrement \(1\/3\)/.test(c), c);
   assert.strictEqual(lotDiags("590014").length, 1, "une seule fiche");
   assert.strictEqual(lotDiags("590014")[0].docs.length, 1, "un seul document : jamais ré-uploadé");
+
+  // ===== 15. N° ADEME « NC » + PDF joint automatiquement (ligne active, sans « Joindre ») =====
+  await setOpt(".scn-diag-confirm", false);
+  s0 = stats();
+  run = await runActive(panel, 15, async () => { throw new Error("aucune confirmation attendue"); });
+  console.log("--- 15. ADEME NC, jonction automatique ---\n" + run.log);
+  await setOpt(".scn-diag-confirm", true);
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 1, updates: 0, uploads: 1, saves: 1 }, "1 enregistrement, pas d'Enregistrer n°2, PDF joint");
+  d = lotDiags("590015")[0];
+  assert.deepStrictEqual([d.ademe, d.docs.length, d.docs[0].name], ["", 1, "DPE_2021N1001671X.pdf"]);
+  c = await cell(15, "Saisie DPE");
+  assert.ok(/^OK — diagnostic \d+ — PDF joint \(DPE_2021N1001671X\.pdf\) ⚠ N° ADEME non communiqué \(« NC »\) : non saisi/.test(c), c);
+  assert.ok(!/ADEME_INVALIDE/.test(c) && !/après 1er enregistrement/.test(run.log));
 
   assert.strictEqual(srv.stats.enterSaves, 0, "jamais de touche Entrée");
   assert.strictEqual(srv.stats.saveCloses, 0, "jamais « Enreg. et fermer »");

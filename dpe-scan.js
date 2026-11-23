@@ -1159,7 +1159,9 @@ function dsRecordValues(rec, fileName) {
   const couts = dsCoutsUtiles(rec);
   return [
     dsStatus(rec), fileName || "", sup ? sup.entry.code : "",
-    dsDateFr(rec.etabli), dsDateFr(rec.valable), rec.ademe || "",
+    // Pas de N° : « NC » (évaluation thermique / non émis ADEME) ou « non
+    // trouvé » — compris tous deux par l'étape de saisie (pas de N° saisi).
+    dsDateFr(rec.etabli), dsDateFr(rec.valable), rec.ademe || (rec.nonOfficiel ? "NC" : "non trouvé"),
     dsFmtNum(rec.epM2), rec.lettreEp || "", dsFmtNum(rec.gesM2), rec.lettreGes || "",
     couts ? dsFmtNum(rec.coutMin) : "", couts ? dsFmtNum(rec.coutMax) : "", couts ? dsDateFr(rec.prixRef) : "",
     rem.join(" ; ")

@@ -318,8 +318,12 @@ deux modes :
    texte → arrêt ; aucun lisible (scan) → confirmation obligatoire (refus en
    boucle sans confirmation). Avant l'upload, le panneau affiche ligne, lot,
    fiche, N° ADEME (confirmé par SIGEO), fichier et contrôle, et demande
-   confirmation (toujours sur la ligne active ; en boucle selon « confirmer
-   chaque upload », coché par défaut). Upload : Description « DPE » puis
+   confirmation selon « confirmer avant de joindre le PDF » (décoché : PDF
+   joint automatiquement, ligne active comme boucle ; confirmation toujours
+   demandée si le N° ADEME du PDF n'a pas pu être vérifié ; coché par
+   défaut). N° ADEME « NC », « non communiqué », « non trouvé »,
+   « [NON EMIS ADEME] », « 99999 »… : aucun N° saisi, simple avertissement
+   (le PDF est alors retenu par son nom). Upload : Description « DPE » puis
    fichier posé dans le champ (`DataTransfer`, octets transmis en base64), le
    `change` déclenche l'envoi ; vérifié par le compteur « N Résultat(s) »
    (+1) et la ligne « DPE ».
@@ -730,7 +734,8 @@ par le journal et par la colonne résultat ; depuis 2.17.1 : PDF visible
 seulement après un nouvel « Enregistrer », PDF jamais visible puis relances
 sans nouvel upload).
 
-**Version** : 2.17.3 — **DPE SIGEO** : si aucun DPE n'est trouvé en gérance (ou si la page est introuvable), la fiche lot **syndic** est vérifiée (`…/page.aspx/fr/sig_imm/lot_manage/syn/{IM_format}/{lot}`, champ « Repli syndic », vide = désactivé) ; nouvelle colonne `DPE source` (gérance / syndic / gérance + syndic), variable `{source}` dans les textes de statut ; la page Documents est suivie depuis une fiche lot qui contient d'autres tableaux.
+**Version** : 2.17.4 — **Saisir un DPE** : N° ADEME « NC » / non communiqué / non trouvé / 99999 accepté (rien de saisi, avertissement) ; option « confirmer avant de joindre le PDF » valable aussi sur la ligne active (décochée → PDF joint automatiquement). **Analyse DPE** : N° ADEME absent → « NC » (évaluation thermique / non émis ADEME) ou « non trouvé ».
+2.17.3 — **DPE SIGEO** : si aucun DPE n'est trouvé en gérance (ou si la page est introuvable), la fiche lot **syndic** est vérifiée (`…/page.aspx/fr/sig_imm/lot_manage/syn/{IM_format}/{lot}`, champ « Repli syndic », vide = désactivé) ; nouvelle colonne `DPE source` (gérance / syndic / gérance + syndic), variable `{source}` dans les textes de statut ; la page Documents est suivie depuis une fiche lot qui contient d'autres tableaux.
 2.17.2 — **Analyse DPE** : n'écrit plus que les colonnes utiles à la saisie SIGEO (plus de totaux annuels, surface, adresse, diagnostiqueur, certification, lecture, fournisseur lu / de la liste, type) ; nouvelle colonne `Prix indexés au` ; coûts et date des prix seulement pour un DPE ≥ 01/07/2021 ; préréglage de l'étape de saisie : `{PDF analysé}`, `{Prix indexés au}`.
 2.17.1 — **SIGEO : saisir un DPE** : faux négatif de la
 vérification d'upload corrigé — PDF absent de la liste juste après l'upload
