@@ -292,6 +292,7 @@
       <label><input type="radio" name="extractKind" value="sigeoIm" /> Recherche IM SIGEO (adresse → N° E.I.)</label>
       <label><input type="radio" name="extractKind" value="sigeoLot" /> Recherche d'id interne de lot (IM + LT → id SIGEO)</label>
       <label><input type="radio" name="extractKind" value="sigeoDpe" /> DPE SIGEO (vérifier + télécharger le plus récent)</label>
+      <label><input type="radio" name="extractKind" value="dpeScan" /> Analyse DPE (dossier de PDF → Excel : dates, énergie, GES, fournisseur FU)</label>
     </div>
 
     <div id="imExtractBox" hidden>
@@ -512,6 +513,54 @@
         <button class="btn" id="dpeTestBtn" type="button" title="Ouvre la page Documents de la ligne de départ et liste les DPE trouvés, sans rien télécharger ni écrire"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester sur la ligne de départ</button>
       </div>
       <p class="hint imx-test-result" id="dpeTestResult"></p>
+    </div>
+
+    <div id="dsExtractBox" hidden>
+      <p class="hint">Lit les PDF de DPE d'un dossier (par ex. <code>Téléchargements\DPE_SIGEO</code>, rempli par « DPE SIGEO ») et écrit pour chaque lot : dates, énergie primaire, GES, classes, coûts, n° ADEME, surface, diagnostiqueur, et le <strong>n° fournisseur FU</strong> d'après ta liste. Tout est lu sur ce PC (pdf.js + OCR local pour les scans et l'étiquette énergie) : rien n'est envoyé sur internet. Chaque PDF est rattaché à sa ligne par la colonne <strong>DPE fichier</strong>, sinon par l'<strong>IM</strong> et le <strong>lot</strong> de son nom (<code>IM0393664_10_DPE_…pdf</code>). Sans tableau chargé, une ligne est créée par PDF.</p>
+      <div class="field-row">
+        <label class="btn primary" for="dsFolderInput" title="Choisis le dossier des DPE (sous-dossiers compris)"><svg class="icon icon-sm"><use href="#icon-upload"/></svg> Choisir le dossier</label>
+        <input type="file" id="dsFolderInput" webkitdirectory multiple hidden />
+        <label class="btn" for="dsFilesInput" title="Ou choisis un ou plusieurs PDF / images">ou des fichiers</label>
+        <input type="file" id="dsFilesInput" accept=".pdf,application/pdf,.png,.jpg,.jpeg" multiple hidden />
+      </div>
+      <p class="hint" id="dsFilesInfo">Aucun DPE choisi.</p>
+      <div class="field-row">
+        <label for="dsFileCol">Rattacher par la colonne :</label>
+        <select id="dsFileCol" data-colselect="optional" title="Colonne contenant le nom du PDF (écrite par « DPE SIGEO »)"></select>
+      </div>
+      <div class="field-row">
+        <label for="dsImCol">sinon IM :</label>
+        <select id="dsImCol" data-colselect="optional"></select>
+        <label for="dsLotCol">lot :</label>
+        <select id="dsLotCol" data-colselect="optional"></select>
+      </div>
+      <label class="checkbox-row" title="Les PDF qui ne correspondent à aucune ligne sont ajoutés en bas du tableau (IM et lot lus dans le nom du fichier)."><input type="checkbox" id="dsAppend" checked /> ajouter en bas du tableau les PDF sans ligne correspondante</label>
+      <div class="field-row">
+        <label for="dsOcr">OCR :</label>
+        <select id="dsOcr" title="L'OCR lit les pages scannées et l'étiquette énergie (une image même dans les PDF texte). ~10-30 s par page.">
+          <option value="auto">auto : scans + valeurs manquantes (recommandé)</option>
+          <option value="always">toujours la page DPE (recoupe l'étiquette, plus lent)</option>
+          <option value="never">jamais (texte des PDF seulement)</option>
+        </select>
+      </div>
+      <details class="imx-adv" id="dsSupBox">
+        <summary>Fournisseurs → n° FU (<span id="dsSupCount">…</span>)</summary>
+        <p class="hint">Une ligne par fournisseur : <code>NOM : numéro FU</code> (aussi accepté : <code>-&gt;</code>, <code>;</code>, tabulation). Le nom est cherché dans la société du DPE, puis le bloc diagnostiqueur (e-mail compris), puis le texte ; majuscules, accents et ponctuation sont ignorés. Une faute d'une lettre (SOCOTECH ≈ SOCOTEC) est rapprochée mais la ligne passe « À VÉRIFIER ». Liste enregistrée dans le navigateur, commune à tous les profils : complète-la quand tu trouves de nouveaux numéros.</p>
+        <textarea id="dsSuppliers" rows="9" spellcheck="false"></textarea>
+        <p class="hint" id="dsSupWarn"></p>
+        <div class="field-row">
+          <label class="btn" for="dsSupFile" title="Remplace la liste par un fichier .txt (une ligne NOM : numéro)"><svg class="icon icon-sm"><use href="#icon-upload"/></svg> Importer .txt</label>
+          <input type="file" id="dsSupFile" accept=".txt,.csv,text/plain" hidden />
+          <button class="btn" id="dsSupExport" type="button"><svg class="icon icon-sm"><use href="#icon-download"/></svg> Exporter .txt</button>
+        </div>
+      </details>
+      <p class="hint">Colonnes écrites (créées si absentes) : <code>DPE analyse</code> (OK / À VÉRIFIER / ÉCHEC / Pas de PDF), <code>PDF analysé</code>, <code>Fournisseur DPE</code> (société lue), <code>Fournisseur (liste)</code>, <code>N° FU</code>, <code>Type diagnostic</code>, <code>Établi le</code>, <code>Valable jusqu'au</code>, <code>Énergie primaire (kWh/m²/an)</code> et totale, <code>Classe énergie</code>, <code>GES (kg CO2/m²/an)</code> et total, <code>Classe GES</code>, <code>Coût min/max (€/an)</code>, <code>N° ADEME</code>, <code>Surface (m²)</code>, <code>Adresse DPE</code>, <code>Diagnostiqueur</code>, <code>N° certification</code>, <code>Lecture</code>, <code>Remarques DPE</code>.</p>
+      <div class="field-row">
+        <button class="btn" id="dsTestBtn" type="button" title="Analyse le PDF de la ligne de départ et affiche le résultat, sans rien écrire"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester sur la ligne de départ</button>
+        <button class="btn" id="dsExportBtn" type="button" title="Télécharge le tableau (comme l'onglet Export)"><svg class="icon icon-sm"><use href="#icon-download"/></svg> Télécharger l'Excel</button>
+        <button class="btn" id="dsSupAddUnknown" type="button" hidden title="Ajoute en bas de la liste « Fournisseurs → n° FU » les sociétés lues dans les DPE mais absentes de la liste (numéro FU à compléter)"><svg class="icon icon-sm"><use href="#icon-plus"/></svg> Ajouter les fournisseurs inconnus à la liste</button>
+      </div>
+      <p class="hint imx-test-result" id="dsTestResult"></p>
     </div>
 
     <div id="stdExtractBox">
@@ -754,6 +803,7 @@
   <script src="sigeo-im.js"></script>
   <script src="sigeo-lot.js"></script>
   <script src="sigeo-dpe.js"></script>
+  <script src="dpe-scan.js"></script>
   <script src="sidepanel.js"></script>
   <script src="update-check.js"></script>
 </body>

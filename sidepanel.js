@@ -2635,7 +2635,7 @@ function resolveFieldTemplate(str, row) {
 // Tous les champs texte du panneau, sauf les zones de collage de données
 // (Excel/JSON/modèle) où « { » et Entrée font partie du contenu collé.
 const AC_FIELDS_SELECTOR = 'input[type="text"], input:not([type]), textarea';
-const AC_EXCLUDE_SELECTOR = "#pasteArea, #jsonTextArea, #newModelColumns";
+const AC_EXCLUDE_SELECTOR = "#pasteArea, #jsonTextArea, #newModelColumns, #dsSuppliers";
 function acEligible(t) {
   return t && t.matches && t.matches(AC_FIELDS_SELECTOR) && !t.matches(AC_EXCLUDE_SELECTOR);
 }
@@ -2818,6 +2818,7 @@ function updateExtractEstimate() {
   if (extractKind() === "sigeoIm") { el.textContent = imxEstimateText(); return; }
   if (extractKind() === "sigeoLot") { el.textContent = lotEstimateText(); return; }
   if (extractKind() === "sigeoDpe") { el.textContent = dpeEstimateText(); return; }
+  if (extractKind() === "dpeScan") { el.textContent = dsEstimateText(); return; }
   const est = estimateExtractionMs();
   if (!est || !est.total) { el.textContent = ""; return; }
   el.textContent = `Estimation : ~${formatDuration(est.totalMs)} pour ${est.total} ligne${est.total > 1 ? "s" : ""} (~${formatDuration(est.perRowMs)}/ligne).`;
@@ -2844,6 +2845,8 @@ function resolveOutputTarget(ref, createdCols) {
 }
 
 async function runAutomation() {
+  // Analyse DPE : sans tableau chargé, une ligne est créée par PDF.
+  if (extractKind() === "dpeScan") return runDsExtraction();
   if (!state.rows.length) { logLine("Charge d'abord des données (onglet Données).", "err"); return; }
   if (extractKind() === "sigeoIm") return runImExtraction();
   if (extractKind() === "sigeoLot") return runLotExtraction();
@@ -3093,7 +3096,13 @@ function syncExtractKindUI() {
   $("imExtractBox").hidden = kind !== "sigeoIm";
   $("lotExtractBox").hidden = kind !== "sigeoLot";
   $("dpeExtractBox").hidden = kind !== "sigeoDpe";
-  $("stdExtractBox").hidden = kind === "sigeoIm" || kind === "sigeoLot" || kind === "sigeoDpe";
+  $("dsExtractBox").hidden = kind !== "dpeScan";
+  $("stdExtractBox").hidden = kind === "sigeoIm" || kind === "sigeoLot" || kind === "sigeoDpe" || kind === "dpeScan";
+  // Analyse DPE : colonnes de rattachement devinées si aucune n'est choisie.
+  if (kind === "dpeScan" && dsConfigApplied && !$("dsFileCol").value && !$("dsImCol").value && !$("dsLotCol").value) {
+    const g = dsGuessCols();
+    if (g.fileCol || g.imCol || g.lotCol) applyDsConfig(Object.assign(getDsConfig(), g));
+  }
   updateExtractEstimate();
 }
 
@@ -3131,7 +3140,7 @@ function getImxConfig() {
 let imxConfigApplied = false;
 function applyImxConfig(im, kind) {
   imxConfigApplied = true;
-  const r = document.querySelector(`input[name="extractKind"][value="${["sigeoIm", "sigeoLot", "sigeoDpe"].includes(kind) ? kind : "standard"}"]`);
+  const r = document.querySelector(`input[name="extractKind"][value="${["sigeoIm", "sigeoLot", "sigeoDpe", "dpeScan"].includes(kind) ? kind : "standard"}"]`);
   if (r) r.checked = true;
   const cols = getColumns();
   const guessAdr = (cols.find((c) => /adresse/i.test(c.name)) || cols[0] || {}).name || "";
@@ -3954,6 +3963,462 @@ $("dpeTestBtn").addEventListener("click", async () => {
     fail(e.message || e);
   } finally {
     $("dpeTestBtn").disabled = false;
+  }
+});
+
+/* ---------- Extraction « Analyse DPE » (dossier de PDF → Excel) ----------
+   Logique (lecture des DPE, recoupements, lettres, fournisseurs, rattachement
+   PDF ↔ lignes) : dpe-scan.js. Ici : choix du dossier, rendu des pages et OCR
+   (pdf.js + Tesseract.js, 100 % local), liste des fournisseurs, boucle sur
+   les lignes et écriture des colonnes. Les fichiers choisis ne sont pas
+   conservés à la fermeture du panneau (il faut re-choisir le dossier). */
+
+let dsConfigApplied = false;
+let dsFiles = [];                 // File[] (PDF / images) du dossier choisi
+let dsFolderLabel = "";
+const dsUnknownSuppliers = new Set();
+
+// Colonnes de rattachement devinées d'après les en-têtes.
+function dsGuessCols() {
+  const cols = getColumns();
+  const find = (re) => (cols.find((c) => re.test(String(c.name).trim())) || {}).name || "";
+  return {
+    fileCol: find(/^DPE fichier$/i) || find(/^(PDF|fichier)( DPE)?$/i),
+    imCol: find(/^(N°\s*)?IM$/i) || find(/^IM[ _-]?format/i) || find(/^(code|n°|num[eé]ro)\s*(d'?\s*)?(IM|immeuble)$/i),
+    lotCol: find(/^(N°\s*)?(lot|LT)$/i) || find(/^(code|n°|num[eé]ro)\s*(de\s*)?(lot|LT)$/i)
+  };
+}
+
+function getDsConfig() {
+  return {
+    fileCol: $("dsFileCol").value,
+    imCol: $("dsImCol").value,
+    lotCol: $("dsLotCol").value,
+    append: $("dsAppend").checked,
+    ocr: $("dsOcr").value
+  };
+}
+
+function applyDsConfig(c) {
+  dsConfigApplied = true;
+  const g = (c.fileCol || c.imCol || c.lotCol) ? {} : dsGuessCols();
+  fillColumnSelect($("dsFileCol"), c.fileCol || g.fileCol || "", colSelectExtras("optional"));
+  fillColumnSelect($("dsImCol"), c.imCol || g.imCol || "", colSelectExtras("optional"));
+  fillColumnSelect($("dsLotCol"), c.lotCol || g.lotCol || "", colSelectExtras("optional"));
+  $("dsAppend").checked = c.append !== false;
+  $("dsOcr").value = ["auto", "always", "never"].includes(c.ocr) ? c.ocr : "auto";
+}
+
+// Colonnes vides (aucune choisie) → devinées au moment de l'exécution.
+function dsEffectiveCols(cfg) {
+  let { fileCol, imCol, lotCol } = cfg;
+  if (!fileCol && !imCol && !lotCol) ({ fileCol, imCol, lotCol } = dsGuessCols());
+  const idx = (n) => (n ? colIndexByName(n) : -1);
+  return { names: { fileCol, imCol, lotCol }, file: idx(fileCol), im: idx(imCol), lot: idx(lotCol) };
+}
+
+function dsEstimateText() {
+  if (!dsFiles.length) return "Analyse DPE : choisis d'abord le dossier des DPE.";
+  const n = dsFiles.length;
+  return `${n} DPE choisi${n > 1 ? "s" : ""} — compter ~1 s par PDF texte, 20 à 60 s par PDF scanné (OCR)${$("dsOcr").value === "always" ? ", +10 à 30 s par PDF pour l'étiquette" : ""}.`;
+}
+
+function dsSetFiles(list, label) {
+  const all = Array.from(list || []);
+  const seen = new Set();
+  dsFiles = all.filter((f) => DS_FILE_RE.test(f.name) && !/^~\$|^\./.test(f.name))
+    .filter((f) => { const k = (f.webkitRelativePath || f.name).toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; })
+    .sort((a, b) => a.name.localeCompare(b.name, "fr", { numeric: true }));
+  const folder = (all.find((f) => f.webkitRelativePath) || {}).webkitRelativePath;
+  dsFolderLabel = label || (folder ? folder.split("/")[0] : "");
+  const other = all.length - dsFiles.length;
+  const nPdf = dsFiles.filter((f) => /\.pdf$/i.test(f.name)).length;
+  $("dsFilesInfo").textContent = dsFiles.length
+    ? `${dsFiles.length} DPE${dsFolderLabel ? ` dans « ${dsFolderLabel} »` : ""} (${nPdf} PDF${dsFiles.length - nPdf ? `, ${dsFiles.length - nPdf} image(s)` : ""})` +
+      (other ? ` — ${other} autre(s) fichier(s) ignoré(s)` : "") + "."
+    : (all.length ? `Aucun PDF dans la sélection (${all.length} fichier(s) ignoré(s)).` : "Aucun DPE choisi.");
+  updateExtractEstimate();
+}
+
+$("dsFolderInput").addEventListener("change", (e) => dsSetFiles(e.target.files));
+$("dsFilesInput").addEventListener("change", (e) => dsSetFiles(e.target.files, ""));
+$("dsOcr").addEventListener("change", updateExtractEstimate);
+$("dsExportBtn").addEventListener("click", () => $("downloadBtn").click());
+
+/* ----- Liste des fournisseurs (chrome.storage.local « dsSuppliers ») ----- */
+
+let dsSupTimer = null;
+function dsRenderSupInfo() {
+  const p = dsParseSuppliers($("dsSuppliers").value);
+  $("dsSupCount").textContent = `${p.entries.length} fournisseur${p.entries.length > 1 ? "s" : ""}`;
+  const w = [...p.warnings];
+  if (p.empty.length) w.push(`${p.empty.length} nom(s) sans numéro : ${p.empty.join(", ")}`);
+  $("dsSupWarn").textContent = w.length ? "⚠ " + w.join(" — ") : "";
+  return p;
+}
+function dsSaveSuppliers() {
+  clearTimeout(dsSupTimer);
+  dsSupTimer = setTimeout(() => { try { chrome.storage.local.set({ dsSuppliers: $("dsSuppliers").value }); } catch (e) { /* ignoré */ } }, 300);
+}
+async function dsLoadSuppliers() {
+  let v;
+  try { v = (await chrome.storage.local.get("dsSuppliers")).dsSuppliers; } catch (e) { v = undefined; }
+  $("dsSuppliers").value = typeof v === "string" ? v : DS_DEFAULT_SUPPLIERS;
+  dsRenderSupInfo();
+}
+$("dsSuppliers").addEventListener("input", () => { dsRenderSupInfo(); dsSaveSuppliers(); });
+
+// Fichier texte : UTF-8 (avec ou sans BOM), sinon Windows-1252 (Bloc-notes, Excel).
+async function dsReadTextFile(file) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  if (buf[0] === 0xFF && buf[1] === 0xFE) return new TextDecoder("utf-16le").decode(buf.subarray(2));
+  if (buf[0] === 0xFE && buf[1] === 0xFF) return new TextDecoder("utf-16be").decode(buf.subarray(2));
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(buf).replace(/^﻿/, ""); }
+  catch (e) { return new TextDecoder("windows-1252").decode(buf); }
+}
+$("dsSupFile").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  const txt = await dsReadTextFile(f);
+  const p = dsParseSuppliers(txt);
+  if (!p.entries.length) { showStatus("Aucune ligne « NOM : numéro » dans ce fichier.", "error"); return; }
+  $("dsSuppliers").value = txt.replace(/\r\n/g, "\n").trim();
+  dsRenderSupInfo();
+  dsSaveSuppliers();
+  showStatus(`Liste importée : ${p.entries.length} fournisseurs.`, "success");
+});
+$("dsSupExport").addEventListener("click", () => {
+  const blob = new Blob(["﻿" + $("dsSuppliers").value.replace(/\n/g, "\r\n") + "\r\n"], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "fournisseurs_FU.txt";
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+});
+$("dsSupAddUnknown").addEventListener("click", () => {
+  const p = dsParseSuppliers($("dsSuppliers").value);
+  const known = new Set([...p.entries.map((e) => e.key), ...p.empty.map(dsKey)]);
+  const add = [...dsUnknownSuppliers].filter((n) => !known.has(dsKey(n)));
+  if (!add.length) { showStatus("Ces fournisseurs sont déjà dans la liste.", "info"); return; }
+  const cur = $("dsSuppliers").value.replace(/\s+$/, "");
+  $("dsSuppliers").value = (cur ? cur + "\n" : "") + add.map((n) => `${n} : `).join("\n");
+  $("dsSupBox").open = true;
+  dsRenderSupInfo();
+  dsSaveSuppliers();
+  showStatus(`${add.length} fournisseur(s) ajouté(s) en bas de la liste : complète leur numéro FU.`, "success");
+});
+dsLoadSuppliers();
+
+/* ----- Rendu des pages et OCR (Tesseract.js) ----- */
+
+// Page quasi blanche (séparateur de scan) : on ne la lit pas.
+function dsCanvasIsBlank(ctx, w, h) {
+  const data = ctx.getImageData(0, 0, w, h).data;
+  let dark = 0, total = 0;
+  for (let i = 0; i < data.length; i += 4 * 7) { total++; if ((data[i] + data[i + 1] + data[i + 2]) / 3 < 160) dark++; }
+  return total > 0 && dark / total < 0.002;
+}
+
+// Zone contrastée : haut de page agrandi, niveaux de gris étirés puis seuil
+// (en-tête « n° / établi le / valable » en gris clair, étiquette).
+function dsContrastCanvas(src, frac) {
+  const w = src.width, h = Math.round(src.height * frac);
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(src, 0, 0, w, h, 0, 0, w, h);
+  const img = ctx.getImageData(0, 0, w, h), d = img.data;
+  const hist = new Array(256).fill(0);
+  for (let i = 0; i < d.length; i += 4) { const g = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0; d[i] = g; hist[g]++; }
+  const n = d.length / 4, cut = n * 0.01;
+  let lo = 0, hi = 255, acc = 0;
+  while (lo < 255 && (acc += hist[lo]) < cut) lo++;
+  acc = 0;
+  while (hi > 0 && (acc += hist[hi]) < cut) hi--;
+  const span = Math.max(1, hi - lo);
+  for (let i = 0; i < d.length; i += 4) {
+    const v = Math.min(255, Math.max(0, ((d[i] - lo) * 255) / span));
+    const b = v < 200 ? 0 : 255;
+    d[i] = d[i + 1] = d[i + 2] = b; d[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
+async function dsRenderSource(source, pageIdx, zone) {
+  const canvas = document.createElement("canvas");
+  if (source.pdf) {
+    const page = await source.pdf.getPage(pageIdx + 1);
+    let vp = page.getViewport({ scale: 1 });
+    const target = zone ? 2600 : 2000;
+    vp = page.getViewport({ scale: Math.min(4, Math.max(1.5, target / vp.width)) });
+    canvas.width = Math.ceil(vp.width); canvas.height = Math.ceil(vp.height);
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+  } else {
+    const bmp = await createImageBitmap(source.file);
+    const f = bmp.width < 1800 ? 2480 / bmp.width : 1;
+    canvas.width = Math.round(bmp.width * f); canvas.height = Math.round(bmp.height * f);
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    try { bmp.close(); } catch (e) { /* ignoré */ }
+  }
+  return canvas;
+}
+
+async function dsOcrPage(source, pageIdx, zone) {
+  let canvas = await dsRenderSource(source, pageIdx, zone);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!zone && dsCanvasIsBlank(ctx, canvas.width, canvas.height)) { canvas.width = canvas.height = 0; return { blank: true }; }
+  if (zone) { const z = dsContrastCanvas(canvas, 0.55); canvas.width = canvas.height = 0; canvas = z; }
+  const worker = await tbGetOcrWorker();
+  await worker.setParameters({ tessedit_pageseg_mode: zone ? "6" : "3" });
+  const { data } = await worker.recognize(canvas, {}, { text: true, tsv: true, blocks: false, hocr: false });
+  canvas.width = canvas.height = 0; // libère la mémoire
+  const words = dsParseTsv(data.tsv);
+  const text = words.length ? dsWordsText(words) : String(data.text || "");
+  return { text, words, blank: !text.trim() };
+}
+
+// Analyse d'un fichier (PDF ou image) → résultat de dsAnalyzeDoc.
+async function dsAnalyzeFile(file, cfg, suppliers, onStep) {
+  const isPdf = /\.pdf$/i.test(file.name);
+  if (isPdf && !window.pdfjsLib) throw new Error("pdf.js non chargé (lib/pdf.min.js manquant)");
+  let pdf = null, pages = [""];
+  if (isPdf) {
+    const r = await dsReadPdf(pdfjsLib, new Uint8Array(await file.arrayBuffer()));
+    pdf = r.doc; pages = r.pages;
+  }
+  const io = {
+    stopped: () => stopRequested,
+    ocr: async (i, zone) => {
+      if (onStep) onStep(zone ? `OCR zone contrastée page ${i + 1}…` : `OCR page ${i + 1}/${pages.length}…`);
+      return dsOcrPage(pdf ? { pdf } : { file }, i, zone);
+    }
+  };
+  try { return await dsAnalyzeDoc(pages, io, { ocr: cfg.ocr, suppliers }); }
+  finally { try { if (pdf) pdf.destroy(); } catch (e) { /* ignoré */ } }
+}
+
+// Sans tableau chargé : une ligne par PDF (DPE fichier | IM | lot).
+function dsCreateTableFromFiles() {
+  state.workbook = null;
+  state.originalArrayBuffer = null;
+  state.hasOriginalFile = false;
+  idbClearOriginal();
+  state.sheetName = "DPE";
+  const d = new Date();
+  state.originalFileName = `DPE_analyse_${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}.xlsx`;
+  state.headerMode = "yes";
+  $("headerModeSelect").value = "yes";
+  state.modelName = "";
+  state.rows = [["DPE fichier", "IM", "lot"]].concat(dsFiles.map((f) => {
+    const p = dsParseFileName(f.name);
+    return [f.name, p ? "IM" + p.im.padStart(7, "0") : "", p ? p.lot : ""];
+  }));
+  $("sheetRow").style.display = "none";
+  afterDataLoaded(`Tableau créé depuis ${dsFolderLabel ? `le dossier « ${dsFolderLabel} »` : "les DPE choisis"}`);
+  $("startRow").value = 2;
+  $("endRow").value = "";
+  applyDsConfig({ fileCol: "DPE fichier", imCol: "IM", lotCol: "lot", append: $("dsAppend").checked, ocr: $("dsOcr").value });
+}
+
+function dsStatusClass(statut) {
+  return statut === "OK" ? "ok" : statut === "ÉCHEC" ? "err" : "skip";
+}
+
+async function runDsExtraction() {
+  if (!dsFiles.length) { logLine("Analyse DPE : choisis d'abord le dossier des DPE (bouton « Choisir le dossier »).", "err"); return; }
+  const cfg = getDsConfig();
+  const sup = dsParseSuppliers($("dsSuppliers").value);
+  if (!state.rows.length) dsCreateTableFromFiles();
+  let cols = dsEffectiveCols(cfg);
+  if (cols.file < 0 && (cols.im < 0 || cols.lot < 0)) {
+    logLine("Analyse DPE : choisis la colonne « DPE fichier », ou les colonnes IM et lot, pour rattacher les PDF aux lignes.", "err");
+    return;
+  }
+  const conditions = getConditions();
+  const { startIdx, endIdx } = lotRowRange();
+  const todo = [], skipped = [];
+  for (let i = Math.max(startIdx, dataStartIdx()); i <= endIdx; i++) {
+    const row = state.rows[i] = state.rows[i] || [];
+    if (rowMatchesSkipCondition(row, conditions)) skipped.push(i); else todo.push(i);
+  }
+  // Rattachement calculé sur TOUT le tableau : un PDF dont la ligne est hors
+  // de la plage (ou ignorée par une condition) n'est pas « sans ligne ».
+  const allIdx = [];
+  for (let i = dataStartIdx(); i < state.rows.length; i++) allIdx.push(i);
+  const asg = dsAssignFiles(state.rows, allIdx, cols, dsFiles);
+
+  // PDF sans ligne : ajoutés en bas du tableau (IM / lot lus dans le nom),
+  // seulement si la plage va jusqu'à la fin du tableau.
+  const appended = [];
+  if (cfg.append && asg.unmatched.length && !$("endRow").value.trim()) {
+    const created = {};
+    const fileIdx = cols.file >= 0 ? cols.file : resolveOutputTarget("DPE fichier", created);
+    const imIdx = cols.im >= 0 ? cols.im : resolveOutputTarget("IM", created);
+    const lotIdx = cols.lot >= 0 ? cols.lot : resolveOutputTarget("lot", created);
+    for (const fi of asg.unmatched) {
+      const f = dsFiles[fi], p = dsParseFileName(f.name), row = [];
+      setCellByIndex(row, fileIdx, f.name);
+      if (p) { setCellByIndex(row, imIdx, "IM" + p.im.padStart(7, "0")); setCellByIndex(row, lotIdx, p.lot); }
+      state.rows.push(row);
+      const ri = state.rows.length - 1;
+      asg.byRow.set(ri, fi); asg.via.set(ri, "ajouté");
+      todo.push(ri); appended.push(ri);
+    }
+    if (Object.keys(created).length) renderColumns();
+  }
+
+  const notAppended = cfg.append && !$("endRow").value.trim() ? 0 : asg.unmatched.length;
+
+  const createdCols = {};
+  const idx = DS_COLS.map((c) => resolveOutputTarget(c, createdCols));
+  if (Object.keys(createdCols).length || appended.length) renderColumns();
+
+  isRunning = true;
+  hasStartedRun = true;
+  stopRequested = false;
+  $("startBtn").disabled = true;
+  $("stopBtn").disabled = false;
+  $("log").innerHTML = "";
+  runLog = [];
+  lastRunOutputs = [{ col: "DPE analyse" }, { col: "N° FU" }, { col: "Établi le" }, { col: "Valable jusqu'au" },
+    { col: "Énergie primaire (kWh/m²/an)" }, { col: "GES (kg CO2/m²/an)" }, { col: "Classe énergie" }];
+  const total = todo.length;
+  let done = 0;
+  const counts = { OK: 0, "À VÉRIFIER": 0, "ÉCHEC": 0, none: 0 };
+  const runStart = Date.now();
+  runDurationMs = 0;
+  setProgress(0, total);
+  updateRunTiming(0, total, runStart);
+  updateDoneMarkers();
+  dsUnknownSuppliers.clear();
+  const tick = () => { done++; setProgress(done, total); updateRunTiming(done, total, runStart); };
+  const ocrLbl = { auto: "OCR auto", always: "OCR de chaque page DPE", never: "sans OCR" }[cfg.ocr];
+  logLine(`Analyse DPE — ${dsFiles.length} fichier(s)${dsFolderLabel ? ` (« ${dsFolderLabel} »)` : ""}, ${total} ligne(s), ${ocrLbl}, ${sup.entries.length} fournisseur(s) dans la liste.`, "");
+  if (sup.warnings.length) logLine("Liste fournisseurs : ⚠ " + sup.warnings.join(" ; "), "skip");
+  skipped.forEach((i) => runLog.push({ row: i + 1, search: "", values: [], status: "skip", note: "Condition" }));
+  if (skipped.length) logLine(`${skipped.length} ligne(s) ignorée(s) (condition).`, "skip");
+  if (appended.length) logLine(`${appended.length} PDF sans ligne correspondante ajouté(s) en bas du tableau (lignes ${appended[0] + 1} à ${appended[appended.length - 1] + 1}).`, "skip");
+  asg.dupes.forEach((fi) => logLine(`⚠ ${dsFiles[fi].name} : autre PDF du même lot (le plus récent est analysé), ignoré.`, "skip"));
+  if (notAppended) {
+    logLine(`${notAppended} PDF sans ligne correspondante non traité(s)${cfg.append ? " (plage limitée : vide le champ « à » pour les ajouter)" : ""} : ` +
+      asg.unmatched.slice(0, 8).map((fi) => dsFiles[fi].name).join(", ") + (asg.unmatched.length > 8 ? "…" : ""), "skip");
+  }
+
+  try {
+    for (const ri of todo) {
+      if (stopRequested) { logLine("Arrêté par l'utilisateur.", "skip"); break; }
+      const row = state.rows[ri];
+      const rowNum = ri + 1;
+      const fi = asg.byRow.get(ri);
+      if (fi === undefined) {
+        const expected = cols.file >= 0 ? String(row[cols.file] ?? "").trim() : "";
+        const statut = expected ? "PDF introuvable" : "Pas de PDF";
+        // Ligne déjà analysée avec un autre dossier : résultat conservé.
+        const prev = String(row[idx[0]] ?? "").trim();
+        if (prev && !["PDF introuvable", "Pas de PDF"].includes(prev)) {
+          logLine(`Ligne ${rowNum} : PDF absent de ce dossier — analyse précédente conservée (${prev}).`, "skip");
+          runLog.push({ row: rowNum, search: expected, values: lastRunOutputs.map((o) => String(row[colIndexByName(o.col)] ?? "")), status: "skip", label: "Conservé" });
+          counts.none++;
+          tick();
+          continue;
+        }
+        setCellByIndex(row, idx[0], statut);
+        DS_COLS.forEach((c, k) => { if (k > 0) setCellByIndex(row, idx[k], k === DS_COLS.length - 1 && expected ? `« ${expected} » absent du dossier` : ""); });
+        logLine(`Ligne ${rowNum} : ${expected ? `PDF introuvable (« ${expected} » absent du dossier)` : "pas de PDF pour ce lot"}.`, "skip");
+        runLog.push({ row: rowNum, search: expected, values: [statut], status: "skip", label: statut });
+        counts.none++;
+        tick();
+        continue;
+      }
+      const f = dsFiles[fi];
+      const t0 = Date.now();
+      $("extractEstimate").textContent = `Ligne ${rowNum} : lecture de ${f.name}…`;
+      let rec;
+      try {
+        rec = await dsAnalyzeFile(f, cfg, sup.entries, (msg) => { $("extractEstimate").textContent = `Ligne ${rowNum} (${f.name}) : ${msg}`; });
+      } catch (e) {
+        if (stopRequested) { logLine("Arrêté par l'utilisateur.", "skip"); break; }
+        rec = { error: (e && e.message) || String(e) };
+      }
+      if (stopRequested && rec.error === "arrêté") { logLine("Arrêté par l'utilisateur.", "skip"); break; }
+      const vals = dsRecordValues(rec, f.name);
+      idx.forEach((col, k) => setCellByIndex(row, col, vals[k]));
+      const statut = vals[0];
+      counts[statut] = (counts[statut] || 0) + 1;
+      if (!rec.error && !rec.supplier && rec.societe) dsUnknownSuppliers.add(rec.societe);
+      const g = (c) => vals[DS_COLS.indexOf(c)];
+      const secs = ((Date.now() - t0) / 1000).toFixed(1).replace(".", ",");
+      const via = asg.via.get(ri) === "IM + lot" ? " [IM + lot]" : "";
+      if (rec.error) {
+        logLine(`Ligne ${rowNum} : ${f.name}${via} → ÉCHEC — ${rec.error}`, "err");
+      } else {
+        const fu = g("N° FU") ? `FU ${g("N° FU")}` : "FU ?";
+        logLine(`Ligne ${rowNum} : ${f.name}${via} → ${statut} — ${g("Fournisseur DPE") || "?"} (${fu}), ${g("Établi le") || "?"} → ${g("Valable jusqu'au") || "?"}, ` +
+          `${g("Énergie primaire (kWh/m²/an)") || "?"} kWh/m² ${g("Classe énergie")}, ${g("GES (kg CO2/m²/an)") || "?"} kg CO2/m² ${g("Classe GES")} (${secs} s)` +
+          (statut !== "OK" ? ` — ${g("Remarques DPE")}` : ""), dsStatusClass(statut));
+      }
+      runLog.push({ row: rowNum, search: f.name, values: lastRunOutputs.map((o) => g(o.col)), status: rec.error ? "err" : statut === "OK" ? "ok" : "skip",
+        label: statut === "À VÉRIFIER" ? "À vérifier" : undefined, check: statut === "À VÉRIFIER", note: rec.error || undefined });
+      tick();
+    }
+  } finally {
+    try { if (tbOcrWorker) await tbOcrWorker.setParameters({ tessedit_pageseg_mode: "6" }); } catch (e) { /* ignoré */ }
+    runDurationMs = Date.now() - runStart;
+    isRunning = false;
+    $("startBtn").disabled = false;
+    $("stopBtn").disabled = true;
+    $("progressTiming").textContent = `Terminé en ${formatDuration(runDurationMs)}`;
+    logLine(`Terminé en ${formatDuration(runDurationMs)} — ${counts.OK || 0} OK, ${counts["À VÉRIFIER"] || 0} à vérifier, ${counts["ÉCHEC"] || 0} échec(s), ${counts.none} sans PDF. ` +
+      "Télécharge le résultat avec « Télécharger l'Excel » (ou l'onglet Export).", "ok");
+    if (dsUnknownSuppliers.size) {
+      logLine(`Fournisseurs absents de la liste : ${[...dsUnknownSuppliers].join(", ")} — « Ajouter les fournisseurs inconnus » les met en bas de la liste, il reste à saisir leur n° FU.`, "skip");
+    }
+    $("dsSupAddUnknown").hidden = !dsUnknownSuppliers.size;
+    renderResultSummary();
+    updateExtractEstimate();
+    renderPreview();
+    persistSession();
+    updateDoneMarkers();
+  }
+}
+
+$("dsTestBtn").addEventListener("click", async () => {
+  const out = $("dsTestResult");
+  if (isRunning) { showStatus("Une extraction est en cours.", "error"); return; }
+  const fail = (t) => { out.className = "hint imx-test-result err"; out.textContent = "✗ " + t; };
+  if (!dsFiles.length) return fail("Choisis d'abord le dossier des DPE.");
+  const cfg = getDsConfig();
+  let fi = 0, label = "1er fichier du dossier";
+  if (state.rows.length) {
+    const cols = dsEffectiveCols(cfg);
+    const { startIdx } = lotRowRange();
+    const ri = Math.max(startIdx, dataStartIdx());
+    const asg = dsAssignFiles(state.rows, [ri], cols, dsFiles);
+    if (!asg.byRow.has(ri)) return fail(`Aucun PDF du dossier ne correspond à la ligne ${ri + 1} (colonne fichier ou IM + lot).`);
+    fi = asg.byRow.get(ri); label = `ligne ${ri + 1}`;
+  }
+  const f = dsFiles[fi];
+  out.className = "hint imx-test-result";
+  out.textContent = `Analyse de ${f.name} (${label})…`;
+  $("dsTestBtn").disabled = true;
+  stopRequested = false;
+  try {
+    const sup = dsParseSuppliers($("dsSuppliers").value);
+    const rec = await dsAnalyzeFile(f, cfg, sup.entries, (m) => { out.textContent = `Analyse de ${f.name} (${label}) : ${m}`; });
+    const v = dsRecordValues(rec, f.name);
+    const show = DS_COLS.map((c, k) => [c, v[k]]).filter(([c, x]) => x && !["PDF analysé", "Type diagnostic"].includes(c));
+    out.className = "hint imx-test-result " + (v[0] === "OK" ? "ok" : v[0] === "ÉCHEC" ? "err" : "");
+    out.textContent = `${v[0] === "OK" ? "✓" : v[0] === "ÉCHEC" ? "✗" : "⚠"} ${f.name} (${label}) — ` + show.map(([c, x]) => `${c} : ${x}`).join(" · ");
+  } catch (e) {
+    fail(`${f.name} : ${e.message || e}`);
+  } finally {
+    try { if (tbOcrWorker) await tbOcrWorker.setParameters({ tessedit_pageseg_mode: "6" }); } catch (e) { /* ignoré */ }
+    $("dsTestBtn").disabled = false;
   }
 });
 
@@ -7517,7 +7982,8 @@ function buildProfileConfig() {
       kind: extractKind(),
       im: getImxConfig(),
       lot: getLotConfig(),
-      dpe: getDpeConfig()
+      dpe: getDpeConfig(),
+      ds: getDsConfig()
     },
     scenario: {
       steps: getScenarioSteps(),
@@ -7576,6 +8042,7 @@ function applyProfileConfig(cfg) {
   applyImxConfig(ex.im || {}, ex.kind || "standard");
   applyLotConfig(ex.lot || {});
   applyDpeConfig(ex.dpe || {});
+  applyDsConfig(ex.ds || {});
 
   const sc = cfg.scenario || {};
   $("scenarioSteps").innerHTML = "";
@@ -7844,6 +8311,7 @@ async function init() {
   if (!imxConfigApplied) applyImxConfig({}, "standard");
   if (!lotConfigApplied) applyLotConfig({});
   if (!dpeConfigApplied) applyDpeConfig({});
+  if (!dsConfigApplied) applyDsConfig({});
 
   // Lignes par défaut dans l'onglet Extraction si vide
   if (!$("searchFieldsList").children.length) addSearchFieldRow();

@@ -204,7 +204,8 @@ deux modes :
 ## 3. Onglet Extraction (ex-OSA)
 
 **Type d'extraction** : *Standard* (ci-dessous), **Recherche IM SIGEO**,
-**Recherche d'id interne de lot** ou **DPE SIGEO** (voir plus bas).
+**Recherche d'id interne de lot**, **DPE SIGEO** ou **Analyse DPE** (voir
+plus bas).
 
 1. **Conditions** : ignorer certaines lignes (ex : colonne X = "NON").
 2. **Champs de recherche** : sélecteur CSS (bouton 🎯) + colonne à taper.
@@ -364,6 +365,68 @@ statut » : par défaut `OK & téléchargé`, `OK trouvé (non téléchargé)`
 Session expirée → arrêt avec la ligne à partir de laquelle relancer.
 Pause entre lots réglable (1 s par défaut) pour ne pas surcharger SIGEO.
 
+### Analyse DPE (dossier de PDF → Excel)
+
+Lit les PDF de DPE téléchargés (par ex. `Téléchargements\DPE_SIGEO`, rempli
+par *DPE SIGEO*) et écrit, pour chaque lot, les informations de la saisie
+SIGEO + le **n° fournisseur FU**. Tout est lu sur le PC : pdf.js pour la
+couche texte, Tesseract.js (OCR local) pour les PDF scannés, les images et
+l'étiquette énergie. Logique dans `dpe-scan.js` (port de l'outil Rust
+*DPE Scan*).
+
+1. Charge le fichier produit par *DPE SIGEO* (Données) — ou rien : une ligne
+   est alors créée par PDF (`DPE fichier | IM | lot`, IM et lot lus dans le
+   nom `IM0393664_10_DPE_2022-10-19.pdf`).
+2. Choisis **Analyse DPE**, puis **Choisir le dossier** (sous-dossiers
+   compris ; PDF, JPG, PNG). Les fichiers ne sont pas conservés à la
+   fermeture du panneau.
+3. **Rattacher par** : colonne `DPE fichier` (nom exact), sinon **IM + lot**
+   lus dans le nom du PDF (`IM0393664`, `0393664`, `393664` ; `LT000010`,
+   `10`). Deux PDF pour le même lot : le plus récent (date du nom) est
+   analysé, l'autre signalé. PDF sans ligne : ajoutés en bas du tableau
+   (option, seulement si la plage va jusqu'à la fin). Les colonnes sont
+   devinées d'après les en-têtes.
+4. **OCR** : *auto* (pages scannées, et page DPE si une valeur manque),
+   *toujours la page DPE* (recoupe l'étiquette, plus lent) ou *jamais*.
+5. **Tester sur la ligne de départ** (rien n'est écrit), puis ▶ Démarrer, puis
+   **Télécharger l'Excel** (même export que l'onglet Export).
+
+Pour chaque PDF : repérage de la page DPE (score : « établi le »,
+« valable jusqu'au », n° ADEME, « estimation des coûts annuels »… — même au
+milieu d'un dossier de diagnostics) et de la page des consommations (p.3) ;
+dates (cohérence établi + 10 ans) ; n° ADEME (13 caractères, réparé si lu par
+OCR) ; surface ; **énergie primaire et GES par m² = plancher(total ÷ surface)**
+(page 3 et « ce logement émet … kg de CO₂ »), recoupés avec l'étiquette lue
+par OCR quand elle l'est ; classes calculées (double seuil 2021, barème des
+petites surfaces < 40 m² pour les DPE établis depuis le 01/07/2024, ancien
+barème avant juillet 2021) ; fourchette de coûts ; société, diagnostiqueur,
+n° de certification, adresse du bien. Anciens DPE (2006 → juin 2021) :
+« consommation conventionnelle », « estimation des émissions », validité
+légale rappelée (31/12/2022 ou 31/12/2024).
+
+**Fournisseurs → n° FU** (bloc repliable) : une ligne `NOM : numéro`
+(aussi `->`, `;`, tabulation), enregistrée dans le navigateur et commune à
+tous les profils ; import / export `.txt` (UTF-8 ou Windows-1252). Le nom est
+cherché dans la société lue, puis le bloc diagnostiqueur (e-mail compris,
+`contact@acade.fr` → ACADE), puis le texte du DPE ; casse, accents et
+ponctuation ignorés (`ACT'IM`, `Arthemis Côte d'Or`), noms de personne dans
+le désordre acceptés (`Frédérique ROUSSEL`). Faute d'une lettre sur un nom
+de 6 caractères ou plus (sans chiffre) : rapproché mais « À VÉRIFIER »
+(`SOCOTEC` ≈ `SOCOTECH`). Les sociétés absentes de la liste sont listées à la
+fin ; **Ajouter les fournisseurs inconnus à la liste** les met en bas de la
+liste, numéro à compléter.
+
+Colonnes écrites (créées si absentes) : `DPE analyse` (OK / À VÉRIFIER /
+ÉCHEC / Pas de PDF / PDF introuvable), `PDF analysé`, `Fournisseur DPE`,
+`Fournisseur (liste)`, `N° FU`, `Type diagnostic` (Performance
+Energetique), `Établi le`, `Valable jusqu'au`, `Énergie primaire
+(kWh/m²/an)`, `Énergie primaire totale (kWh/an)`, `Classe énergie`, `GES (kg
+CO2/m²/an)`, `GES total (kg CO2/an)`, `Classe GES`, `Coût min (€/an)`, `Coût
+max (€/an)`, `N° ADEME`, `Surface (m²)`, `Adresse DPE`, `Diagnostiqueur`, `N°
+certification`, `Lecture` (texte / OCR, page) et `Remarques DPE` (ce qui a
+fait passer la ligne « À VÉRIFIER » : valeur manquante, lue par OCR seule,
+écart étiquette / calcul, fournisseur rapproché ou absent…).
+
 ## 4. Onglet Export
 
 Télécharge le fichier mis à jour en `.xlsx` (même feuille remplacée si le
@@ -460,6 +523,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── sigeo-im.js        Extraction « Recherche IM SIGEO » (parsing, recherche, pagination, filtrage)
 ├── sigeo-lot.js       Extraction « Recherche d'id interne de lot » (POST direct, repli onglet)
 ├── sigeo-dpe.js       Extraction « DPE SIGEO » (page Documents, filtre, plus récent, téléchargement)
+├── dpe-scan.js        Extraction « Analyse DPE » (lecture des DPE, recoupements, classes, fournisseurs FU)
 ├── update-check.js    Vérification de mise à jour via GitHub
 ├── lib/xlsx.full.min.js  SheetJS (lecture/écriture Excel)
 ├── lib/pdf.min.js     pdf.js (Mozilla) — analyse PDF de la Toolbox
@@ -467,7 +531,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── lib/ocr/           Tesseract.js (OCR local) : lib, worker, cœur wasm, langue fra
 ├── icons/             Icônes de l'extension
 ├── test.html          Page de test locale des deux modes (non publiée)
-└── tests/             Tests des recherches IM, lot et DPE (SIGEO simulé, jsdom / Playwright)
+└── tests/             Tests des recherches IM, lot et DPE, analyse DPE (SIGEO simulé, DPE fictifs, jsdom / Playwright)
 ```
 
 Tests de la recherche IM (Node + Playwright + Chrome) :
@@ -483,8 +547,17 @@ fichier, attente du chargement, fiche → page Documents, POST → PDF ou HTML,
 contre `tests/fixtures/sigeo-dpe-mock.js`), `node tests/sigeo-dpe.background.js`
 (service worker : PDF, page HTML supprimée, interruption) et
 `node tests/sigeo-dpe.panel.e2e.js`.
+Analyse DPE : `node tests/dpe-scan.node.js` (moteur : classes, n° ADEME,
+fournisseurs, rattachement, puis 5 DPE fictifs — texte, scanné, ancien,
+fournisseur inconnu, PDF sans ligne — générés par
+`tests/fixtures/make_dpe.py` ; OCR par `tesseract` en ligne de commande) et
+`node tests/dpe-scan.panel.e2e.js` (vrai panneau servi en HTTP local, choix du
+dossier, OCR Tesseract.js, liste fournisseurs, export Excel). Un dossier de
+vrais DPE peut être passé en argument : `node tests/dpe-scan.node.js <dossier>`.
 
-**Version** : 2.13.3 — DPE SIGEO : textes de la colonne DPE statut
+**Version** : 2.14.0 — nouveau type d'extraction **Analyse DPE** (dossier de
+PDF → colonnes DPE + n° fournisseur FU d'après une liste modifiable).
+2.13.3 — DPE SIGEO : textes de la colonne DPE statut
 personnalisables (défaut « OK & téléchargé » / « KO pas trouvé »).
 2.13.2 — DPE SIGEO : téléchargement par l'URL
 `ged_file_download` du `onclick` popup(…) via `chrome.downloads` dans le
