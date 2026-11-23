@@ -4514,6 +4514,8 @@ function estimateScenarioStepMs(s) {
     case "pdfcheck": case "pdfwrite": return 50; // local, quasi instantané
     case "sigeo": return (s.sigeoNav === false ? 300 : 2500) + 4500; // nav + remplissage + résolution ville + postback
     case "sigeoSelector": return (s.sselChamp || "mandatMG") === "mandatMG" ? 1500 : 1200; // sélection + postback
+    // ~5 postbacks (type, date, conso, GES, enregistrer) + upload éventuel
+    case "sigeoDpe": return 5 * 2500 + (s.diagAttach !== false && !s.diagSimulate ? 4000 : 0);
     // Le nombre de lots n'est connu qu'à l'exécution : on table sur 3.
     case "batchedit": {
       const dl = s.batchWaitMode === "start" || s.batchWaitMode === "complete";
@@ -4578,6 +4580,7 @@ function addScenarioStep(step = {}) {
         <option value="sigeo">SIGEO : saisir une adresse</option>
         <option value="batchedit">Éditer par lots (cocher N → cliquer)</option>
         <option value="sigeoSelector">Sélecteur SIGEO (Mandat MG, Compte…)</option>
+        <option value="sigeoDpe">SIGEO : saisir un DPE (+ PDF)</option>
       </select>
       <button class="btn icon-only scn-move-up" title="Monter" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-up"/></svg></button>
       <button class="btn icon-only scn-move-down" title="Descendre" type="button"><svg class="icon icon-sm"><use href="#icon-arrow-down"/></svg></button>
@@ -4836,6 +4839,7 @@ function addScenarioStep(step = {}) {
       <p class="hint scn-only-ssel scn-ssel-hint"></p>
 
       <p class="hint scn-only-sigeo">La simulation est activée par défaut : décoche-la pour enregistrer réellement. Le ViewState est géré par le navigateur (aucune requête forgée).</p>
+${diagStepHtml(step, escapeAttr)}
     </div>
   `;
 
@@ -4996,6 +5000,7 @@ function addScenarioStep(step = {}) {
   });
 
   wireSigeoSelectorStepUI(div, step);
+  wireDiagStepUI(div, step);
 
   $("scenarioSteps").appendChild(div);
 }
@@ -5064,7 +5069,9 @@ function getScenarioSteps() {
     sselCtrlKey: el.querySelector(".scn-ssel-ctrlkey").value.trim(),
     sselMode: el.querySelector(".scn-ssel-mode").value,
     sselTimeout: parseInt(el.querySelector(".scn-ssel-timeout").value, 10) || sselDefaults(el.querySelector(".scn-ssel-champ").value).timeoutMs,
-    sselOnError: el.querySelector(".scn-ssel-onerror").value
+    sselOnError: el.querySelector(".scn-ssel-onerror").value,
+    // Réglages DPE : seulement pour ce type (évite d'alourdir les profils)
+    ...(el.dataset.type === "sigeoDpe" ? diagStepRead(el) : {})
   }));
 }
 
@@ -5444,6 +5451,12 @@ function scnValidateScenario(steps) {
       warns.push(`Étape ${i + 1} (${kind} ligne ${n}) placée avant l'étape ${ci + 1} (Compte ligne ${n}) : choisis le compte d'abord, son postback peut effacer le montant.`);
     }
   });
+  steps.forEach((s, i) => {
+    if (s.type !== "sigeoDpe") return;
+    if (s.diagAttach !== false && !s.diagSimulate && !diagFolderHandle && !diagFolderFiles && !diagUnitFile) {
+      warns.push(`Étape ${i + 1} (DPE) : aucun PDF ni dossier des DPE choisi — l'upload échouera (choisis le dossier, ou le PDF de la ligne active).`);
+    }
+  });
   return warns;
 }
 
@@ -5479,6 +5492,20 @@ $("addSselStepBtn").addEventListener("click", () => {
   addScenarioStep({ type: "sigeoSelector", sselChamp: "mandatMG", sselValeur: "{Mandat MG}" });
   persistWorkingConfig();
   updateScenarioEstimate();
+});
+
+// « Modèle DPE » : ajoute l'étape « SIGEO : saisir un DPE ». Si le fichier
+// chargé vient de l'extraction « Analyse DPE », ses colonnes sont reprises.
+$("addDpeTemplateBtn").addEventListener("click", () => {
+  const names = new Set(getColumns().map((c) => c.name));
+  const analyse = names.has("N° FU") && names.has("Établi le") && !names.has("code_fournisseur");
+  addScenarioStep({ type: "sigeoDpe", diagCols: Object.assign({}, analyse ? DIAG_PRESETS.analyse : DIAG_PRESETS.default) });
+  persistWorkingConfig();
+  updateScenarioEstimate();
+  refreshScenarioWarnings();
+  showStatus(analyse
+    ? "Étape DPE ajoutée avec les colonnes de l'Analyse DPE. Choisis le dossier des DPE puis lance le scénario."
+    : "Étape DPE ajoutée (colonnes type_local, code_fournisseur…). Choisis le dossier des DPE puis lance le scénario.", "success");
 });
 
 $("addOdTemplateBtn").addEventListener("click", () => {
@@ -5546,7 +5573,7 @@ function scnWaitInjected(cfg) {
 // Icône affichée à côté du numéro de l'étape (symboles #icon-step-* du HTML).
 function scnStepIconId(type, clickMode) {
   if (type === "click" && clickMode === "enter") return "icon-step-enter";
-  const known = ["fill", "input", "goto", "click", "wait", "cond", "pdfcheck", "pdfwrite", "sigeo", "batchedit", "sigeoSelector"];
+  const known = ["fill", "input", "goto", "click", "wait", "cond", "pdfcheck", "pdfwrite", "sigeo", "batchedit", "sigeoSelector", "sigeoDpe"];
   return "icon-step-" + (known.includes(type) ? type : "fill");
 }
 
@@ -6357,6 +6384,474 @@ async function execSigeoStep(step, rowIdx, tabId) {
   return { ok: true, info: "enregistré — " + idsTxt + dur() };
 }
 
+/* ---------- Étape SIGEO : saisir un DPE (diag_manage) ----------
+   La logique (boucle de saisie, idempotence, contrôles, upload) est dans
+   sigeo-diag.js. Ici : les sources de PDF (fichier de la ligne active,
+   dossier des DPE), la confirmation avant upload, le journal anti-doublon
+   (chrome.storage.session), les relevés du mode debug et l'adaptateur
+   qui relie diagProcess à l'onglet SIGEO. */
+
+let diagUnitFile = null;      // File choisi pour « Démarrer sur la ligne active »
+let diagFolderHandle = null;  // FileSystemDirectoryHandle (conservé en IndexedDB)
+let diagFolderFiles = null;   // repli : File[] d'un <input webkitdirectory> (non conservé)
+let diagFolderIndex = null;   // [{ name, path, getFile }] — reconstruit à chaque démarrage
+let diagDumps = [];           // relevés du mode debug (20 derniers)
+let diagConfirmChain = Promise.resolve();
+const DIAG_IDB_NAME = "nohands-dpe", DIAG_IDB_STORE = "handles", DIAG_IDB_KEY = "dpeFolder";
+const DIAG_JOURNAL_PREFIX = "nhDiagJournal:";
+const diagMemJournal = {};    // repli si chrome.storage.session indisponible
+
+function diagIdb(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DIAG_IDB_NAME, 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore(DIAG_IDB_STORE); };
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction(DIAG_IDB_STORE, mode);
+      const r = fn(tx.objectStore(DIAG_IDB_STORE));
+      tx.oncomplete = () => { db.close(); resolve(r && "result" in r ? r.result : undefined); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    };
+  });
+}
+const diagSaveFolderHandle = (h) => diagIdb("readwrite", (st) => (h ? st.put(h, DIAG_IDB_KEY) : st.delete(DIAG_IDB_KEY))).catch(() => {});
+const diagLoadFolderHandle = () => diagIdb("readonly", (st) => st.get(DIAG_IDB_KEY)).catch(() => null);
+
+function diagFolderLabel() {
+  if (diagFolderHandle) return "📁 " + diagFolderHandle.name;
+  if (diagFolderFiles) {
+    const root = (diagFolderFiles[0] && (diagFolderFiles[0].webkitRelativePath || "").split("/")[0]) || "dossier";
+    return `📁 ${root} (${diagFolderFiles.length} fichier(s), non conservé à la fermeture)`;
+  }
+  return "aucun dossier";
+}
+
+function diagRefreshFileUI() {
+  document.querySelectorAll(".scn-diag-unitname").forEach((e) => {
+    e.textContent = diagUnitFile ? `${diagUnitFile.name} (${diagFmtSize(diagUnitFile.size)})` : "aucun";
+  });
+  document.querySelectorAll(".scn-diag-foldername").forEach((e) => { e.textContent = diagFolderLabel(); });
+  refreshScenarioWarnings();
+}
+
+function diagSetUnitFile(file) {
+  if (file && !/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
+    showStatus(`« ${file.name} » n'est pas un PDF.`, "error");
+    return;
+  }
+  diagUnitFile = file || null;
+  diagRefreshFileUI();
+}
+
+async function diagPickFolder(div) {
+  if (typeof window.showDirectoryPicker !== "function") { div.querySelector(".scn-diag-folderinput").click(); return; }
+  try {
+    const h = await window.showDirectoryPicker({ id: "nohands-dpe", mode: "read" });
+    diagFolderHandle = h;
+    diagFolderFiles = null;
+    diagFolderIndex = null;
+    await diagSaveFolderHandle(h);
+    diagRefreshFileUI();
+    showStatus(`Dossier des DPE : ${h.name} (mémorisé).`, "success");
+  } catch (e) {
+    if (e && e.name === "AbortError") return;
+    // API refusée dans ce contexte : sélection classique (non conservée).
+    div.querySelector(".scn-diag-folderinput").click();
+  }
+}
+
+// Accès au dossier : demandé au clic sur Démarrer (geste utilisateur requis).
+async function diagPrepareRun(steps) {
+  diagFolderIndex = null;
+  if (!diagFolderHandle) return;
+  if (!steps.some((s) => s.type === "sigeoDpe" && s.diagAttach !== false && !s.diagSimulate)) return;
+  try {
+    if ((await diagFolderHandle.queryPermission({ mode: "read" })) === "granted") return;
+    const p = await diagFolderHandle.requestPermission({ mode: "read" });
+    if (p !== "granted") showStatus(`Accès au dossier « ${diagFolderHandle.name} » refusé : les PDF ne pourront pas être lus.`, "error");
+  } catch (e) {
+    showStatus(`Dossier des DPE inaccessible (${e.message || e}) : choisis-le à nouveau.`, "error");
+  }
+}
+
+// Liste des fichiers du dossier (sous-dossiers compris, 4 niveaux).
+async function diagListFolder() {
+  if (diagFolderIndex) return diagFolderIndex;
+  const out = [];
+  if (diagFolderHandle) {
+    let perm = "granted";
+    try { perm = await diagFolderHandle.queryPermission({ mode: "read" }); } catch (_) { /* ignoré */ }
+    if (perm !== "granted") throw new Error(`accès au dossier « ${diagFolderHandle.name} » non accordé (relance avec « Démarrer » et accepte, ou choisis à nouveau le dossier)`);
+    const walk = async (dir, prefix, depth) => {
+      for await (const [name, h] of dir.entries()) {
+        if (h.kind === "file") out.push({ name, path: prefix + name, getFile: () => h.getFile() });
+        else if (depth < 4) await walk(h, prefix + name + "/", depth + 1);
+      }
+    };
+    await walk(diagFolderHandle, diagFolderHandle.name + "/", 0);
+  } else if (diagFolderFiles) {
+    diagFolderFiles.forEach((f) => out.push({ name: f.name, path: f.webkitRelativePath || f.name, getFile: async () => f }));
+  } else {
+    throw new Error("aucun dossier des DPE choisi");
+  }
+  diagFolderIndex = out;
+  return out;
+}
+
+// Source du PDF. Ligne active : le PDF choisi (s'il correspond à la ligne),
+// sinon le dossier. Boucle : le dossier UNIQUEMENT (le PDF « ligne
+// active » serait joint à toutes les lignes).
+async function diagResolveFile(want, batch) {
+  if (!batch && diagUnitFile) {
+    const f = { name: diagUnitFile.name, path: diagUnitFile.name, size: diagUnitFile.size };
+    const m = diagMatchFile([f], want);
+    if (m.error && (want.name || want.ademe)) {
+      return { error: `choisi (${f.name}) ne correspond pas à la ligne : ${m.error.replace(/^introuvable : /, "")}` };
+    }
+    const file = diagUnitFile;
+    return { file: f, via: m.file ? m.via + ", PDF choisi" : "PDF choisi (rien pour le vérifier)", bytes: async () => new Uint8Array(await file.arrayBuffer()) };
+  }
+  let list;
+  try { list = await diagListFolder(); }
+  catch (e) {
+    return { error: e.message + (!batch ? " — ou choisis le PDF de la ligne active" : diagUnitFile ? " (le PDF « ligne active » n'est jamais utilisé en boucle)" : "") };
+  }
+  const m = diagMatchFile(list, want);
+  if (m.error) return { error: m.error };
+  return {
+    file: { name: m.file.name, path: m.file.path }, via: m.via,
+    bytes: async () => new Uint8Array(await (await m.file.getFile()).arrayBuffer())
+  };
+}
+
+async function diagPdfText(bytes) {
+  if (!window.pdfjsLib) return "";
+  try {
+    const r = await dsReadPdf(pdfjsLib, bytes.slice()); // copie : pdf.js détache le buffer
+    try { r.doc.destroy(); } catch (_) { /* ignoré */ }
+    return r.pages.join("\n");
+  } catch (_) { return ""; }
+}
+
+// Journal anti-doublon : une entrée par DPE (fiche + N° ADEME), écrite
+// AVANT chaque postback. Vit le temps de la session du navigateur.
+async function diagJournalGet(key) {
+  const k = DIAG_JOURNAL_PREFIX + key;
+  try {
+    if (chrome.storage && chrome.storage.session) return (await chrome.storage.session.get(k))[k] || null;
+  } catch (_) { /* repli mémoire */ }
+  return diagMemJournal[k] || null;
+}
+async function diagJournalSet(key, entry) {
+  const k = DIAG_JOURNAL_PREFIX + key;
+  try {
+    if (chrome.storage && chrome.storage.session) {
+      if (entry) await chrome.storage.session.set({ [k]: entry });
+      else await chrome.storage.session.remove(k);
+      return;
+    }
+  } catch (_) { /* repli mémoire */ }
+  if (entry) diagMemJournal[k] = entry; else delete diagMemJournal[k];
+}
+async function diagJournalClear() {
+  let n = 0;
+  try {
+    if (chrome.storage && chrome.storage.session) {
+      const all = await chrome.storage.session.get(null);
+      const keys = Object.keys(all || {}).filter((k) => k.startsWith(DIAG_JOURNAL_PREFIX));
+      if (keys.length) await chrome.storage.session.remove(keys);
+      n += keys.length;
+    }
+  } catch (_) { /* ignoré */ }
+  for (const k of Object.keys(diagMemJournal)) { delete diagMemJournal[k]; n++; }
+  return n;
+}
+
+// Confirmation avant upload (une à la fois, même en multi-onglets).
+function diagAskConfirm(info) {
+  const run = () => new Promise((resolve) => {
+    const box = $("scnConfirm");
+    const body = $("scnConfirmBody");
+    $("scnConfirmTitle").textContent = "Joindre ce PDF au diagnostic ?";
+    body.innerHTML = "";
+    [["Ligne", info.row], ["Lot", info.lot], ["Fiche", info.fiche || "—"],
+      ["N° ADEME", info.ademe ? `${info.ademe} (${info.ademeSrc})` : "—"],
+      ["Fichier", `${info.path} (${info.size})`], ["Retenu par", info.via], ["Contrôle", info.check]]
+      .forEach(([k, v]) => {
+        const d = document.createElement("div");
+        const b = document.createElement("b");
+        b.textContent = k + " : ";
+        d.appendChild(b);
+        d.appendChild(document.createTextNode(v || "—"));
+        body.appendChild(d);
+      });
+    box.classList.toggle("risky", !!info.risky);
+    box.hidden = false;
+    const panelEl = box.closest(".panel[data-tab]");
+    if (panelEl && panelEl.hidden) showTab(panelEl.getAttribute("data-tab")); // la question doit être visible
+    try { box.scrollIntoView({ block: "nearest" }); } catch (_) { /* ignoré */ }
+    const yes = $("scnConfirmYes"), no = $("scnConfirmNo");
+    let timer = null;
+    const done = (v) => {
+      clearInterval(timer);
+      box.hidden = true;
+      yes.onclick = null;
+      no.onclick = null;
+      resolve(v);
+    };
+    yes.onclick = () => done(true);
+    no.onclick = () => done(false);
+    timer = setInterval(() => { if (scnStopRequested) done(false); }, 200);
+  });
+  const p = diagConfirmChain.then(run);
+  diagConfirmChain = p.catch(() => {});
+  return p;
+}
+
+// Relevé du mode debug : résumé dans le journal, détail en console + copie.
+function diagRecordDump(d, prefix = "") {
+  if (!d || !d.dump) return null;
+  const A = d.f.ademe;
+  const entry = {
+    t: new Date().toISOString(), url: d.url, idDiag: d.idDiag, saved: d.saved,
+    ademe: { mode: A.mode, via: A.via, id: A.input ? A.input.id : "", label: A.labelText },
+    divConso: d.divConso, couts: d.couts,
+    altitude: { present: d.f.altitude.present, visible: d.f.altitude.visible },
+    nouvelles: { present: d.f.nouvelles.present, visible: d.f.nouvelles.visible },
+    fournisseur: d.f.fouName, messages: d.messages, attach: d.attach, grid: d.grid, fields: d.dump
+  };
+  diagDumps.push(entry);
+  if (diagDumps.length > 20) diagDumps.shift();
+  const vis = d.dump.filter((x) => x.visible).length;
+  const yn = (o) => (o.present ? (o.visible ? "visible" : "masquée") : "absente");
+  scnLog(`${prefix}🔎 debug ${String(d.url).replace(/^https?:\/\/[^/]+/, "")} : ${d.dump.length} éléments (${vis} visibles) · ` +
+    `ADEME ${A.mode}${A.input ? " #" + (A.input.id || "?") : ""} · coûts ${d.couts.visible ? "visibles" : "masqués"} · ` +
+    `altitude ${yn(d.f.altitude)} · nouvelles valeurs ${yn(d.f.nouvelles)} · fournisseur « ${d.f.fouName.name || "?"} » · ` +
+    `${d.messages.items.length} message(s) · ${d.grid.present ? d.grid.count + " document(s)" : "pas de grille"}`, "skip");
+  try {
+    console.groupCollapsed(`NoHands OSA [DPE debug] ${d.url}`);
+    console.table(d.dump);
+    console.log(entry);
+    console.groupEnd();
+  } catch (_) { /* ignoré */ }
+  return entry;
+}
+
+// Colonne réelle du tableau (évite qu'un nom comme « lot » soit lu comme
+// la lettre de colonne LOT).
+function diagColIdx(name) {
+  const idx = colIndexByName(String(name || "").trim());
+  return idx >= 0 && idx < Math.max(tableWidth(), getColumns().length) ? idx : -1;
+}
+
+// Cellule brute du classeur (numéro de série des dates, nombres non
+// formatés), seulement si elle correspond encore au texte de la ligne.
+function diagRawCell(rowIdx, colIdx, text) {
+  try {
+    const ws = state.workbook && state.sheetName && state.workbook.Sheets[state.sheetName];
+    if (!ws || !ws["!ref"] || colIdx < 0) return null;
+    const rg = XLSX.utils.decode_range(ws["!ref"]);
+    const c = ws[XLSX.utils.encode_cell({ r: rg.s.r + rowIdx, c: rg.s.c + colIdx })];
+    if (!c) return null;
+    if (String(c.w ?? c.v ?? "").trim() !== String(text ?? "").trim()) return null;
+    return { t: c.t, v: c.v };
+  } catch (_) { return null; }
+}
+
+// Valeurs brutes de la ligne pour chaque champ de l'étape.
+function diagRowData(step, rowIdx) {
+  const row = state.rows[rowIdx] || [];
+  const cols = Object.assign({}, DIAG_PRESETS.default, step.diagCols || {});
+  const raw = {};
+  for (const f of DIAG_FIELDS) {
+    const tpl = String(cols[f.k] ?? "");
+    const missing = [];
+    let text = tpl.replace(/\{([^{}]+)\}/g, (w, n) => {
+      const idx = diagColIdx(n);
+      if (idx < 0) { missing.push(n.trim()); return ""; }
+      return getCellByIndex(row, idx);
+    });
+    const one = tpl.trim().match(/^\{([^{}]+)\}$/);
+    const cell = one && !missing.length ? diagRawCell(rowIdx, diagColIdx(one[1]), text) : null;
+    raw[f.k] = { text, cell, missing };
+  }
+  return raw;
+}
+
+function diagWriteResult(ref, rowIdx, text) {
+  ref = String(ref || "").trim();
+  if (!ref || rowIdx === null || rowIdx === undefined || !state.rows.length) return;
+  const row = state.rows[rowIdx] = state.rows[rowIdx] || [];
+  const existed = diagColIdx(ref) >= 0;
+  const idx = existed ? diagColIdx(ref) : resolveOutputTarget(ref, {});
+  if (idx < 0) return;
+  setCellByIndex(row, idx, text);
+  persistSession();
+  if (existed) { renderPreview(); renderSelectedRowFields(); }
+  else renderColumns();
+}
+
+// Adaptateur diagProcess ↔ onglet SIGEO.
+function diagAdapter(tabId, prefix, batch, timeoutMs) {
+  let frameId = 0;
+  const run = (target, cfg) => chrome.scripting.executeScript({ target, func: diagPageOp, args: [Object.assign({ ids: DIAG_IDS }, cfg)] });
+  return {
+    read: async () => {
+      let results;
+      try { results = await run({ tabId, allFrames: true }, { op: "read" }); }
+      catch (_) { return null; } // page en cours de rechargement
+      const fr = (results || []).filter((r) => r && r.result);
+      const hit = fr.find((r) => r.result.isDiag) || fr.find((r) => r.frameId === 0) || fr[0];
+      if (!hit) return null;
+      frameId = hit.frameId || 0;
+      return hit.result;
+    },
+    exec: async (cfg) => {
+      const r = await run({ tabId, frameIds: [frameId] }, cfg);
+      return r && r[0] ? r[0].result : null;
+    },
+    navigate: (url) => navigateTabAndWait(tabId, url, true, timeoutMs),
+    resolveFile: (want) => diagResolveFile(want, batch),
+    pdfText: diagPdfText,
+    confirm: diagAskConfirm,
+    journalGet: diagJournalGet,
+    journalSet: diagJournalSet,
+    debug: (d) => diagRecordDump(d, prefix),
+    log: (t, c) => scnLog(`${prefix}↳ ${t}`, c || ""),
+    sleep: scnSleep,
+    now: () => Date.now(),
+    stopped: () => scnStopRequested
+  };
+}
+
+// Exécution de l'étape pour une ligne. opts.batch : boucle (pas de PDF
+// « ligne active », confirmation selon l'option) ; opts.prefix : journal.
+async function execDiagStep(step, rowIdx, tabId, opts = {}) {
+  const t0 = Date.now();
+  const dur = () => ` — ${((Date.now() - t0) / 1000).toFixed(1)} s`;
+  if (rowIdx === null || rowIdx === undefined || !state.rows[rowIdx]) return { ok: false, error: "aucune ligne de données (sélectionne une ligne)" };
+  const prefix = opts.prefix || "";
+  const batch = !!opts.batch;
+  const row = state.rows[rowIdx];
+  const resultCol = String(step.diagResultCol ?? DIAG_DEFAULTS.resultCol).trim();
+  const write = (text) => diagWriteResult(resultCol, rowIdx, text);
+
+  if (step.diagSkipDone !== false && resultCol) {
+    const idx = diagColIdx(resultCol);
+    const cur = idx >= 0 ? getCellByIndex(row, idx).trim() : "";
+    if (/^OK\b/.test(cur)) return { ok: true, stop: true, info: `ligne déjà saisie (« ${scnTrunc(cur, 50)} ») — ignorée` };
+  }
+
+  const norm = diagNormalizeData(diagRowData(step, rowIdx));
+  if (norm.errors.length) {
+    const msg = "données de la ligne : " + norm.errors.join(" ; ");
+    write("ERREUR — " + msg);
+    return { ok: false, error: msg };
+  }
+  let url = "";
+  if (step.diagUrl) {
+    const nav = buildNavUrl(step.diagUrl, row);
+    if (nav.missing.length) {
+      const msg = `URL de la fiche : colonne(s) introuvable(s) ${nav.missing.join(", ")}`;
+      write("ERREUR — " + msg);
+      return { ok: false, error: msg };
+    }
+    if (nav.values.some((x) => !x)) {
+      const msg = "URL de la fiche : valeur vide dans la ligne";
+      write("ERREUR — " + msg);
+      return { ok: false, error: msg };
+    }
+    url = nav.url;
+  }
+  const T = step.diagTimeout || DIAG_DEFAULTS.timeoutMs;
+  const r = await diagProcess(diagAdapter(tabId, prefix, batch, T), {
+    values: norm.v, warnings: norm.warnings, url,
+    attach: step.diagAttach !== false, desc: step.diagDesc, simulate: !!step.diagSimulate,
+    batch, confirmUpload: step.diagConfirm !== false, debug: !!step.diagDebug,
+    timeoutMs: T, uploadTimeoutMs: step.diagUploadTimeout, rowLabel: "L" + (rowIdx + 1)
+  });
+  const w = r.warnings.length ? ` ⚠ ${r.warnings.join(" ; ")}` : "";
+  if (!r.ok) {
+    write(`ERREUR — ${r.error}${w}`);
+    return { ok: false, error: r.error + dur() };
+  }
+  write(`${r.status === "SIMULATION" ? "SIMULATION OK" : "OK"} — ${r.info}${w}`);
+  return {
+    ok: true, warn: r.warnings.length > 0,
+    info: r.info + (r.warnings.length ? ` · ${r.warnings.length} avertissement(s)` : "") + dur()
+  };
+}
+
+// Relevé manuel (« Lister les champs de la page ») : rien n'est modifié.
+async function diagDumpPage(outEl) {
+  let tabId;
+  try { tabId = await resolveTargetTabId(); }
+  catch (e) { outEl.textContent = e.message; return; }
+  outEl.textContent = "relevé en cours…";
+  let results = [];
+  try {
+    results = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: diagPageOp, args: [{ op: "dump", ids: DIAG_IDS }] });
+  } catch (e) { outEl.textContent = "relevé impossible : " + (e.message || e); return; }
+  const fr = (results || []).filter((r) => r && r.result);
+  const hit = fr.find((r) => r.result.isDiag) || fr.find((r) => r.frameId === 0) || fr[0];
+  if (!hit) { outEl.textContent = "aucune page lisible"; return; }
+  const e = diagRecordDump(hit.result);
+  outEl.textContent = `${e.fields.length} éléments relevés${hit.result.isDiag ? "" : " (ce n'est pas une fiche diag_manage)"} — « Copier le relevé » pour me les envoyer`;
+}
+
+function wireDiagStepUI(div, step) {
+  const q = (c) => div.querySelector(c);
+  div.querySelectorAll(".scn-diag-preset").forEach((b) => b.addEventListener("click", () => {
+    const preset = DIAG_PRESETS[b.dataset.preset] || DIAG_PRESETS.default;
+    div.querySelectorAll(".scn-diag-col").forEach((i) => { i.value = preset[i.dataset.k] ?? ""; });
+    persistWorkingConfig();
+  }));
+  const drop = q(".scn-diag-drop"), unit = q(".scn-diag-unitfile");
+  drop.addEventListener("click", () => unit.click());
+  drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); unit.click(); } });
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    drop.classList.remove("over");
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) diagSetUnitFile(f);
+  });
+  unit.addEventListener("change", () => { if (unit.files[0]) diagSetUnitFile(unit.files[0]); unit.value = ""; });
+  q(".scn-diag-unitclear").addEventListener("click", () => diagSetUnitFile(null));
+  q(".scn-diag-folder").addEventListener("click", () => diagPickFolder(div));
+  const folderIn = q(".scn-diag-folderinput");
+  folderIn.addEventListener("change", () => {
+    const files = Array.from(folderIn.files || []);
+    if (!files.length) return;
+    diagFolderFiles = files;
+    diagFolderHandle = null;
+    diagFolderIndex = null;
+    diagSaveFolderHandle(null);
+    folderIn.value = "";
+    diagRefreshFileUI();
+  });
+  const out = q(".scn-diag-out");
+  q(".scn-diag-dump").addEventListener("click", () => diagDumpPage(out));
+  q(".scn-diag-copy").addEventListener("click", async () => {
+    if (!diagDumps.length) { out.textContent = "aucun relevé : « Lister les champs de la page » ou mode debug"; return; }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(diagDumps, null, 1));
+      out.textContent = `${diagDumps.length} relevé(s) copié(s) dans le presse-papiers`;
+    } catch (e) { out.textContent = "copie impossible : " + (e.message || e); }
+  });
+  q(".scn-diag-forget").addEventListener("click", async () => {
+    const n = await diagJournalClear();
+    out.textContent = `historique DPE vidé (${n} entrée(s))`;
+  });
+  diagRefreshFileUI();
+}
+
+diagLoadFolderHandle().then((h) => {
+  if (h && !diagFolderHandle && !diagFolderFiles) { diagFolderHandle = h; diagRefreshFileUI(); }
+});
+
 /* ---------- Moteur d'exécution ---------- */
 
 function scnTrunc(s, n = 45) {
@@ -6385,6 +6880,8 @@ function scnStepLabel(s) {
       return `SIGEO : adresse ${scnTrunc(s.sigeoAddressId || "?", 20)}${s.sigeoDryRun !== false ? " (simulation)" : ""}`;
     case "batchedit": return `Éditer par lots de ${s.batchSize || 10}`;
     case "sigeoSelector": return `Sélecteur SIGEO : ${sselChampLabel(s)} = « ${scnTrunc(s.sselValeur, 25)} »`;
+    case "sigeoDpe":
+      return `SIGEO : saisir un DPE${s.diagAttach !== false && !s.diagSimulate ? " + PDF" : ""}${s.diagSimulate ? " (simulation)" : ""}`;
   }
   return s.type;
 }
@@ -6661,6 +7158,7 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
         };
       }
       case "sigeo": return await execSigeoStep(step, rowIdx, tabId);
+      case "sigeoDpe": return await execDiagStep(step, rowIdx, tabId, opts);
 
       case "batchedit": {
         if (!step.batchButton) return { ok: false, error: "sélecteur du bouton « Éditer » manquant — à renseigner dans la configuration de l'étape (champ « bouton à cliquer »)" };
@@ -6816,7 +7314,7 @@ async function execScenarioStep(step, rowIdx, tabId, opts = {}) {
 async function runScenarioForRow(rowIdx, tabId, steps, prefix = "", opts = {}) {
   // Contexte propre à la ligne : garde-fous inter-étapes (ex. une étape
   // Compte exige qu'un Mandat MG ait réussi plus tôt dans CE déroulé).
-  opts = { ...opts, ctx: { mandatOk: false } };
+  opts = { ...opts, ctx: { mandatOk: false }, prefix };
   for (let i = 0; i < steps.length; i++) {
     if (scnStopRequested) return { stopped: true };
     const step = steps[i];
@@ -6853,6 +7351,7 @@ function scenarioNeedsRow(steps) {
     (s.type === "goto" && /\{[^{}]+\}/.test(s.gotoUrl || "")) ||
     (s.type === "input" && /\{[^{}]+\}/.test(s.inputValue || "")) ||
     (s.type === "pdfwrite") ||
+    (s.type === "sigeoDpe") ||
     (s.type === "sigeoSelector" && /\{[^{}]+\}/.test(s.sselValeur || "")) ||
     (s.type === "pdfcheck" && (/\{[^{}]+\}/.test(s.pdfVal || "") ||
       (s.pdfDocMode === "match" && /\{[^{}]+\}/.test(s.pdfDocMatch || "")))) ||
@@ -6872,6 +7371,7 @@ function scnBegin() {
   $("addStepBtn").disabled = true;
   $("addSselStepBtn").disabled = true;
   $("addOdTemplateBtn").disabled = true;
+  $("addDpeTemplateBtn").disabled = true;
   $("stopScenarioBtn").disabled = false;
   $("scnLog").innerHTML = "";
   scnLogScenarioWarnings();
@@ -6886,6 +7386,7 @@ function scnFinish() {
   $("addStepBtn").disabled = false;
   $("addSselStepBtn").disabled = false;
   $("addOdTemplateBtn").disabled = false;
+  $("addDpeTemplateBtn").disabled = false;
   $("stopScenarioBtn").disabled = true;
   persistSession();
 }
@@ -6901,6 +7402,7 @@ $("runScenarioBtn").addEventListener("click", async () => {
     showStatus("Sélectionne d'abord une ligne à saisir.", "error");
     return;
   }
+  await diagPrepareRun(steps); // accès au dossier des DPE : pendant le geste utilisateur
   saveCustomFields();
 
   let tabId;
@@ -6922,6 +7424,7 @@ $("runScenarioLoopBtn").addEventListener("click", async () => {
   const steps = getScenarioSteps();
   if (!steps.length) { showStatus("Ajoute au moins une étape au scénario.", "error"); return; }
   if (!state.rows.length) { showStatus("Charge d'abord des données (onglet Données).", "error"); return; }
+  await diagPrepareRun(steps); // accès au dossier des DPE : pendant le geste utilisateur
   saveCustomFields();
 
   const startRowInput = parseInt($("scnStartRow").value, 10) || (dataStartIdx() + 1);
@@ -6953,7 +7456,7 @@ $("runScenarioLoopBtn").addEventListener("click", async () => {
     }
     selectRow(idx); // la ligne active suit la boucle (visible dans l'UI)
     scnLog(`— Ligne L${idx + 1} —`);
-    const res = await runScenarioForRow(idx, tabId, steps, `L${idx + 1} · `);
+    const res = await runScenarioForRow(idx, tabId, steps, `L${idx + 1} · `, { batch: true });
     if (res.stopped) { scnLog("Arrêté par l'utilisateur.", "skip"); break; }
     if (res.ok) okCount++; else errCount++;
     done++; scnSetProgress(done, total); scnUpdateTiming(done, total, runStart);
@@ -7035,6 +7538,7 @@ $("runScenarioMultiBtn").addEventListener("click", async () => {
   const steps = getScenarioSteps();
   if (!steps.length) { showStatus("Ajoute au moins une étape au scénario.", "error"); return; }
   if (!state.rows.length) { showStatus("Charge d'abord des données (onglet Données).", "error"); return; }
+  await diagPrepareRun(steps); // accès au dossier des DPE : pendant le geste utilisateur
   saveCustomFields();
 
   const startRowInput = parseInt($("scnStartRow").value, 10) || (dataStartIdx() + 1);
@@ -7097,7 +7601,7 @@ $("runScenarioMultiBtn").addEventListener("click", async () => {
         continue;
       }
 
-      const res = await runScenarioForRow(idx, tabId, steps, `${tag} · L${idx + 1} · `, { soloTab: true });
+      const res = await runScenarioForRow(idx, tabId, steps, `${tag} · L${idx + 1} · `, { soloTab: true, batch: true });
       if (res.stopped) return;
       if (res.ok) okCount++; else errCount++;
       tick();

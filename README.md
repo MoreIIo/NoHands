@@ -201,6 +201,82 @@ deux modes :
    (Mandat MG → clic « Saisir les contreparties » → Compte ligne 1 → Débit →
    Crédit → Libellé), à compléter avec 🎯.
 
+12. **Étape de scénario « SIGEO : saisir un DPE »** (bouton **Modèle DPE**) :
+   remplit le formulaire **Diagnostic** de SIGEO (popup ouverte en onglet,
+   `…/popup.aspx/fr/sig_imm/diag_manage/{id}/10/{idDiag}`, `0` en création),
+   clique **Enregistrer** puis joint le **PDF du DPE** (description « DPE »).
+
+   **Colonnes** (modèles `{Colonne}` modifiables, bloc « Colonnes du
+   fichier ») : `type_local` (habitation → 11 par défaut, hors habitation →
+   15), `code_fournisseur`*, `date_etabli`*, `date_validite`, `numero_ademe`,
+   `conso_ep`*, `emission_ges`*, `lettre_ep_forcee`, `lettre_ges_forcee`,
+   `altitude_800m` / `nouvelles_valeurs` (oui/non), `cout_min`, `cout_max`,
+   `date_prix`, `resultat`, `commentaire`, `fichier_dpe`, `lot` (affichage).
+   Le bouton « Colonnes de l'Analyse DPE » reprend celles écrites par
+   l'extraction *Analyse DPE* (`{N° FU}`, `{Établi le}`, `{DPE fichier}`…) ;
+   « Modèle DPE » les choisit tout seul si le fichier chargé les contient.
+   Dates : la valeur brute du classeur est lue (n° de série Excel → jj/mm/aaaa,
+   SheetJS affichant sinon `m/d/yy`) ; nombres sans espace ni unité, virgule
+   décimale, dans la limite du `maxlength` du champ. Une donnée obligatoire
+   manquante ou illisible arrête la ligne avant toute saisie.
+
+   **Déroulé** : la page étant entièrement rechargée à chaque `__doPostBack`,
+   l'étape boucle « relire la page → faire la première action manquante →
+   attendre le rechargement » dans l'ordre du formulaire : Type (postback,
+   bloc consommations affiché), Fournisseur (**jamais de touche Entrée** : elle
+   déclenche Enregistrer), Établi le (postback : « Valable jusqu'au » calculé,
+   champ N° ADEME affiché pour les DPE récents), N° ADEME (repéré dans la
+   dernière cellule de la ligne « Établi le »), coûts annuels dès que leur
+   bloc apparaît (revérifié après chaque postback), Conso EP puis GES
+   (postbacks, lettres calculées vérifiées), cases, lettres forcées, résultat,
+   commentaire. Les valeurs saisies avant un déclenchement partent avec le
+   POST ; rien n'est saisi entre le déclenchement et le rechargement (20 s
+   max, sinon erreur). Une valeur effacée par un postback est ressaisie
+   (3 essais max). Contrôle final : toutes les valeurs relues et comparées
+   (`320` = `320,00`), puis **Enregistrer** (jamais « Enreg. et fermer ») :
+   succès = `Enregistrement réussi !` dans `#msgbody` ; tout autre message
+   arrête la ligne et son texte est affiché dans le journal et la colonne
+   résultat. Après enregistrement : N° ADEME relu dans `#body_x_labelIdDpe`
+   (différent → arrêt avant l'upload), nom du fournisseur non vide, valeurs
+   relues une seconde fois. La popup reste ouverte.
+   Champ ADEME absent alors qu'un N° est fourni (DPE ancien) → avertissement,
+   la ligne continue.
+
+   **PDF** : « PDF (ligne active) » (clic ou glisser-déposer) pour *Démarrer
+   sur la ligne active* ; **Dossier des DPE** (mémorisé, sous-dossiers
+   compris ; l'accès est redemandé au clic sur Démarrer) pour la boucle — le
+   PDF « ligne active » n'est **jamais** utilisé en boucle. Correspondance
+   stricte : nom exact (`fichier_dpe`, `.pdf` facultatif), sinon nom
+   contenant le N° ADEME ; aucun fichier ou plusieurs → arrêt **avant toute
+   saisie**. Contrôles : en-tête `%PDF` ; N° ADEME présent dans le nom, sinon
+   dans le texte du PDF (pdf.js) ; un **autre** N° ADEME dans le nom ou le
+   texte → arrêt ; aucun lisible (scan) → confirmation obligatoire (refus en
+   boucle sans confirmation). Avant l'upload, le panneau affiche ligne, lot,
+   fiche, N° ADEME (confirmé par SIGEO), fichier et contrôle, et demande
+   confirmation (toujours sur la ligne active ; en boucle selon « confirmer
+   chaque upload », coché par défaut). Upload : Description « DPE » puis
+   fichier posé dans le champ (`DataTransfer`, octets transmis en base64), le
+   `change` déclenche l'envoi ; vérifié par le compteur « N Résultat(s) »
+   (+1) et la ligne « DPE ».
+
+   **Jamais de doublon** : une fiche déjà enregistrée (id dans l'URL ou
+   N° ADEME affiché) n'est réenregistrée que si une valeur a été corrigée ;
+   un document « DPE » déjà joint n'est pas renvoyé. Un journal
+   (`chrome.storage.session`, écrit avant chaque postback) mémorise chaque DPE
+   enregistré pendant la session du navigateur : relancé sur une page de
+   création `/0`, l'étape rouvre la fiche existante (si l'URL de la fiche est
+   renseignée) ou s'arrête ; un enregistrement lancé sans confirmation
+   (rechargement en plein enregistrement) bloque la ligne jusqu'à
+   vérification (« Vider l'historique DPE »). Les lignes dont la colonne
+   résultat (`Saisie DPE` par défaut) commence par `OK` sont sautées.
+   **Simulation** : tout est rempli et contrôlé, sans Enregistrer ni PDF.
+
+   **Debug** : la case « debug » relève à chaque chargement tous les champs
+   (id, libellé, visible / masqué, valeur, `onchange` / `onkeydown`…), les
+   messages et la grille (résumé dans le journal, détail dans la console) ;
+   « Lister les champs de la page » fait un relevé sans rien modifier,
+   « Copier le relevé » copie le tout en JSON.
+
 ## 3. Onglet Extraction (ex-OSA)
 
 **Type d'extraction** : *Standard* (ci-dessous), **Recherche IM SIGEO**,
@@ -524,6 +600,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── sigeo-lot.js       Extraction « Recherche d'id interne de lot » (POST direct, repli onglet)
 ├── sigeo-dpe.js       Extraction « DPE SIGEO » (page Documents, filtre, plus récent, téléchargement)
 ├── dpe-scan.js        Extraction « Analyse DPE » (lecture des DPE, recoupements, classes, fournisseurs FU)
+├── sigeo-diag.js      Étape de scénario « SIGEO : saisir un DPE » (formulaire diag_manage + PDF)
 ├── update-check.js    Vérification de mise à jour via GitHub
 ├── lib/xlsx.full.min.js  SheetJS (lecture/écriture Excel)
 ├── lib/pdf.min.js     pdf.js (Mozilla) — analyse PDF de la Toolbox
@@ -531,7 +608,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── lib/ocr/           Tesseract.js (OCR local) : lib, worker, cœur wasm, langue fra
 ├── icons/             Icônes de l'extension
 ├── test.html          Page de test locale des deux modes (non publiée)
-└── tests/             Tests des recherches IM, lot et DPE, analyse DPE (SIGEO simulé, DPE fictifs, jsdom / Playwright)
+└── tests/             Tests des recherches IM, lot et DPE, analyse DPE, saisie DPE (SIGEO simulé, DPE fictifs, jsdom / Playwright)
 ```
 
 Tests de la recherche IM (Node + Playwright + Chrome) :
@@ -554,8 +631,19 @@ fournisseur inconnu, PDF sans ligne — générés par
 `node tests/dpe-scan.panel.e2e.js` (vrai panneau servi en HTTP local, choix du
 dossier, OCR Tesseract.js, liste fournisseurs, export Excel). Un dossier de
 vrais DPE peut être passé en argument : `node tests/dpe-scan.node.js <dossier>`.
+Saisie DPE : `node tests/sigeo-diag.node.js` (logique : dates, nombres,
+correspondance des fichiers, contrôle ADEME, ordre des actions) et
+`node tests/sigeo-diag.panel.e2e.js` (vrai panneau contre un faux SIGEO
+`diag_manage` — `tests/fixtures/sigeo-diag-server.js` : postbacks complets,
+champ ADEME selon la date, coûts après la conso, refus serveur, upload
+multipart — : saisie de bout en bout, ancien DPE, fichiers absent / ambigu /
+mauvais ADEME / scan / non PDF, rechargements pendant la saisie et la
+confirmation, relances sans doublon).
 
-**Version** : 2.14.0 — nouveau type d'extraction **Analyse DPE** (dossier de
+**Version** : 2.15.0 — nouvelle étape de scénario **SIGEO : saisir un DPE**
+(formulaire diagnostic + PDF joint, reprise après chaque postback, journal
+anti-doublon, correspondance stricte du fichier, mode debug).
+2.14.0 — nouveau type d'extraction **Analyse DPE** (dossier de
 PDF → colonnes DPE + n° fournisseur FU d'après une liste modifiable).
 2.13.3 — DPE SIGEO : textes de la colonne DPE statut
 personnalisables (défaut « OK & téléchargé » / « KO pas trouvé »).
