@@ -2,8 +2,9 @@
 //   NODE_PATH=$(npm root -g) node tests/sigeo-dpe.jsdom.js
 // Nécessite jsdom (npm i -g jsdom). La vraie fonction injectée (dpePageOp)
 // tourne dans une fenêtre jsdom chargée avec la page Documents simulée
-// (tests/fixtures/sigeo-dpe-mock.js) ; le POST __doPostBack part vers le
-// faux serveur ASP.NET (PDF ou HTML selon le cas).
+// (tests/fixtures/sigeo-dpe-mock.js) ; le téléchargement (rôle du service
+// worker : GET ged_file_download avec cookies + redirection, contrôle du
+// type MIME) est simulé avec le fetch de Node contre le faux serveur.
 const assert = require("assert");
 const { JSDOM } = require("jsdom");
 const dpe = require("../sigeo-dpe.js");
@@ -37,7 +38,16 @@ function adapter(srv, saved, logs) {
     },
     execAll: async (cfg) => [{ frameId: 0, result: await runOp(dom, cfg) }],
     exec: async (_f, cfg) => runOp(dom, cfg),
-    save: async (b64, filename, type) => { saved.push({ b64, filename, type }); return { ok: true, filename }; },
+    // Comme dpeDownload (background.js) : chrome.downloads suit la
+    // redirection avec les cookies ; une page HTML est refusée.
+    download: async (url, filename) => {
+      const r = await fetch(url, { headers: { cookie: srv.cookie || "" }, redirect: "follow" });
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (!r.ok) return { ok: false, error: "HTTP " + r.status };
+      if (/text\/html/.test(r.headers.get("content-type") || "")) return { ok: false, html: true, error: "SIGEO a renvoyé une page HTML (session expirée ?)" };
+      saved.push({ url, filename, buf });
+      return { ok: true, filename: filename.split("/").pop(), size: buf.length };
+    },
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     stopped: () => false,
     log: (t) => logs.push(t)
@@ -156,12 +166,13 @@ function adapter(srv, saved, logs) {
 
   // ---- Parcours complet + téléchargement (POST __doPostBack) ----
   const srv = await mock.start();
+  srv.cookie = "sigeo=ok";
   const P = (url, extra = {}) => Object.assign({
     url, rules: {}, timeoutMs: 5000, download: true,
-    name: (c, serverName) => dpe.dpeFileName(dpe.DPE_DEFAULT_NAME, { date: c.iso, serverName }, (s) => s.replace("{IM}", "IM0393664").replace("{lot}", "10"))
+    name: (c) => dpe.dpeFileName(dpe.DPE_DEFAULT_NAME, { date: c.iso, nom: c.name, serverName: c.name }, (s) => s.replace("{IM}", "IM0393664").replace("{lot}", "10"))
   }, extra);
 
-  await check("lot A : attente du chargement, POST avec __VIEWSTATE à jour, PDF enregistré", async () => {
+  await check("lot A : attente du chargement, GET ged_file_download (popup), aucun POST, PDF enregistré", async () => {
     const saved = [], logs = [];
     const r = await dpe.dpeProcess(adapter(srv, saved, logs), P(srv.docsUrl("A")));
     assert.strictEqual(r.status, "OK", JSON.stringify(r));
@@ -169,12 +180,11 @@ function adapter(srv, saved, logs) {
     assert.strictEqual(r.count, 1);
     assert.strictEqual(r.statut, "Téléchargé");
     assert.strictEqual(r.file, "IM0393664_10_DPE_2022-10-19.pdf");
+    assert.strictEqual(r.url, srv.origin + "/bare.aspx/fr/fil/ged_file_download/A03");
     assert.strictEqual(saved.length, 1);
-    assert.ok(Buffer.from(saved[0].b64, "base64").toString().startsWith("%PDF-"));
-    const post = srv.stats.posts[srv.stats.posts.length - 1];
-    assert.strictEqual(post.viewstate, mock.VIEWSTATE);
-    assert.strictEqual(post.ev, "ev-A");
-    assert.ok(post.target.endsWith("$grid$x$_ctl6$_ctl3"), post.target);
+    assert.ok(saved[0].buf.toString().startsWith("%PDF-"));
+    assert.deepStrictEqual(srv.stats.gets, ["A03"]);
+    assert.strictEqual(srv.stats.posts.length, 0, "plus aucun POST __doPostBack");
   });
 
   await check("fiche lot → page Documents suivie automatiquement", async () => {
@@ -195,14 +205,34 @@ function adapter(srv, saved, logs) {
     assert.strictEqual(saved.length, 0);
   });
 
-  await check("lot H : réponse HTML au lieu du PDF → KO téléchargement, sans exception", async () => {
-    const saved = [], logs = [];
-    const r = await dpe.dpeProcess(adapter(srv, saved, logs), P(srv.docsUrl("H")));
+  await check("lot H : la redirection mène à une page HTML → KO, sans exception", async () => {
+    const saved = [];
+    const r = await dpe.dpeProcess(adapter(srv, saved, []), P(srv.docsUrl("H")));
     assert.strictEqual(r.status, "ERREUR");
     assert.strictEqual(r.present, "OUI");
-    assert.ok(/^KO téléchargement : réponse HTML au lieu d'un fichier \(validation ASP\.NET refusée\)/.test(r.statut), r.statut);
+    assert.strictEqual(r.statut, "KO téléchargement : SIGEO a renvoyé une page HTML (session expirée ?)");
     assert.strictEqual(saved.length, 0);
-    assert.ok(logs.some((l) => /POST __doPostBack refusé/.test(l)));
+  });
+
+  await check("lot N : onclick sans popup(ged_file_download) → lien de téléchargement introuvable", async () => {
+    const before = srv.stats.gets.length;
+    const r = await dpe.dpeProcess(adapter(srv, [], []), P(srv.docsUrl("N")));
+    assert.strictEqual(r.present, "OUI");
+    assert.strictEqual(r.statut, "KO téléchargement : lien de téléchargement introuvable");
+    assert.strictEqual(srv.stats.gets.length, before);
+  });
+
+  await check("session expirée : redirection vers la connexion (HTML) → KO", async () => {
+    srv.cookie = "";
+    const r = await dpe.dpeProcess(adapter(srv, [], []), P(srv.docsUrl("A")));
+    srv.cookie = "sigeo=ok";
+    assert.ok(/page HTML \(session expirée \?\)/.test(r.statut), r.statut);
+  });
+
+  await check("nom de fichier {nom} : texte du lien sans extension, extension conservée", async () => {
+    const n = dpe.dpeFileName("{IM}_{lot}_{nom}", { date: "2025-01-09", nom: "17312 (DIAG DPE2021).pdf", serverName: "17312 (DIAG DPE2021).pdf" },
+      (s) => s.replace("{IM}", "IM0393664").replace("{lot}", "10"));
+    assert.strictEqual(n, "IM0393664_10_17312_(DIAG_DPE2021).pdf");
   });
 
   await check("lot F : parcours complet + téléchargement", async () => {

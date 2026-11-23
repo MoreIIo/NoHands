@@ -3746,29 +3746,15 @@ function dpeEstimateText() {
   return `Estimation : ${n} lot${n > 1 ? "s" : ""} → ~${formatDuration(n * per)}.`;
 }
 
-// Enregistre des octets (base64) dans Téléchargements/<dossier>/<nom>.
-async function dpeSaveFile(b64, filename, type) {
-  if (!chrome.downloads) return { ok: false, error: "permission « Téléchargements » non accordée" };
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  const url = URL.createObjectURL(new Blob([bytes], { type: type || "application/pdf" }));
+// Téléchargement par le service worker (background.js, action
+// « dpeDownload ») : chrome.downloads suit la redirection de
+// ged_file_download et envoie les cookies de session SIGEO.
+async function dpeBgDownload(url, filename) {
   try {
-    const id = await chrome.downloads.download({ url, filename, conflictAction: "uniquify", saveAs: false });
-    // Attend la fin (ou l'échec) pour connaître le nom réel (uniquify).
-    const t0 = Date.now();
-    while (Date.now() - t0 < 30000) {
-      const [it] = await chrome.downloads.search({ id });
-      if (!it) break;
-      if (it.state === "complete") return { ok: true, filename: (it.filename || filename).split(/[\\/]/).pop() };
-      if (it.state === "interrupted") return { ok: false, error: "enregistrement interrompu (" + (it.error || "?") + ")" };
-      await sleep(150);
-    }
-    return { ok: true, filename: filename.split("/").pop() };
+    const r = await chrome.runtime.sendMessage({ action: "dpeDownload", url, filename, timeoutMs: 120000 });
+    return r || { ok: false, error: "aucune réponse du service worker" };
   } catch (e) {
     return { ok: false, error: e.message || String(e) };
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 }
 
@@ -3782,7 +3768,7 @@ function dpeChromeAdapter(tabId, timeoutMs) {
       if (!res || !res[0]) throw new Error("frame injoignable");
       return res[0].result;
     },
-    save: dpeSaveFile,
+    download: dpeBgDownload,
     sleep: (ms) => sleep(ms),
     stopped: () => stopRequested,
     log: (t, c) => logLine(t, c)
@@ -3794,8 +3780,8 @@ function dpeParams(cfg, row, rules) {
   return {
     url: dpeRowUrl(cfg, row), rules, download: cfg.download,
     timeoutMs: Math.max(2000, cfg.timeout),
-    name: (c, serverName) => (folder ? folder + "/" : "") +
-      dpeFileName(cfg.name, { date: c.iso, serverName }, (s) => resolveRowTemplate(s, row))
+    name: (c) => (folder ? folder + "/" : "") +
+      dpeFileName(cfg.name, { date: c.iso, nom: c.name, serverName: c.name }, (s) => resolveRowTemplate(s, row))
   };
 }
 
@@ -3925,7 +3911,7 @@ $("dpeTestBtn").addEventListener("click", async () => {
     const c = res.chosen;
     let txt;
     if (c) {
-      const name = p.name(c, "");
+      const name = p.name(c);
       txt = `✓ Ligne ${startIdx + 1} : ${res.count} DPE — retenu « ${c.name} » du ${c.date || "?"} [${c.section}] → ${name}` +
         (res.count > 1 ? ` — autres : ${res.candidates.filter((x) => x !== c).map((x) => `${x.name} ${x.date}`).join(" ; ")}` : "");
     } else if (res.status === "ABSENT") {
@@ -5911,11 +5897,9 @@ function scnStepLabel(s) {
 }
 
 /* ---------- Attente d'un téléchargement (étape « Éditer par lots ») ----------
-   La permission « downloads » est optionnelle (optional_permissions du
-   manifest) : elle n'est demandée que quand l'utilisateur choisit un mode
-   d'attente basé sur le téléchargement — ainsi la mise à jour de
-   l'extension ne réclame aucune nouvelle permission en bloc. Tant qu'elle
-   n'est pas accordée, chrome.downloads est indéfini. */
+   La permission « downloads » est déclarée dans le manifest (2.13.2, pour
+   l'extraction DPE SIGEO) ; les vérifications ci-dessous restent sans
+   effet de bord (contains/request renvoient true). */
 
 async function hasDownloadsPermission() {
   try {

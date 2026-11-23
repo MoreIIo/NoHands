@@ -132,9 +132,8 @@ deux modes :
    que le navigateur commence à recevoir le fichier — le plus rapide), ou
    **fin du téléchargement** (attend que le fichier soit complet — le plus
    sûr si le serveur est lent). Les deux modes basés sur le téléchargement
-   demandent l'accès aux téléchargements de Chrome : la permission est
-   *optionnelle* et n'est demandée qu'à la sélection du mode, jamais à
-   l'installation. Si aucun fichier n'arrive dans le délai d'abandon
+   utilisent l'accès aux téléchargements de Chrome (permission
+   `downloads` du manifest). Si aucun fichier n'arrive dans le délai d'abandon
    (30 s par défaut), le lot est signalé « sans téléchargement » et la
    boucle continue. En mode multi-onglets, l'attente du téléchargement
    n'est pas fiable (Chrome ne dit pas quel onglet a déclenché le
@@ -324,8 +323,7 @@ SIGEO changent. Un même couple IM/LT n'est cherché qu'une fois par exécution.
    directement avec des `{Colonne}`, ex. `…/lot_manage?…={ID interne}`.
 3. **Tester sur la ligne de départ** : ouvre la page, liste les DPE trouvés et
    le nom de fichier prévu, sans rien télécharger ni écrire.
-4. **Lancer** : la permission « Téléchargements » est demandée la première
-   fois (permission optionnelle de l'extension).
+4. **Lancer** (permission « Téléchargements » déclarée dans le manifest).
 
 Pour chaque ligne : attente de la page (« Chargement en cours... » disparu),
 lecture des sections dont le **titre** contient `EPC` (« Diagnostics >> EPC »,
@@ -339,16 +337,21 @@ termite, Carrez, ERP / ERNMT — sauf si « DPE » figure dans le nom. Les règl
 **Le plus récent** : date de la colonne Date, puis année `20xx` du nom, puis
 ordre du tableau.
 
-Téléchargement **sans cliquer** sur le lien : le formulaire de la page
-(`__VIEWSTATE`, `__EVENTVALIDATION`…) est renvoyé en `fetch` POST depuis
-l'onglet avec `__EVENTTARGET` = cible du `__doPostBack` du lien. Si la
-réponse est du HTML au lieu d'un fichier (ViewState refusé, session…), la
-ligne passe en `KO téléchargement : …`, c'est signalé dans le journal et la
-boucle continue (aucune autre méthode n'est tentée). Fichier enregistré dans
-`Téléchargements/DPE_SIGEO/` (configurable) sous le nom
-`{IM}_{lot}_DPE_{date}` + extension du serveur (`.pdf` par défaut), date ISO
-(`IM0393664_10_DPE_2022-10-19.pdf`), caractères interdits Windows retirés ;
-un doublon est renommé `(1)`.
+Téléchargement **sans cliquer** sur le lien : le `href` `__doPostBack` du
+lien n'est pas utilisé (il renvoie la page Documents). L'URL du fichier est
+lue dans son `onclick="popup('/bare.aspx/fr/fil/ged_file_download/<ID>', …)"`
+puis confiée au service worker, qui appelle `chrome.downloads.download`
+(Chrome suit la redirection et envoie les cookies de session, ce qu'un
+`fetch` depuis la page ne peut pas faire). Le service worker attend la fin :
+interrompu → `KO téléchargement : téléchargement interrompu (…)` ; type
+`text/html` → fichier supprimé et `KO téléchargement : SIGEO a renvoyé une
+page HTML (session expirée ?)` ; lien sans `ged_file_download` →
+`KO téléchargement : lien de téléchargement introuvable`. La boucle continue
+dans tous les cas. Fichier enregistré dans `Téléchargements/DPE_SIGEO/`
+(configurable) sous le nom `{IM}_{lot}_DPE_{date}` (`{nom}` = nom du fichier
+dans SIGEO, sans extension) + extension du fichier SIGEO (`.pdf` par défaut),
+date ISO (`IM0393664_10_DPE_2022-10-19.pdf`), caractères interdits Windows et
+espaces retirés ; un doublon est renommé `(1)`.
 
 Colonnes écrites (créées si absentes) : **DPE présent** (OUI / NON /
 ERREUR), **Nb DPE** (plus d'un → ligne « à vérifier » dans le récap),
@@ -474,9 +477,15 @@ ambigu / introuvable, session expirée, contre un faux serveur ASP.NET :
 `tests/fixtures/sigeo-lot-server.js`) et `node tests/sigeo-lot.panel.e2e.js`.
 DPE : `node tests/sigeo-dpe.jsdom.js` (jsdom : filtre, plus récent, nom de
 fichier, attente du chargement, fiche → page Documents, POST → PDF ou HTML,
-contre `tests/fixtures/sigeo-dpe-mock.js`) et `node tests/sigeo-dpe.panel.e2e.js`.
+contre `tests/fixtures/sigeo-dpe-mock.js`), `node tests/sigeo-dpe.background.js`
+(service worker : PDF, page HTML supprimée, interruption) et
+`node tests/sigeo-dpe.panel.e2e.js`.
 
-**Version** : 2.13.1 — DPE SIGEO : titres de section lus dans les
+**Version** : 2.13.2 — DPE SIGEO : téléchargement par l'URL
+`ged_file_download` du `onclick` popup(…) via `chrome.downloads` dans le
+service worker (le POST `__doPostBack` renvoyait la page Documents) ;
+permission `downloads` dans le manifest ; variable `{nom}`.
+2.13.1 — DPE SIGEO : titres de section lus dans les
 `<fieldset><legend>` de la page Documents (le formulaire SIGEO porte un
 `onclick` qui masquait tous les titres en 2.13.0).
 2.13.0 — nouveau type d'extraction **DPE SIGEO** (DPE le plus

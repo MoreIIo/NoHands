@@ -9,7 +9,7 @@
  * attend la fin du « Chargement en cours... », lit les sections dont le
  * titre contient « EPC » (« Diagnostics >> EPC », « Diagnostics Multys >>
  * EPC »), filtre les fichiers DPE par leur nom, garde le plus récent et le
- * télécharge par un POST __doPostBack rejoué en fetch depuis la page
+ * télécharge via l'URL ged_file_download du onclick popup(…) du lien,
  * (même origine → cookies de session), sans cliquer sur le lien.
  *
  * Repérage des sections : par TEXTE de titre, jamais par position ni par
@@ -140,7 +140,8 @@ function dpeExtOf(filename) {
 }
 
 function dpeFileName(tpl, vars, resolve) {
-  let s = String(tpl || DPE_DEFAULT_NAME).replace(/\{date\}/gi, vars.date || "sans-date");
+  const nom = String(vars.nom ?? "").replace(/\.[A-Za-z0-9]{1,5}\s*$/, "");
+  let s = String(tpl || DPE_DEFAULT_NAME).replace(/\{date\}/gi, vars.date || "sans-date").replace(/\{nom\}/gi, () => nom);
   if (resolve) s = resolve(s);
   s = s.replace(/\{([^{}]+)\}/g, (w, k) => (vars[k] ?? vars[k.toLowerCase()] ?? ""));
   const base = dpeSanitize(s) || "DPE";
@@ -159,8 +160,9 @@ function dpeFolder(f) {
  * cfg.op :
  *   "scan"     {}            → état de la page Documents (sections, fichiers)
  *   "parse"    { html, baseUrl } → idem sur un HTML (tests)
- *   "download" { target, timeoutMs } → POST __doPostBack en fetch →
- *              { ok, b64, contentType, filename, size } | { ok:false, error }
+ * Chaque fichier porte `download` : URL absolue lue dans le onclick
+ *   popup('/bare.aspx/fr/fil/ged_file_download/<ID>', …) du lien (le
+ *   href __doPostBack n'est PAS utilisé : il renvoie la page Documents).
  */
 function dpePageOp(cfg) {
   const norm = (s) => String(s ?? "").replace(/[   ]/g, " ").replace(/\s+/g, " ").trim();
@@ -169,6 +171,11 @@ function dpePageOp(cfg) {
   const HEAD = /^(nom|description|date|taille|type|auteur)$/;
   const LOADING = /chargement en cours/i;
 
+  // onclick="popup('/bare.aspx/fr/fil/ged_file_download/123', name, …)"
+  const popupOf = (a) => {
+    const m = (a.getAttribute("onclick") || "").match(/popup\(\s*['"]([^'"]+)['"]/);
+    return m ? m[1] : "";
+  };
   const targetOf = (a) => {
     const code = (a.getAttribute("href") || "") + " " + (a.getAttribute("onclick") || "");
     const m = code.match(/__doPostBack\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]*)['"]/) ||
@@ -202,7 +209,7 @@ function dpePageOp(cfg) {
     let order = 0;
     for (const tr of Array.from(doc.querySelectorAll("tr"))) {
       if (tr.closest("thead")) continue;
-      const links = Array.from(tr.querySelectorAll("a")).filter((a) => targetOf(a) && norm(a.textContent));
+      const links = Array.from(tr.querySelectorAll("a")).filter((a) => (targetOf(a) || popupOf(a)) && norm(a.textContent));
       if (!links.length) continue;
       // Ligne d'un tableau imbriqué : on ne prend que la ligne la plus profonde.
       if (Array.from(tr.querySelectorAll("tr")).length) continue;
@@ -213,14 +220,17 @@ function dpePageOp(cfg) {
       const nameCell = cells.find((c) => c.contains(a));
       const dateCell = cells.find((c) => c !== nameCell && DATE.test(norm(c.textContent)));
       const descCell = cells.find((c) => c !== nameCell && c !== dateCell && norm(c.textContent));
-      const pb = targetOf(a);
+      const pb = targetOf(a) || {};
+      let download = "";
+      const pop = popupOf(a);
+      if (pop) { try { download = new URL(pop, url || undefined).href; } catch (_) { download = pop; } }
       const table = tr.closest("table");
       if (!grids.has(table)) grids.set(table, []);
       grids.get(table).push({
         name,
         desc: descCell ? norm(descCell.textContent) : "",
         date: dateCell ? (norm(dateCell.textContent).match(DATE) || [""])[0] : "",
-        target: pb.target, arg: pb.arg, order: order++
+        target: pb.target || "", download, order: order++
       });
     }
 
@@ -292,55 +302,6 @@ function dpePageOp(cfg) {
 
   if (cfg.op === "scan") return scan(document, location.href);
 
-  if (cfg.op === "download") {
-    return (async () => {
-      const form = document.forms[0];
-      if (!form) return { ok: false, error: "formulaire ASP.NET absent de la page" };
-      const fd = new FormData(form);
-      fd.set("__EVENTTARGET", cfg.target);
-      fd.set("__EVENTARGUMENT", cfg.arg || "");
-      const body = new URLSearchParams();
-      for (const [k, v] of fd.entries()) if (typeof v === "string") body.append(k, v);
-      let action = location.href;
-      try { action = new URL(form.getAttribute("action") || location.href, location.href).href; } catch (_) {}
-      const timeout = Math.max(3000, cfg.timeoutMs || 60000);
-      const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), timeout);
-      let r, buf;
-      try {
-        r = await fetch(action, {
-          method: "POST", credentials: "include", cache: "no-store", redirect: "follow", signal: ctl.signal,
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: body.toString()
-        });
-        buf = await r.arrayBuffer();
-      } catch (e) {
-        return { ok: false, error: e && e.name === "AbortError" ? `délai de ${Math.round(timeout / 1000)} s dépassé` : "fetch : " + ((e && e.message) || e) };
-      } finally { clearTimeout(t); }
-      const type = (r.headers.get("Content-Type") || "").toLowerCase();
-      const disp = r.headers.get("Content-Disposition") || "";
-      let filename = "";
-      const fm = disp.match(/filename\*\s*=\s*(?:UTF-8|ISO-8859-1)?''([^;]+)/i) || disp.match(/filename\s*=\s*"([^"]+)"/i) || disp.match(/filename\s*=\s*([^;]+)/i);
-      if (fm) { try { filename = decodeURIComponent(fm[1].trim()); } catch (_) { filename = fm[1].trim(); } }
-      const bytes = new Uint8Array(buf);
-      const head = String.fromCharCode.apply(null, Array.from(bytes.subarray(0, 5)));
-      if (!r.ok) return { ok: false, error: `HTTP ${r.status}`, status: r.status };
-      const declared = /attachment|filename/i.test(disp);
-      const isHtml = /text\/html|xhtml/.test(type) && !declared && head !== "%PDF-";
-      const isFile = !isHtml && (/pdf|octet-stream|force-download|^application\//.test(type) || declared || head === "%PDF-");
-      if (!isFile) {
-        const txt = new TextDecoder().decode(bytes.subarray(0, 4000));
-        const why = /invalid postback|eventvalidation|viewstate/i.test(txt) ? " (validation ASP.NET refusée)"
-          : /type="password"/i.test(txt) ? " (page de connexion : session expirée ?)" : "";
-        const title = (txt.match(/<title[^>]*>([^<]*)</i) || [, ""])[1].trim();
-        return { ok: false, html: true, error: `réponse HTML au lieu d'un fichier${why}${title ? ` — « ${title} »` : ""}`, contentType: type };
-      }
-      let bin = "";
-      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
-      return { ok: true, b64: btoa(bin), size: bytes.length, contentType: type || "application/octet-stream", filename, pdf: head === "%PDF-" };
-    })();
-  }
-
   return { ready: false, error: "opération inconnue : " + cfg.op };
 }
 
@@ -351,10 +312,11 @@ function dpePageOp(cfg) {
  *   navigate(url):            { ok, error? } (attend le chargement)
  *   execAll(cfg):             [{ frameId, result }] toutes frames
  *   exec(frameId, cfg):       résultat de dpePageOp dans une frame
- *   save(b64, filename, type): { ok, filename?, error? } (chrome.downloads)
+ *   download(url, filename):  { ok, filename?, error? } (service worker →
+ *                             chrome.downloads : cookies + redirections)
  *   sleep(ms), stopped(), log(text, cls)
  * }
- * p = { url, rules, timeoutMs, download, name(chosen, serverName) → nom }
+ * p = { url, rules, timeoutMs, download, name(chosen) → chemin relatif }
  * Résultat : { status: OK|ABSENT|PAGE|AUTH|ERREUR, present, count, chosen,
  *              candidates, file, statut, error?, info[] } */
 
@@ -415,22 +377,19 @@ async function dpeProcess(ad, p) {
   res.present = "OUI";
   if (!p.download) return Object.assign(res, { status: "OK", statut: "Trouvé (non téléchargé)" });
 
+  const url = sel.chosen.download || "";
+  if (!/ged_file_download/i.test(url)) {
+    return Object.assign(res, { status: "ERREUR", statut: "KO téléchargement : lien de téléchargement introuvable", error: "lien de téléchargement introuvable" });
+  }
+  const filename = p.name(sel.chosen);
   let dl;
-  try { dl = await ad.exec(open.frameId, { op: "download", target: sel.chosen.target, arg: sel.chosen.arg, timeoutMs: Math.max(timeout, 60000) }); }
-  catch (e) { dl = { ok: false, error: "injection impossible : " + (e.message || e) }; }
+  try { dl = await ad.download(url, filename); }
+  catch (e) { dl = { ok: false, error: e.message || String(e) }; }
   if (!dl || !dl.ok) {
-    const why = (dl && dl.error) || "aucune réponse";
-    if (dl && dl.html) ad.log("Téléchargement par POST __doPostBack refusé : " + why + ". (Aucune autre méthode tentée.)", "err");
+    const why = (dl && dl.error) || "aucune réponse du service worker";
     return Object.assign(res, { status: "ERREUR", statut: "KO téléchargement : " + why, error: why });
   }
-  const filename = p.name(sel.chosen, dl.filename);
-  const saved = await ad.save(dl.b64, filename, dl.contentType);
-  if (!saved || !saved.ok) {
-    const why = (saved && saved.error) || "enregistrement impossible";
-    return Object.assign(res, { status: "ERREUR", statut: "KO téléchargement : " + why, error: why });
-  }
-  if (!dl.pdf) info.push("le fichier reçu n'est pas un PDF (" + (dl.contentType || "type inconnu") + ")");
-  return Object.assign(res, { status: "OK", statut: "Téléchargé", file: saved.filename || filename, size: dl.size, b64: p.keepBytes ? dl.b64 : undefined });
+  return Object.assign(res, { status: "OK", statut: "Téléchargé", file: dl.filename || filename.split("/").pop(), size: dl.size, url });
 }
 
 if (typeof module !== "undefined" && module.exports) {

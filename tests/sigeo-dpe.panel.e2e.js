@@ -1,7 +1,8 @@
 // Test d'intégration du panneau : onglet Extraction, type « DPE SIGEO ».
 // Le vrai sidepanel.html est chargé ; chrome.scripting / chrome.tabs sont
 // redirigés vers un onglet Chrome ouvert sur le faux SIGEO
-// (tests/fixtures/sigeo-dpe-mock.js), chrome.downloads est simulé.
+// (tests/fixtures/sigeo-dpe-mock.js) ; le message « dpeDownload » au service
+// worker est simulé (GET avec cookie + redirection, refus du HTML).
 //   NODE_PATH=$(npm root -g) node tests/sigeo-dpe.panel.e2e.js
 const path = require("path");
 const assert = require("assert");
@@ -13,14 +14,14 @@ const PANEL = "file://" + path.join(path.resolve(__dirname, ".."), "sidepanel.ht
 const CHROME_STUB = `
 (() => {
   const updated = new Set();
-  window.__dl = [];
   window.chrome = {
     storage: { local: {
       get: (k, cb) => { const r = {}; if (typeof cb === "function") cb(r); return Promise.resolve(r); },
       set: (o, cb) => { if (typeof cb === "function") cb(); return Promise.resolve(); },
       remove: (k, cb) => { if (typeof cb === "function") cb(); return Promise.resolve(); }
     } },
-    runtime: { getURL: (p) => p, getManifest: () => ({ version: "0.0.0" }), sendMessage: async () => ({}),
+    runtime: { getURL: (p) => p, getManifest: () => ({ version: "0.0.0" }),
+               sendMessage: async (m) => m && m.action === "dpeDownload" ? window.__bgDownload(m.url, m.filename) : ({}),
                lastError: null, onMessage: { addListener() {} } },
     tabs: { get: async (id) => ({ id, url: await window.__tabUrl(), status: "complete" }),
             query: async () => [{ id: 1, url: await window.__tabUrl(), active: true }],
@@ -32,14 +33,6 @@ const CHROME_STUB = `
       return [{ frameId: 0, result: r }];
     } },
     permissions: { contains: async () => true, request: async () => true },
-    downloads: {
-      download: async ({ url, filename, conflictAction, saveAs }) => {
-        const buf = new Uint8Array(await (await fetch(url)).arrayBuffer());
-        window.__dl.push({ filename, conflictAction, saveAs, size: buf.length, head: String.fromCharCode(...buf.slice(0, 5)) });
-        return window.__dl.length;
-      },
-      search: async ({ id }) => [{ id, state: "complete", filename: "C:/Users/m/Downloads/" + window.__dl[id - 1].filename }]
-    },
     windows: { update: async () => ({}) }
   };
 })();`;
@@ -49,11 +42,20 @@ const CHROME_STUB = `
   const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome", headless: true });
   const ctx = await browser.newContext();
   const tab = await ctx.newPage();
-  await tab.goto(srv.origin + "/");
+  await tab.goto(srv.origin + "/__login");
+  const bg = [];
+  let cookie = "sigeo=ok";
   const panel = await ctx.newPage();
   const errors = [];
   panel.on("pageerror", (e) => { errors.push(e.message); console.log("[panel] " + e.message); });
   await panel.exposeFunction("__tabUrl", () => tab.url());
+  await panel.exposeFunction("__bgDownload", async (url, filename) => {
+    const r = await fetch(url, { headers: { cookie }, redirect: "follow" });
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (/text\/html/.test(r.headers.get("content-type") || "")) return { ok: false, html: true, error: "SIGEO a renvoyé une page HTML (session expirée ?)" };
+    bg.push({ url, filename, head: buf.subarray(0, 5).toString() });
+    return { ok: true, filename: filename.split("/").pop(), size: buf.length };
+  });
   await panel.exposeFunction("__navigate", async (u) => { await tab.goto(u); });
   await panel.exposeFunction("__runInTab", async (src, args) => {
     for (let i = 0; ; i++) {
@@ -96,12 +98,12 @@ const CHROME_STUB = `
   console.log("test :", testTxt);
   assert.ok(testTxt.includes("« DPE 2022 » du 19/10/2022") && testTxt.includes("DPE_SIGEO/IM0393664_10_DPE_2022-10-19.pdf"), testTxt);
   assert.strictEqual(await panel.evaluate(() => state.rows[0].length), 7, "le test n'écrit rien");
-  assert.strictEqual(await panel.evaluate(() => window.__dl.length), 0, "le test ne télécharge rien");
+  assert.strictEqual(bg.length, 0, "le test ne télécharge rien");
 
   // Exécution
   await panel.click("#startBtn");
   await panel.waitForFunction(() => !isRunning && /Terminé/.test($("log").textContent), null, { timeout: 90000 });
-  const out = await panel.evaluate(() => ({ rows: state.rows, log: $("log").innerText, recap: $("resultSummary").innerText, dl: window.__dl }));
+  const out = await panel.evaluate(() => ({ rows: state.rows, log: $("log").innerText, recap: $("resultSummary").innerText }));
   console.log(out.rows.map((r) => r.join(" | ")).join("\n"));
   console.log("--- journal ---\n" + out.log + "\n--- récap ---\n" + out.recap);
   const H = out.rows[0];
@@ -116,12 +118,13 @@ const CHROME_STUB = `
   assert.deepStrictEqual([out.rows[3][P], out.rows[3][N], out.rows[3][ST], out.rows[3][F]], ["NON", "0", "Absent", ""]);
   assert.deepStrictEqual([out.rows[4][P], out.rows[4][ST]], ["ERREUR", "Page introuvable"]);
   assert.strictEqual(out.rows[5][P], "OUI");
-  assert.ok(/^KO téléchargement : réponse HTML/.test(out.rows[5][ST]), out.rows[5][ST]);
+  assert.strictEqual(out.rows[5][ST], "KO téléchargement : SIGEO a renvoyé une page HTML (session expirée ?)");
   assert.strictEqual(out.rows[1][5], srv.ficheUrl("A"), "colonnes source intactes");
-  assert.deepStrictEqual(out.dl.map((d) => [d.filename, d.conflictAction, d.saveAs, d.head]), [
-    ["DPE_SIGEO/IM0393664_10_DPE_2022-10-19.pdf", "uniquify", false, "%PDF-"],
-    ["DPE_SIGEO/IM0393664_11_DPE_2023-03-15.pdf", "uniquify", false, "%PDF-"]
+  assert.deepStrictEqual(bg.map((d) => [d.url.replace(srv.origin, ""), d.filename, d.head]), [
+    ["/bare.aspx/fr/fil/ged_file_download/A03", "DPE_SIGEO/IM0393664_10_DPE_2022-10-19.pdf", "%PDF-"],
+    ["/bare.aspx/fr/fil/ged_file_download/B10", "DPE_SIGEO/IM0393664_11_DPE_2023-03-15.pdf", "%PDF-"]
   ]);
+  assert.strictEqual(srv.stats.posts.length, 0, "aucun POST __doPostBack");
   assert.ok(/2 DPE téléchargé/.test(out.log), out.log);
 
   // Profil : configuration sauvegardée / restaurée

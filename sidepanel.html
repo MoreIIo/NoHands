@@ -458,7 +458,7 @@
     </div>
 
     <div id="dpeExtractBox" hidden>
-      <p class="hint">Pour chaque ligne : la page <strong>Documents</strong> du lot est ouverte dans l'onglet cible, les sections dont le titre contient <strong>EPC</strong> (« Diagnostics &gt;&gt; EPC », « Diagnostics Multys &gt;&gt; EPC ») sont lues, les fichiers DPE sont repérés par leur <strong>nom</strong> (diag gaz/élec, entretiens chaudière… écartés) et seul le <strong>plus récent</strong> (colonne Date, puis année dans le nom) est téléchargé, par le même postback que le lien mais sans cliquer dessus. Si l'URL ouvre la fiche lot, le lien vers la page Documents est suivi automatiquement. Il faut être connecté à SIGEO dans l'onglet cible.</p>
+      <p class="hint">Pour chaque ligne : la page <strong>Documents</strong> du lot est ouverte dans l'onglet cible, les sections dont le titre contient <strong>EPC</strong> (« Diagnostics &gt;&gt; EPC », « Diagnostics Multys &gt;&gt; EPC ») sont lues, les fichiers DPE sont repérés par leur <strong>nom</strong> (diag gaz/élec, entretiens chaudière… écartés) et seul le <strong>plus récent</strong> (colonne Date, puis année dans le nom) est téléchargé par Chrome via le lien <code>ged_file_download</code> du fichier (sans cliquer dessus). Si l'URL ouvre la fiche lot, le lien vers la page Documents est suivi automatiquement. Il faut être connecté à SIGEO dans l'onglet cible.</p>
       <div class="field-row">
         <input type="text" id="dpeUrl" placeholder="{URL lot}" title="URL de la page Documents (ou de la fiche lot). {Colonne} = valeur de la ligne, ex. {URL lot} ou …/lot_manage?id={ID interne}" style="flex:1;min-width:180px" />
       </div>
@@ -470,7 +470,7 @@
         <label for="dpeFolder">Dossier :</label>
         <input type="text" id="dpeFolder" value="DPE_SIGEO" title="Sous-dossier de Téléchargements" style="max-width:130px" />
         <label for="dpeName">nom :</label>
-        <input type="text" id="dpeName" value="{IM}_{lot}_DPE_{date}" title="{Colonne} = valeur de la ligne, {date} = date SIGEO du fichier (aaaa-mm-jj). Extension ajoutée automatiquement." style="flex:1;min-width:140px" />
+        <input type="text" id="dpeName" value="{IM}_{lot}_DPE_{date}" title="{Colonne} = valeur de la ligne, {date} = date SIGEO du fichier (aaaa-mm-jj), {nom} = nom du fichier dans SIGEO (sans extension). Extension du fichier SIGEO ajoutée automatiquement (.pdf par défaut)." style="flex:1;min-width:140px" />
       </div>
       <div class="field-row">
         <label for="dpeTimeout">Timeout (ms) :</label>

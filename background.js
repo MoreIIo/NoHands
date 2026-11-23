@@ -662,3 +662,63 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     .catch((e) => sendResponse({ ok: false, code: "INTERNAL", error: e.message }));
   return true; // réponse asynchrone
 });
+
+/* ---------- Téléchargement d'un DPE SIGEO (extraction « DPE SIGEO ») ----------
+   Le panneau envoie { action: "dpeDownload", url, filename } ; url =
+   …/bare.aspx/fr/fil/ged_file_download/<ID> (lu dans le onclick popup(…) du
+   lien). chrome.downloads suit la redirection et envoie les cookies de
+   session, ce qu'un fetch depuis la page ne peut pas faire. On attend la fin
+   du téléchargement ; si SIGEO a renvoyé une page HTML, le fichier est
+   supprimé et l'erreur remontée. */
+function dpeWaitDownload(id, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = async () => {
+      if (done) return;
+      const [it] = await chrome.downloads.search({ id });
+      if (!it || (it.state !== "complete" && it.state !== "interrupted")) return;
+      done = true;
+      chrome.downloads.onChanged.removeListener(onChanged);
+      clearTimeout(timer);
+      resolve(it);
+    };
+    const onChanged = (d) => { if (d.id === id && d.state) finish(); };
+    const timer = setTimeout(async () => {
+      if (done) return;
+      done = true;
+      chrome.downloads.onChanged.removeListener(onChanged);
+      const [it] = await chrome.downloads.search({ id });
+      resolve(Object.assign({}, it, { timedOut: true }));
+    }, Math.max(5000, timeoutMs || 60000));
+    chrome.downloads.onChanged.addListener(onChanged);
+    finish(); // déjà terminé (petit fichier) ?
+  });
+}
+
+async function dpeDownload({ url, filename, timeoutMs }) {
+  if (!chrome.downloads) return { ok: false, error: "permission « downloads » absente" };
+  let id;
+  try {
+    id = await chrome.downloads.download({ url, filename, conflictAction: "uniquify", saveAs: false });
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  }
+  const it = await dpeWaitDownload(id, timeoutMs);
+  const name = String(it.filename || filename).split(/[\\/]/).pop();
+  if (it.state === "interrupted") return { ok: false, error: "téléchargement interrompu (" + (it.error || "?") + ")", id };
+  if (it.timedOut) return { ok: false, error: "téléchargement non terminé (délai dépassé)", id };
+  if (/text\/html/i.test(it.mime || "")) {
+    try { await chrome.downloads.removeFile(id); } catch (_) { /* déjà absent */ }
+    try { await chrome.downloads.erase({ id }); } catch (_) { /* ignoré */ }
+    return { ok: false, html: true, error: "SIGEO a renvoyé une page HTML (session expirée ?)", id };
+  }
+  return { ok: true, id, filename: name, mime: it.mime || "", size: it.fileSize ?? it.totalBytes ?? 0 };
+}
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request?.action !== "dpeDownload") return false;
+  dpeDownload(request)
+    .then(sendResponse)
+    .catch((e) => sendResponse({ ok: false, error: e.message || String(e) }));
+  return true; // réponse asynchrone
+});

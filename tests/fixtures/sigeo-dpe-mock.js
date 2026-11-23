@@ -1,3 +1,9 @@
+// Faux SIGEO pour les tests DPE. Comme le vrai : chaque lien de fichier a
+// href="javascript:__doPostBack(…)" (qui renvoie la page Documents, PAS le
+// fichier) et onclick="popup('/bare.aspx/fr/fil/ged_file_download/<ID>', …)" ;
+// ce GET redirige vers le fichier (PDF), ou vers une page HTML pour le lot H.
+// Lot N : liens sans popup(…) → « lien de téléchargement introuvable ».
+//
 // Faux SIGEO pour les tests DPE : page Documents d'un lot (popup.aspx
 // ged_multi_file_manager) reproduisant la structure observée — un seul
 // <form> ASP.NET, sections titrées « X >> Y » dans un tableau de mise en
@@ -73,6 +79,8 @@ const LOTS = {
     "Photos": [],
     "Plans": [["plan.jpg", "PlanLot", "26/04/2017"]]
   },
+  // Liens sans popup(…) : pas d'URL de téléchargement.
+  N: { "Diagnostics >> EPC": [["DPE 2019", "RapportDiagnosticLot", "04/04/2019"]] },
   // Le DPE renvoie du HTML au lieu d'un PDF (ViewState rejeté côté serveur).
   H: {
     "Diagnostics >> EPC": [["DPE 2020", "RapportDiagnosticLot", "03/03/2020"]]
@@ -80,6 +88,9 @@ const LOTS = {
 };
 
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+const fileId = (lot, si, fi) => `${lot}${si}${fi}`;
+const onclickOf = (lot, si, fi, name) => lot === "N" ? "" :
+  ` onclick="popup('/bare.aspx/fr/fil/ged_file_download/${fileId(lot, si, fi)}', '${esc(name).replace(/'/g, "")}', 100, 100, 800, 600); return false;"`;
 const target = (lot, si, fi) => `body$x$reManagers$_ctl${si}$prxFileManager$x$grid$x$_ctl${fi + 3}$_ctl3` + (lot === "H" ? "$html" : "");
 
 function sectionsHtml(lot) {
@@ -92,7 +103,7 @@ function sectionsHtml(lot) {
             <td>Description</td><td>Date</td>
           </tr>
           ${files.map(([n, d, dt], fi) => `<tr class="row">
-            <td><img src="pdf.gif"> <a href="javascript:__doPostBack('${target(lot, si, fi)}','')">${esc(n)}</a></td>
+            <td><img src="pdf.gif"> <a href="javascript:__doPostBack('${target(lot, si, fi)}','')"${onclickOf(lot, si, fi, n)}>${esc(n)}</a></td>
             <td>${esc(d)}</td><td>${esc(dt)}</td>
             <td><a href="javascript:__doPostBack('${target(lot, si, fi).replace("_ctl3", "_ctl9")}','')"><img src="del.gif"></a></td>
           </tr>`).join("")}
@@ -110,7 +121,7 @@ function fieldsetHtml(lot) {
     ${title === "Divers" || title === "Photos" || title === "Plans" ? `<div><img src="add.gif"><a href="javascript:__doPostBack('body$x$reManagers$_ctl${si}$lnkAdd','')">Joindre un document</a></div>` : ""}
     ${files.length ? `<table cellspacing="0" rules="all" border="1" style="border-collapse:collapse;">
       <tr style="color:White;background-color:#333;font-weight:bold;"><td>Nom</td><td>Description</td><td>Date</td></tr>
-      ${files.map(([n, d, dt], fi) => `<tr><td><a href="javascript:__doPostBack('${target(lot, si, fi)}','')">${esc(n)}</a></td><td>${esc(d)}</td><td>${esc(dt)}</td></tr>`).join("")}
+      ${files.map(([n, d, dt], fi) => `<tr><td><a href="javascript:__doPostBack('${target(lot, si, fi)}','')"${onclickOf(lot, si, fi, n)}>${esc(n)}</a></td><td>${esc(d)}</td><td>${esc(dt)}</td></tr>`).join("")}
     </table>` : ""}
   </fieldset>`).join("");
 }
@@ -125,7 +136,7 @@ function docsPage(lot, { loaded = true, delay = 0 } = {}) {
 <input type="hidden" name="__EVENTARGUMENT" id="__EVENTARGUMENT" value="">
 <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="${loaded ? VIEWSTATE : "initial"}">
 <input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="ev-${lot}">
-<script>function __doPostBack(t,a){var f=document.forms[0];f.__EVENTTARGET.value=t;f.__EVENTARGUMENT.value=a;f.submit();}</script>
+<script>function popup(u){window.open(u);}function __doPostBack(t,a){var f=document.forms[0];f.__EVENTTARGET.value=t;f.__EVENTARGUMENT.value=a;f.submit();}</script>
 <div id="loading" style="${loaded ? "display:none" : ""}">Chargement en cours...</div>
 <div id="content">${loaded ? inner : ""}</div>
 ${!loaded && delay ? `<script>setTimeout(function(){
@@ -146,28 +157,35 @@ function fichePage(lot, origin) {
 const PDF = Buffer.from("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n");
 
 function start() {
-  const stats = { posts: [] };
+  const stats = { posts: [], gets: [] };
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, "http://x");
     const lot = u.searchParams.get("lot") || "A";
     if (req.method === "POST") {
-      let body = "";
-      req.on("data", (c) => { body += c; });
-      req.on("end", () => {
-        const p = new URLSearchParams(body);
-        const t = p.get("__EVENTTARGET") || "";
-        stats.posts.push({ lot, target: t, viewstate: p.get("__VIEWSTATE"), ev: p.get("__EVENTVALIDATION") });
-        if (p.get("__VIEWSTATE") !== VIEWSTATE || t.endsWith("$html")) {
-          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-          return res.end("<html><head><title>Erreur serveur</title></head><body>Invalid postback or callback argument</body></html>");
-        }
-        res.writeHead(200, {
-          "Content-Type": "application/pdf",
-          "Content-Disposition": `attachment; filename="RapportDiagnostic_${lot}.pdf"`
-        });
-        res.end(PDF);
-      });
-      return;
+      // Comme SIGEO : le postback du lien renvoie la page Documents.
+      stats.posts.push({ lot });
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      return res.end(docsPage(lot));
+    }
+    let m = u.pathname.match(/\/bare\.aspx\/fr\/fil\/ged_file_download\/(\w+)$/);
+    if (m) {
+      stats.gets.push(m[1]);
+      if (!/sigeo=ok/.test(req.headers.cookie || "")) { res.writeHead(302, { Location: "/login.aspx" }); return res.end(); }
+      res.writeHead(302, { Location: m[1].startsWith("H") ? "/files/erreur.aspx" : `/files/${m[1]}.pdf` });
+      return res.end();
+    }
+    m = u.pathname.match(/^\/files\/(\w+)\.pdf$/);
+    if (m) {
+      res.writeHead(200, { "Content-Type": "application/pdf", "Content-Disposition": `attachment; filename="RapportDiagnostic_${m[1]}.pdf"` });
+      return res.end(PDF);
+    }
+    if (u.pathname === "/__login") {
+      res.writeHead(200, { "Set-Cookie": "sigeo=ok; Path=/", "Content-Type": "text/html" });
+      return res.end("<html><body>connecté</body></html>");
+    }
+    if (u.pathname === "/login.aspx") {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      return res.end('<html><body><form><input type="password" name="pw"></form></body></html>');
     }
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     if (u.pathname.includes("ged_multi_file_manager")) return res.end(docsPage(lot, { loaded: false, delay: 400 }));
