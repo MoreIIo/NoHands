@@ -38,6 +38,10 @@
  *   - Échec après l'Enregistrer n°1 : « fiche DPE {id} créée mais incomplète »
  *     (+ lien) ; une reprise rouvre cette fiche (journal, colonne résultat ou
  *     URL avec id) en modification — jamais de second DPE.
+ * v2.17.1 : SIGEO n'affiche pas toujours le PDF juste après l'upload ; si la
+ *   liste ne le montre pas, « Enregistrer » est recliqué (3 fois max, 10 s
+ *   d'attente active chacun) et la liste relue — JAMAIS de nouvel upload.
+ *   Une relance après échec revérifie de même au lieu de ré-uploader.
  *
  * Garde-fous : jamais de touche Entrée (Fournisseur et Description
  * déclenchent Enregistrer), jamais « Enreg. et fermer » ; enregistrement
@@ -769,7 +773,7 @@ function diagPageOp(cfg) {
       needSave, f,
       divConso: divC ? visible(divC) : visible(byId(ID.conso)),
       couts: { present: !!divK, visible: divK ? visible(divK) : visible(byId(ID.coutMin)) },
-      attach, saveBtn: { present: !!save, visible: visible(save) },
+      attach, saveBtn: { present: !!save, visible: visible(save), disabled: !!save && (!!save.disabled || save.getAttribute("aria-disabled") === "true") },
       messages: messages(), grid: grid()
     };
   }
@@ -1215,13 +1219,15 @@ async function diagProcess(ad, p) {
   const warn = (w) => { if (!warnings.includes(w)) { warnings.push(w); log("⚠ " + w, "skip"); } };
   // Fiche enregistrée pendant ce passage (Enregistrer n°1 réussi) : tout
   // échec ultérieur le signale, avec le lien, pour une reprise sans doublon.
-  let saved1 = null, ademeConfirmed = false, pdfDone = false;
+  let saved1 = null, ademeConfirmed = false, pdfDone = false, pdfSent = false;
   const fail = (msg, status = "ERREUR", code = "") => {
     const c = code || (String(msg).match(/^([A-Z_]{8,}) — /) || [])[1] || "";
     if (saved1) {
-      const miss = [v.ademe && !ademeConfirmed ? "ADEME" : "", p.attach && !pdfDone ? "PDF" : ""].filter(Boolean);
+      const miss = [v.ademe && !ademeConfirmed ? "ADEME" : "", p.attach && !pdfDone && !pdfSent ? "PDF" : ""].filter(Boolean);
+      let what = miss.length ? `${miss.join("/")} manquant${miss.length > 1 ? "s" : ""}` : "";
+      if (p.attach && !pdfDone && pdfSent) what = (what ? what + ", " : "") + "PDF envoyé mais non vérifié";
       const note = `fiche DPE ${saved1.id || "(id introuvable)"} ${saved1.isNew ? "créée" : "mise à jour"} mais incomplète` +
-        `${miss.length ? ` (${miss.join("/")} manquant${miss.length > 1 ? "s" : ""})` : ""} : ${saved1.url}`;
+        `${what ? ` (${what})` : ""} : ${saved1.url}`;
       log(note, "skip");
       msg = `${msg} — ${note}`;
     }
@@ -1317,7 +1323,7 @@ async function diagProcess(ad, p) {
     return fail(`la colonne résultat indique la fiche DPE ${known} déjà créée : ouvre-la (…/${known}) au lieu d'en créer une autre — aucun nouvel enregistrement`, "DOUBLON");
   }
   if (!s.saved && J) {
-    if (J.idDiag || ["saved", "uploading", "done"].includes(J.phase)) {
+    if (J.idDiag || ["saved", "uploading", "uploaded", "done"].includes(J.phase)) {
       return fail(`ce DPE a déjà été enregistré pendant cette session (fiche ${J.idDiag || "id inconnu"}) : ouvre la fiche existante${J.idDiag ? " (…/" + J.idDiag + ")" : ""} ou vide l'historique DPE — aucun nouvel enregistrement`, "DOUBLON");
     }
     if (J.phase === "saving") {
@@ -1667,10 +1673,84 @@ async function diagProcess(ad, p) {
   if (!p.attach) return Object.assign(res, { ok: true, status: "OK", info: okInfo() + " — PDF non joint (option désactivée)" });
 
   // — Phase E : pièce jointe (idempotente : jamais deux documents « DPE »)
+  // Vérification relue dans le DOM : plus de documents qu'avant l'upload ET
+  // une ligne « DPE ». SIGEO n'affiche pas toujours le document tout de
+  // suite : on reclique alors « Enregistrer » (même fiche, même popup) et on
+  // revérifie — 3 tentatives, 10 s d'attente active chacune, JAMAIS de
+  // nouvel upload (il créerait un doublon).
+  const RESAVE_MAX = 3, RESAVE_MS = 10000;
+  const ord = (k) => (k === 1 ? "1er" : k + "e");
+  const uploadSeen = (snap, count0) => {
+    const row = snap && snap.grid ? diagFindDocRow(snap.grid, desc) : null;
+    return { ok: !!row && snap.grid.count > count0, row, count: snap && snap.grid ? snap.grid.count : 0 };
+  };
+  const recheckBySaving = async (count0) => {
+    let last = "";
+    for (let k = 1; k <= RESAVE_MAX; k++) {
+      const w0 = await stable();
+      if (w0.stopped) return { stopped: true };
+      if (w0.timeout) return { error: `${DIAG_CODES.timeout} — page toujours en rechargement avant le ${ord(k)} nouvel enregistrement`, code: DIAG_CODES.timeout };
+      s = w0.snap;
+      const pe0 = pageError(s);
+      if (pe0) return { error: pe0, status: s.login ? "AUTH" : "PAGE" };
+      if (res.idDiag && s.idDiag !== res.idDiag) return { error: `la popup n'affiche plus la fiche DPE ${res.idDiag} (${s.url}) — rien n'a été recliqué`, status: "PAGE" };
+      if (!s.saveBtn.present) return { error: "bouton « Enregistrer » introuvable pour revérifier l'upload" };
+      const before = s.docId, t0 = ad.now();
+      const r = await ad.exec({ op: "save" });
+      if (!r || !r.ok) return { error: `Enregistrer (revérification ${k}/${RESAVE_MAX}) : ${(r && r.error) || "page indisponible"}` };
+      log(`document « ${desc} » absent de la liste : Enregistrer recliqué (${k}/${RESAVE_MAX}), sans nouvel upload`, "skip");
+      // Rechargement terminé (nouveau docId, readyState complete)…
+      const w = await settle(before, { mustReload: true, timeoutMs: RESAVE_MS });
+      if (w.stopped) return { stopped: true };
+      if (w.timeout) { last = `pas de rechargement terminé ${sec(RESAVE_MS)} s après Enregistrer`; log(`${last} (${k}/${RESAVE_MAX})`, "skip"); continue; }
+      log(`↻ postback (Enregistrer — revérification ${k}/${RESAVE_MAX})`);
+      // … puis bouton de nouveau cliquable et liste rendue ; la liste est
+      // relue dans le DOM jusqu'au document ou jusqu'aux 10 s.
+      let snap = w.snap, seen = null;
+      for (;;) {
+        if (snap && snap.readyState === "complete" && !snap.leaving && snap.saveBtn.present && snap.saveBtn.visible &&
+            !snap.saveBtn.disabled && snap.grid.present) {
+          seen = uploadSeen(snap, count0);
+          if (seen.ok) break;
+        }
+        if (ad.stopped() || ad.now() - t0 > RESAVE_MS) break;
+        await ad.sleep(250);
+        const n = await read();
+        if (n) snap = n;
+      }
+      s = snap;
+      const errs2 = msgErrors(s);
+      if (errs2.length) log(`SIGEO : ${errs2.join(" | ")}`, "skip");
+      if (seen && seen.ok) return { ok: true, attempt: k, row: seen.row };
+      last = `${count0} → ${s.grid.count} document(s), ligne « ${desc} » ${diagFindDocRow(s.grid, desc) ? "présente" : "absente"}${errs2.length ? " — SIGEO : " + errs2.join(" | ") : ""}`;
+    }
+    return { failed: true, last };
+  };
+
   const existing = diagFindDocRow(s.grid, desc);
   if (existing) {
     if (fileRef && !diagRowHasFile(existing, fileRef.file.name)) warn(`un document « ${desc} » est déjà joint (${existing.join(" · ")}) mais pas sous le nom ${fileRef.file.name}`);
+    if (J && J.phase === "uploaded") await ad.journalSet(key, { phase: "done", idDiag: res.idDiag, file: J.file || "", row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
     return Object.assign(res, { ok: true, status: "DÉJÀ JOINT", info: `${okInfo()} — document « ${desc} » déjà joint, pas de nouvel upload` });
+  }
+  // PDF déjà envoyé sur cette fiche par un passage précédent, jamais apparu
+  // dans la liste : Enregistrer + revérification, pas de second upload.
+  const Jup = await ad.journalGet(key);
+  if (Jup && Jup.phase === "uploaded" && (!Jup.idDiag || !res.idDiag || Jup.idDiag === res.idDiag)) {
+    log(`un PDF (${Jup.file || "?"}) a déjà été envoyé sur cette fiche lors d'un passage précédent sans apparaître dans la liste : Enregistrer + revérification, sans nouvel upload`, "skip");
+    pdfSent = true;
+    const c0 = Number.isFinite(Jup.count0) ? Jup.count0 : s.grid.count;
+    const rv = await recheckBySaving(c0);
+    if (rv.stopped) return fail("arrêté pendant la revérification de l'upload — vérifie la liste des documents", "ARRÊT");
+    if (rv.error) return fail(`${rv.error} — PDF déjà envoyé, non ré-uploadé`, rv.status || "ERREUR", rv.code || "");
+    if (!rv.ok) {
+      return fail(`upload non vérifié après ${RESAVE_MAX} tentatives d'enregistrement (PDF envoyé lors d'un passage précédent) : ${rv.last} — pas de nouvel upload pour éviter un doublon : vérifie dans SIGEO ; s'il n'y est vraiment pas, « Vider l'historique DPE » puis relance`);
+    }
+    warn(`document « ${desc} » apparu après le ${ord(rv.attempt)} nouvel enregistrement (${rv.attempt}/${RESAVE_MAX})`);
+    await ad.journalSet(key, { phase: "done", idDiag: res.idDiag, file: Jup.file || "", row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
+    pdfDone = true;
+    log(`PDF joint : ${s.grid.count} document(s) — ${rv.row.join(" · ")}`, "ok");
+    return Object.assign(res, { ok: true, status: "OK", file: Jup.file || "", info: `${okInfo()} — PDF joint (${Jup.file || "envoyé précédemment"}), visible après ${rv.attempt} nouvel(s) enregistrement(s)` });
   }
   if (!fileRef) {
     const e = await resolveFile();
@@ -1733,15 +1813,29 @@ async function diagProcess(ad, p) {
   if (w.stopped) return fail("arrêté pendant l'upload — vérifie la liste des documents", "ARRÊT");
   if (w.timeout) return fail(`${DIAG_CODES.timeout} — pas de rechargement terminé ${sec(TU)} s après l'envoi du PDF — vérifie la liste des documents`, "ERREUR", DIAG_CODES.timeout);
   s = w.snap;
+  pdfSent = true;
   log(w.partial ? "↻ postback partiel (upload du PDF, grille mise à jour)" : "↻ postback (upload du PDF)");
   const e3 = pageError(s);
   if (e3) return fail(e3, s.login ? "AUTH" : "PAGE");
   const errs = msgErrors(s);
-  const row = diagFindDocRow(s.grid, desc);
-  if (errs.length || s.grid.count !== count0 + 1 || !row) {
-    await ad.journalSet(key, { phase: "saved", idDiag: res.idDiag, row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
-    return fail(`upload non vérifié : ${count0} → ${s.grid.count} document(s), ligne « ${desc} » ${row ? "présente" : "absente"}${errs.length ? " — SIGEO : " + errs.join(" | ") : ""}`);
-  }
+  let seen = uploadSeen(s, count0);
+  let row = seen.row;
+  if (!seen.ok) {
+    // Pas (encore) dans la liste : PDF envoyé, à revérifier en recliquant
+    // « Enregistrer » — noté au journal pour qu'une relance ne ré-uploade pas.
+    log(`upload non vérifié tout de suite : ${count0} → ${s.grid.count} document(s), ligne « ${desc} » ${row ? "présente" : "absente"}` +
+      `${errs.length ? " — SIGEO : " + errs.join(" | ") : ""} → nouvel enregistrement de la fiche`, "skip");
+    await ad.journalSet(key, { phase: "uploaded", idDiag: res.idDiag, count0, file: name, row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
+    const rv = await recheckBySaving(count0);
+    if (rv.stopped) return fail("arrêté pendant la revérification de l'upload — vérifie la liste des documents", "ARRÊT");
+    if (rv.error) return fail(`${rv.error} — PDF envoyé, non vérifié`, rv.status || "ERREUR", rv.code || "");
+    if (!rv.ok) {
+      return fail(`upload non vérifié après ${RESAVE_MAX} tentatives d'enregistrement : ${rv.last}${errs.length ? " — SIGEO (upload) : " + errs.join(" | ") : ""} — PDF envoyé une seule fois, non ré-uploadé : vérifie la liste des documents dans SIGEO`);
+    }
+    row = rv.row;
+    warn(`document « ${desc} » apparu après le ${ord(rv.attempt)} nouvel enregistrement (${rv.attempt}/${RESAVE_MAX})`);
+  } else if (errs.length) warn(`SIGEO après l'upload : ${errs.join(" | ")}`);
+  if (s.grid.count > count0 + 1) warn(`${s.grid.count - count0} documents ajoutés au lieu d'un (${count0} → ${s.grid.count}) — vérifie la liste`);
   if (!diagRowHasFile(row, name)) warn(`nom ${name} non retrouvé dans la ligne « ${desc} » (${row.join(" · ")})`);
   await ad.journalSet(key, { phase: "done", idDiag: res.idDiag, file: name, row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
   pdfDone = true;

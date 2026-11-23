@@ -18,7 +18,11 @@
 //   9. échec après l'Enregistrer n°1 puis reprise (journal) : aucune nouvelle fiche ;
 //  10. idem, reprise par la colonne résultat après « Vider l'historique DPE » ;
 //  11. POSTBACK_TIMEOUT ;
-//  12. lettre du DPE ≠ lettre SIGEO → « Forcer la lettre » (et seulement là).
+//  12. lettre du DPE ≠ lettre SIGEO → « Forcer la lettre » (et seulement là) ;
+//  13. PDF absent de la liste juste après l'upload : « Enregistrer » recliqué,
+//      document vu au 2e → OK avec avertissement, un seul upload ;
+//  14. PDF jamais visible : erreur après 3 tentatives, puis relances sans
+//      nouvel upload jusqu'à ce qu'il apparaisse.
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -72,7 +76,9 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
     /* L11 */ row(Object.assign({ lot: "590010" }, OLD)),
     /* L12 */ row(Object.assign({ lot: "590011" }, OLD)),
     /* L13 */ row({ code_fournisseur: "448957", date_etabli: "15/03/2024", numero_ademe: "2475E1234567X", conso_ep: "320", emission_ges: "9",
-      lettre_ep_forcee: "D", lettre_ges_forcee: "B", cout_min: "1240", cout_max: "1680", date_prix: "01/01/2021", lot: "590012" })
+      lettre_ep_forcee: "D", lettre_ges_forcee: "B", cout_min: "1240", cout_max: "1680", date_prix: "01/01/2021", lot: "590012" }),
+    /* L14 */ row(Object.assign({}, NEW, { lot: "590013" })),
+    /* L15 */ row(Object.assign({}, NEW, { lot: "590014" }))
   ]]);
 
   await panel.evaluate((u) => {
@@ -236,6 +242,48 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
   assert.strictEqual(d.forceGes, "", "GES : PDF B = SIGEO B → non forcée");
   assert.ok(/lettre EP du DPE D ≠ lettre calculée par SIGEO E → forcée/.test(run.log), run.log);
   assert.ok(/^OK —/.test(await cell(12, "Saisie DPE")), await cell(12, "Saisie DPE"));
+
+  // ===== 13. PDF visible seulement après un nouvel « Enregistrer » =====
+  await cfg("uploadHidden=2"); // caché à l'affichage de l'upload et au 1er réenregistrement
+  s0 = stats();
+  run = await runActive(panel, 13, yes);
+  console.log("--- 13. PDF affiché au 2e nouvel enregistrement ---\n" + run.log);
+  await cfg("uploadHidden=0");
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 1, updates: 2, uploads: 1, saves: 3 }, "un seul upload, 2 Enregistrer de revérification");
+  c = await cell(13, "Saisie DPE");
+  assert.ok(/^OK — diagnostic \d+, ADEME 2222E0000001A — PDF joint \(DPE_2222E0000001A\.pdf\) ⚠ document « DPE » apparu après le 2e nouvel enregistrement \(2\/3\)$/.test(c), c);
+  assert.ok(/upload non vérifié tout de suite : 0 → 0 document\(s\), ligne « DPE » absente → nouvel enregistrement de la fiche/.test(run.log), run.log);
+  assert.ok(/Enregistrer recliqué \(1\/3\), sans nouvel upload/.test(run.log) && /Enregistrer recliqué \(2\/3\)/.test(run.log) && !/\(3\/3\)/.test(run.log));
+  assert.ok(/⚠ document « DPE » apparu après le 2e nouvel enregistrement/.test(run.log), "avertissement journalisé");
+  assert.ok(/✓ Étape 1 — SIGEO : saisir un DPE \+ PDF : .*1 avertissement\(s\) — \d+\.\d s/.test(run.log), "succès avec durée de l'étape");
+  d = lotDiags("590013")[0];
+  assert.strictEqual(d.docs.length, 1, "un seul document");
+
+  // ===== 14. PDF jamais visible : erreur après 3 tentatives, relances sans doublon =====
+  await cfg("uploadHidden=9");
+  s0 = stats();
+  run = await runActive(panel, 14, yes);
+  console.log("--- 14a. PDF jamais visible ---\n" + run.log);
+  await cfg("uploadHidden=0");
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 1, updates: 3, uploads: 1, saves: 4 }, "3 tentatives, un seul upload");
+  c = await cell(14, "Saisie DPE");
+  assert.ok(/^ERREUR — upload non vérifié après 3 tentatives d'enregistrement : 0 → 0 document\(s\), ligne « DPE » absente — PDF envoyé une seule fois, non ré-uploadé : vérifie la liste des documents dans SIGEO — fiche DPE (\d+) créée mais incomplète \(PDF envoyé mais non vérifié\) : http:\/\/\S+\/590014\/2\/\1 — \d+\.\d s$/.test(c) ||
+    /^ERREUR — upload non vérifié après 3 tentatives d'enregistrement : 0 → 0 document\(s\), ligne « DPE » absente — PDF envoyé une seule fois, non ré-uploadé : vérifie la liste des documents dans SIGEO — fiche DPE (\d+) créée mais incomplète \(PDF envoyé mais non vérifié\) : http:\/\/\S+\/590014\/2\/\1$/.test(c), c);
+  assert.ok(/Enregistrer recliqué \(3\/3\)/.test(run.log));
+  s0 = stats();
+  run = await runActive(panel, 14);
+  console.log("--- 14b. relance : revérification sans nouvel upload ---\n" + run.log);
+  assert.ok(/a déjà été envoyé sur cette fiche lors d'un passage précédent/.test(run.log), run.log);
+  assert.ok(/pas de nouvel upload pour éviter un doublon/.test(await cell(14, "Saisie DPE")), await cell(14, "Saisie DPE"));
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 0, updates: 3, uploads: 0, saves: 3 }, "aucun upload, aucune fiche");
+  s0 = stats();
+  run = await runActive(panel, 14);
+  console.log("--- 14c. relance : document enfin visible ---\n" + run.log);
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 0, updates: 1, uploads: 0, saves: 1 });
+  c = await cell(14, "Saisie DPE");
+  assert.ok(/^OK — diagnostic \d+, ADEME 2222E0000001A — PDF joint \(DPE_2222E0000001A\.pdf\), visible après 1 nouvel\(s\) enregistrement\(s\) ⚠ document « DPE » apparu après le 1er nouvel enregistrement \(1\/3\)/.test(c), c);
+  assert.strictEqual(lotDiags("590014").length, 1, "une seule fiche");
+  assert.strictEqual(lotDiags("590014")[0].docs.length, 1, "un seul document : jamais ré-uploadé");
 
   assert.strictEqual(srv.stats.enterSaves, 0, "jamais de touche Entrée");
   assert.strictEqual(srv.stats.saveCloses, 0, "jamais « Enreg. et fermer »");

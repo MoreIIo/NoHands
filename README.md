@@ -286,7 +286,16 @@ deux modes :
      le champ ou dans `#body_x_labelIdDpe`) → `ECART_APRES_ENREG` avec tous
      les écarts, upload annulé.
    - **Phase E** — upload du PDF (postback attendu) puis vérification de la
-     grille de `body_x_upcDiag`.
+     grille de `body_x_upcDiag` (plus de documents qu'avant l'upload **et**
+     une ligne « DPE », relues dans le DOM). SIGEO n'affiche pas toujours le
+     document tout de suite : si la vérification échoue, « Enregistrer » est
+     recliqué sur la même fiche (attente active du rechargement, du bouton de
+     nouveau cliquable et de la liste, 10 s max), puis la liste est revérifiée
+     — **3 tentatives** au plus, **jamais de nouvel upload**. Document vu à
+     une tentative : avertissement « document « DPE » apparu après le 2e
+     nouvel enregistrement » et la ligne continue ; sinon « upload non vérifié
+     après 3 tentatives d'enregistrement ». Une relance de cette ligne
+     revérifie de même au lieu de ré-uploader (journal de session).
    - **Reprise** : tout rechargement inattendu fait repartir de la phase A
      d'après le DOM (aucun champ n'est sauté parce qu'il avait été « fait »).
      Un échec après l'Enregistrer n°1 est signalé « fiche DPE {id} créée mais
@@ -704,9 +713,17 @@ et `node tests/sigeo-diag.realcase.e2e.js` (cas réel 448957 / 08/10/2020 /
 `ECART_APRES_ENREG`, `POSTBACK_TIMEOUT`, lettre forcée ; depuis 2.17.0 :
 ancien DPE 24/11/2020 + ADEME 2021N1001671X → 2 enregistrements, nouveau DPE
 → 1 seul, `ADEME_CHAMP_ABSENT`, fiche incomplète puis reprise sans doublon
-par le journal et par la colonne résultat).
+par le journal et par la colonne résultat ; depuis 2.17.1 : PDF visible
+seulement après un nouvel « Enregistrer », PDF jamais visible puis relances
+sans nouvel upload).
 
-**Version** : 2.17.0 — **SIGEO : saisir un DPE** : « Établi le » déclenché
+**Version** : 2.17.1 — **SIGEO : saisir un DPE** : faux négatif de la
+vérification d'upload corrigé — PDF absent de la liste juste après l'upload
+→ « Enregistrer » recliqué et liste revérifiée (3 tentatives, 10 s d'attente
+active chacune), jamais de nouvel upload ; avertissement si le document
+n'apparaît qu'après un nouvel enregistrement ; une relance revérifie au lieu
+de ré-uploader.
+2.17.0 — **SIGEO : saisir un DPE** : « Établi le » déclenché
 par `performanceEnergetique(el)` dans le monde de la page (repli
 `__doPostBack`) ; N° ADEME saisissable avant enregistrement seulement si le
 DPE est établi depuis le 01/07/2021, sinon **enregistrement en deux temps**

@@ -21,6 +21,9 @@
 //     modifiable dans span#body_x_labelIdDpe (cfg.ademeNever : jamais d'input
 //     en création, pour simuler un champ manquant) ;
 //   - cfg.refuseUpdate : tout Enregistrer sur une fiche existante est refusé ;
+//   - cfg.uploadHidden = N : un PDF uploadé est bien enregistré mais n'apparaît
+//     dans la liste qu'au (N+1)e affichage de la fiche (comme SIGEO, qui ne le
+//     montre parfois qu'après un nouvel « Enregistrer ») ;
 //   - Date début validité : body_x_txtDateDebValid_x_txtDateDebValid (sans postback) ;
 //   - cfg.clearOnChange = "dateDeb,comment" : la page vide ces champs au change
 //     (valeur refusée côté client) ; cfg.corruptOnSave = "ademe,ges" : le serveur
@@ -115,7 +118,10 @@ function render(url, d, opts) {
   const clr = (k) => clear.includes(k) ? ` onchange="this.value=''"` : "";
   const inp = (k, extra = "") => `<input type="text" id="${idOf(N[k])}" name="${N[k]}" value="${esc(d[k])}" ${extra}${clr(k)}>`;
   const chk = (k) => `<input type="checkbox" id="${idOf(N[k])}" name="${N[k]}" ${d[k] ? "checked" : ""}>`;
-  const docs = d.docs || [];
+  // Documents enregistrés mais pas encore affichés (cfg.uploadHidden).
+  const docsAll = d.docs || [];
+  const docs = docsAll.filter((x) => !(x.hiddenRenders > 0));
+  docsAll.forEach((x) => { if (x.hiddenRenders > 0) x.hiddenRenders--; });
   const grid = docs.length
     ? docs.map((x) => `<tr class="PowerGridRowClass"><td>${esc(x.desc)}</td><td><a href="#">${esc(x.name)}</a></td><td>23/11/2026</td></tr>`).join("") +
       `<tr class="PowerGridPagerClass"><td colspan="3">${docs.length} Résultat(s)</td></tr>`
@@ -225,7 +231,7 @@ async function start(cfg = {}) {
   const store = new Map(); // id → données enregistrées
   const flash = new Map();
   const stats = { saves: 0, creates: 0, updates: 0, uploads: 0, enterSaves: 0, saveCloses: 0, posts: 0, refused: 0 };
-  const config = Object.assign({ redirect: false, delayMs: 0, fouPostback: true, dateSynthetic: false, ademeNever: false, refuseUpdate: false }, cfg);
+  const config = Object.assign({ redirect: false, delayMs: 0, fouPostback: true, dateSynthetic: false, ademeNever: false, refuseUpdate: false, uploadHidden: 0 }, cfg);
   let nextId = 1147729;
 
   const server = http.createServer((req, res) => {
@@ -245,6 +251,7 @@ async function start(cfg = {}) {
     if (req.method === "GET") {
       if (id !== "0" && !store.has(id)) { res.statusCode = 404; res.end("diagnostic inconnu"); return; }
       const d = id === "0" ? blank() : JSON.parse(JSON.stringify(store.get(id)));
+      if (id !== "0") d.docs = store.get(id).docs;
       const msgs = flash.get(id) || [];
       flash.delete(id);
       send(render(url, d, { saved: id !== "0", dateKnown: id !== "0", msgs, cfg: config }));
@@ -312,7 +319,8 @@ async function start(cfg = {}) {
         else if (!String(fields[N.desc] || "").trim()) { msgs = [{ cls: "errormsg", text: "La description du document est obligatoire." }]; }
         else {
           const f = files[N.file];
-          store.get(id).docs.push({ desc: fields[N.desc].trim(), name: f.filename, size: f.data.length, pdf: f.data.slice(0, 4).toString() === "%PDF" });
+          store.get(id).docs.push({ desc: fields[N.desc].trim(), name: f.filename, size: f.data.length, pdf: f.data.slice(0, 4).toString() === "%PDF",
+            hiddenRenders: Number(config.uploadHidden) || 0 });
           stats.uploads++;
         }
       }
