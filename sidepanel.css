@@ -785,3 +785,7 @@ input[type="file"]::file-selector-button {
 .imx-test-result { word-break: break-word; }
 .imx-test-result.ok { color: var(--ok); }
 .imx-test-result.err { color: var(--err); }
+
+/* Extraction « DPE Intralia » : champs du DPE saisi (cases à cocher) */
+.intra-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 2px 10px; margin-top: 4px; }
+.intra-fields .checkbox-row { margin: 0; font-size: 12px; }

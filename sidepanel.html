@@ -302,6 +302,7 @@
       <label><input type="radio" name="extractKind" value="sigeoIm" /> Recherche IM SIGEO (adresse → N° E.I.)</label>
       <label><input type="radio" name="extractKind" value="sigeoLot" /> Recherche d'id interne de lot (IM + LT → id SIGEO)</label>
       <label><input type="radio" name="extractKind" value="sigeoDpe" /> DPE SIGEO (vérifier + télécharger le plus récent)</label>
+      <label><input type="radio" name="extractKind" value="intraliaDpe" /> DPE Intralia (immeuble + lot → DPE FlowerDocs le plus récent)</label>
       <label><input type="radio" name="extractKind" value="dpeScan" /> Analyse DPE (dossier de PDF → Excel : dates, énergie, GES, fournisseur FU)</label>
     </div>
 
@@ -527,6 +528,76 @@
         <button class="btn" id="dpeTestBtn" type="button" title="Ouvre la page Documents de la ligne de départ et liste les DPE trouvés, sans rien télécharger ni écrire"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester sur la ligne de départ</button>
       </div>
       <p class="hint imx-test-result" id="dpeTestResult"></p>
+    </div>
+
+    <div id="intraExtractBox" hidden>
+      <p class="hint">Pour chaque ligne : le couple <strong>nom d'immeuble + n° de lot</strong> est cherché dans l'index Intralia du cabinet (<code>diag.php</code>, lu une fois puis mis en cache), la page DPE du lot (<code>diaglot.php</code>) est lue, et le <strong>DPE le plus récent</strong> de la GED (date « crée le ») est repéré par son nom puis, au choix, téléchargé depuis <strong>FlowerDocs</strong>. Intralia est seulement <strong>lu</strong> (aucun enregistrement, aucun document rattaché, aucune commande). Il faut être connecté à Intralia et à FlowerDocs dans ce navigateur.</p>
+      <div class="field-row">
+        <label for="intraNomCol">Colonne nom d'immeuble :</label>
+        <select id="intraNomCol" data-colselect="plain"></select>
+      </div>
+      <div class="field-row">
+        <label for="intraLotCol" title="Le VRAI n° de lot (ex. 732), pas IM_format (id SIGEO)">n° de lot :</label>
+        <select id="intraLotCol" data-colselect="plain" title="Le VRAI n° de lot (ex. 732), pas IM_format (id SIGEO). Zéros devant ignorés (0732 = 732)."></select>
+      </div>
+      <div class="field-row">
+        <label for="intraSoc">Cabinet Intralia :</label>
+        <select id="intraSoc"></select>
+        <button class="btn icon-only" id="intraSocReload" type="button" title="Relire la liste des cabinets dans Intralia (onglet Intralia connecté)"><svg class="icon icon-sm"><use href="#icon-loop"/></svg></button>
+      </div>
+      <p class="hint" id="intraSocWarn" hidden>⚠ Tous les cabinets : index d'environ 90 Mo (~2 min de chargement, une fois puis en cache). Un même nom + lot présent dans plusieurs cabinets donne <code>AMBIGU</code> (aucun téléchargement).</p>
+      <div class="field-row">
+        <span class="hint" id="intraIdxInfo" style="flex:1;min-width:160px"></span>
+        <button class="btn" id="intraIdxRefresh" type="button" title="Relit diag.php pour le cabinet choisi et remplace l'index en cache"><svg class="icon icon-sm"><use href="#icon-loop"/></svg> Rafraîchir l'index Intralia</button>
+      </div>
+      <div class="field-row">
+        <label for="intraMode">Mode :</label>
+        <select id="intraMode">
+          <option value="find">Repérage seul (remplir les colonnes)</option>
+          <option value="download">Repérage + téléchargement</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <label for="intraFolder">Dossier :</label>
+        <input type="text" id="intraFolder" value="DPE" title="Sous-dossier de Téléchargements" style="max-width:110px" />
+        <label for="intraName">nom :</label>
+        <input type="text" id="intraName" value="{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf" title="{Colonne} = valeur de la ligne ; {DPE_Date_GED}, {DPE_Fichier} (nom GED sans extension), {DPE_UUID}, {Intralia_ID_Immeuble}, {Intralia_Cabinet} et les colonnes Intralia_… cochées. Caractères interdits par Windows → _. Extension = celle du fichier reçu." style="flex:1;min-width:140px" />
+      </div>
+      <label class="checkbox-row" title="Charge chaque candidat (du plus récent au plus ancien) et garde le premier dont la page 1 contient « performance énergétique » (texte du PDF, OCR local si la page est scannée). Plus lent."><input type="checkbox" id="intraVerify" /> vérifier le contenu (« performance énergétique » en page 1)</label>
+      <label class="checkbox-row" title="Les PDF téléchargés sont aussi chargés dans la Toolbox, sous leur nom de fichier : les étapes « PDF β » du scénario les retrouvent avec {DPE_Fichier_Local}. Garde les fichiers en mémoire jusqu'à la fermeture du panneau."><input type="checkbox" id="intraToolbox" /> ajouter les PDF téléchargés à la Toolbox</label>
+      <details class="imx-adv" id="intraFieldsBox">
+        <summary>DPE déjà saisi dans Intralia → colonnes (<span id="intraFieldsCount"></span>)</summary>
+        <p class="hint">Valeurs lues dans le formulaire DPE de la page du lot (jamais enregistré). <code>DATEDIAG</code> est la date du DPE ; <code>DPE_Date_GED</code> la date de dépôt du fichier dans la GED.</p>
+        <div id="intraFields" class="intra-fields"></div>
+      </details>
+      <details class="imx-adv" id="intraAdv">
+        <summary>Réglages avancés</summary>
+        <div class="field-row">
+          <label class="imx-sel-label" for="intraRegex">Regex DPE (nom de fichier) :</label>
+          <input type="text" id="intraRegex" spellcheck="false" style="flex:1;min-width:160px" />
+          <button class="btn" id="intraRegexReset" type="button">Défaut</button>
+        </div>
+        <p class="hint">Appliquée au nom normalisé (sans accents, minuscules). Ex. retenus : <code>dpe.pdf</code>, <code>DUPONT_DPE.pdf</code>, <code>MARTIN_928_24.08.11_DP.pdf</code>.</p>
+        <div class="field-row">
+          <label class="imx-sel-label" for="intraBase">URL Intralia :</label>
+          <input type="text" id="intraBase" placeholder="https://intralia.oralia.local" style="flex:1;min-width:160px" />
+        </div>
+        <div class="field-row">
+          <label class="imx-sel-label" for="intraFlower">URL FlowerDocs :</label>
+          <input type="text" id="intraFlower" placeholder="https://www.oralia.flowerdocs.cloud" style="flex:1;min-width:160px" />
+        </div>
+        <div class="field-row">
+          <label for="intraDelay">pause entre lots (ms) :</label>
+          <input type="number" id="intraDelay" value="400" min="0" step="50" title="±25 % (400 → 300 à 500 ms)" />
+          <label for="intraMaxAge">index en cache (jours) :</label>
+          <input type="number" id="intraMaxAge" value="7" min="0" step="1" title="Au-delà, l'index est relu au démarrage. 0 = relu à chaque traitement." />
+        </div>
+      </details>
+      <p class="hint">Colonnes écrites (créées si absentes) : <code>Intralia_Cabinet</code>, <code>Intralia_ID_Immeuble</code>, <code>Intralia_URL_Lot</code>, <code>DPE_Statut</code> (OK / AUCUN_DPE_GED / LOT_INTROUVABLE / IMMEUBLE_INTROUVABLE / AMBIGU / INTRALIA_NON_CONNECTE / FLOWERDOCS_NON_CONNECTE / ERREUR), <code>DPE_Detail</code>, <code>DPE_Fichier</code>, <code>DPE_Date_GED</code>, <code>DPE_UUID</code>, <code>DPE_Lien_FlowerDocs</code>, <code>DPE_Fichier_Local</code> + les champs cochés ci-dessus.</p>
+      <div class="field-row">
+        <button class="btn" id="intraTestBtn" type="button" title="Cherche le lot de la ligne de départ et liste les DPE de la GED, sans rien télécharger ni écrire"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester sur la ligne de départ</button>
+      </div>
+      <p class="hint imx-test-result" id="intraTestResult"></p>
     </div>
 
     <div id="dsExtractBox" hidden>
@@ -817,6 +888,7 @@
   <script src="sigeo-im.js"></script>
   <script src="sigeo-lot.js"></script>
   <script src="sigeo-dpe.js"></script>
+  <script src="intralia-dpe.js"></script>
   <script src="sigeo-diag.js"></script>
   <script src="dpe-scan.js"></script>
   <script src="sidepanel.js"></script>

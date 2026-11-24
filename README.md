@@ -349,8 +349,8 @@ deux modes :
 ## 3. Onglet Extraction (ex-OSA)
 
 **Type d'extraction** : *Standard* (ci-dessous), **Recherche IM SIGEO**,
-**Recherche d'id interne de lot**, **DPE SIGEO** ou **Analyse DPE** (voir
-plus bas).
+**Recherche d'id interne de lot**, **DPE SIGEO**, **DPE Intralia** ou
+**Analyse DPE** (voir plus bas).
 
 1. **Conditions** : ignorer certaines lignes (ex : colonne X = "NON").
 2. **Champs de recherche** : sélecteur CSS (bouton 🎯) + colonne à taper.
@@ -519,6 +519,101 @@ statut » : par défaut `OK & téléchargé`, `OK trouvé (non téléchargé)`
 Session expirée → arrêt avec la ligne à partir de laquelle relancer.
 Pause entre lots réglable (1 s par défaut) pour ne pas surcharger SIGEO.
 
+### DPE Intralia (immeuble + lot → DPE FlowerDocs le plus récent)
+
+Équivalent de *DPE SIGEO* pour **Intralia** (intranet Oralia) : pour chaque
+ligne (nom d'immeuble + **vrai** n° de lot), retrouve le n° d'immeuble
+Intralia, lit la page DPE du lot, choisit le DPE le plus récent de la GED et
+le télécharge depuis FlowerDocs. Logique dans `intralia-dpe.js`.
+
+**Intralia n'est que lu** : uniquement des `GET` ; le formulaire du lot
+(`form1`, qui enregistrerait le DPE) n'est jamais soumis, les cases `IDGED`
+(rattachement de document) ne sont jamais cochées, « Passer la commande DPE »
+n'est jamais cliqué.
+
+1. Connecte-toi à Intralia **et** à FlowerDocs dans ce navigateur (un onglet
+   Intralia ouvert suffit ; à défaut, l'extension en ouvre un en arrière-plan).
+2. Charge le fichier (Données), choisis **DPE Intralia**, puis les colonnes
+   **nom d'immeuble** (défaut `Immeuble`) et **n° de lot** (défaut `lots` —
+   le vrai n° de lot, jamais `IM_format` qui est l'id SIGEO).
+3. **Cabinet Intralia** : Sicov (19) par défaut ; la liste complète est lue
+   dans le `<select name="ID_SOCIETE">` de `diag.php` (bouton ↻, ou
+   automatiquement au premier chargement de l'index). *Tous les cabinets*
+   (100) : ~90 Mo, ~2 min de lecture la première fois.
+4. **Mode** : *repérage seul* (colonnes remplies) ou *repérage +
+   téléchargement*. **Tester sur la ligne de départ** n'écrit et ne
+   télécharge rien.
+
+**Étape 1 — index des immeubles** (une seule fois par traitement) :
+`GET /gerance/diag.php?action=R&ID_SOCIETE={id}&ID_GEST=0&TYPEB=0&DPE_TOUS=checked&GES=0`
+(`TYPEB=0` = tous les baux : garages, commerces… compris). La page est
+rendue côté serveur (DataTables sans AJAX : tout est dans le HTML, la
+« Recherche rapide » n'est pas utilisée), décodée en **windows-1252**
+(`TextDecoder`, jamais `res.text()`), et les lignes de `#example3` sont lues
+par **regex** (pas de `DOMParser` : 91 Mo pour tous les cabinets). Ids lus
+dans le lien `diaglot.php?id_societe=…&id_immeuble=…&id_lot=…` de chaque
+cellule. Index compact `NOM_NORMALISÉ|LOT` mis en cache dans
+`chrome.storage.local` **par cabinet**, avec sa date ; relu au démarrage
+s'il a plus de 7 jours (réglable, 0 = à chaque traitement) ou avec
+**Rafraîchir l'index Intralia**.
+Normalisation : nom sans accents, majuscules, tout non-alphanumérique →
+espace (`Parc Fleuri - le Concerto 1` = `PARC FLEURI LE CONCERTO 1`) ; lot
+sans zéros de tête (`0732` = `732`). Un même nom + lot trouvé plusieurs fois
+(autre cabinet, ou deux immeubles homonymes) → `AMBIGU` (correspondances
+listées, rien n'est téléchargé) ; nom trouvé sans le lot →
+`LOT_INTROUVABLE` ; nom absent → `IMMEUBLE_INTROUVABLE` + 3 noms proches.
+
+**Étape 2 — page du lot** :
+`GET /gerance/diaglot.php?id_societe=…&id_immeuble=…&id_lot=…`. Le **DPE déjà
+saisi** dans Intralia (formulaire `form1`) peut être recopié : cases à cocher
+dans « DPE déjà saisi dans Intralia → colonnes » (lettre DPE, kWh/m², lettre
+GES, kgCO2/m², type avant/après le 01/07/2021, `DATEDIAG`, fin de validité,
+coûts min/max/estimé, année de référence, référence). Les **documents GED**
+(`input.IDGED` → nom en gras, date « crée le AAAA-MM-JJ », UUID) contiennent
+tous les rapports (chaudière, EDL, additifs, .msg…) : les DPE sont repérés
+par leur **nom** (sans accents, insensible à la casse) avec la regex
+modifiable `dpe|diag.*perf|perf.*energ|(^|[_\s.-])dp([_\s.-]|$)`
+(`dpe.pdf`, `DUPONT_DPE.pdf`, `MARTIN_928_24.08.11_DP.pdf`…), dédoublonnés
+(même nom + même date) ; **le plus récent par date « crée le »** est retenu
+(à égalité, le premier de la page). Attention : « crée le » est la date de
+dépôt dans la GED, pas celle du DPE — les deux sont exposées
+(`DPE_Date_GED` et `DATEDIAG`). Aucun candidat → `AUCUN_DPE_GED` + nombre de
+documents présents.
+Option **vérifier le contenu** (désactivée par défaut) : les candidats sont
+chargés du plus récent au plus ancien et le premier dont la page 1 contient
+« performance énergétique » est retenu (texte du PDF via pdf.js, OCR local de
+la Toolbox si la page est scannée).
+
+**Étape 3 — téléchargement FlowerDocs** :
+`GET https://www.oralia.flowerdocs.cloud/flower-docs-gui/download?documentId={UUID}&index=0`
+(ce que fait le bouton « Télécharger » de FlowerDocs), avec la session du
+navigateur — depuis le panneau, ou à défaut depuis un onglet FlowerDocs ouvert.
+Le statut HTTP et les premiers octets (`%PDF`) sont **contrôlés avant tout
+enregistrement** : page HTML / 401 / 403 → `FLOWERDOCS_NON_CONNECTE` et arrêt
+de la boucle (une page de connexion n'est jamais enregistrée en .pdf).
+Enregistrement par `chrome.downloads` (doublon renommé) dans
+`Téléchargements/DPE/` sous le nom `{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf`
+(modifiable : `{Colonne}`, `{DPE_Date_GED}`, `{DPE_Fichier}`, `{DPE_UUID}`,
+`{Intralia_ID_Immeuble}`, `{Intralia_Cabinet}`… ; caractères interdits par
+Windows → `_` ; extension = celle du fichier reçu). Pour les étapes
+`pdfcheck` / `pdfwrite` du scénario : cocher **ajouter les PDF téléchargés
+à la Toolbox**, puis retrouver le PDF par `{DPE_Fichier_Local}`.
+
+Colonnes écrites (créées si absentes) : `Intralia_Cabinet`,
+`Intralia_ID_Immeuble`, `Intralia_URL_Lot`, `DPE_Statut` (`OK` |
+`AUCUN_DPE_GED` | `LOT_INTROUVABLE` | `IMMEUBLE_INTROUVABLE` | `AMBIGU` |
+`INTRALIA_NON_CONNECTE` | `FLOWERDOCS_NON_CONNECTE` | `ERREUR`),
+`DPE_Detail` (correspondances, noms proches, nombre de documents, autres
+DPE…), `DPE_Fichier` (nom dans la GED), `DPE_Date_GED`, `DPE_UUID`,
+`DPE_Lien_FlowerDocs`, `DPE_Fichier_Local` + les champs cochés
+(`Intralia_DPE_Classe`, `Intralia_DPE_kWh_m2`, `Intralia_GES_Classe`,
+`Intralia_GES_kgCO2_m2`, `Intralia_Date_Diag`, …).
+Traitement séquentiel, pause de 300 à 500 ms entre deux lots (réglable),
+bouton ■ Arrêter, journal par ligne ; un même nom + lot n'est traité qu'une
+fois. Page de connexion Intralia → `INTRALIA_NON_CONNECTE`, arrêt avec la
+ligne à partir de laquelle relancer. URL Intralia / FlowerDocs modifiables
+dans « Réglages avancés ».
+
 ### Analyse DPE (dossier de PDF → Excel)
 
 Lit les PDF de DPE téléchargés (par ex. `Téléchargements\DPE_SIGEO`, rempli
@@ -681,6 +776,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── sigeo-im.js        Extraction « Recherche IM SIGEO » (parsing, recherche, pagination, filtrage)
 ├── sigeo-lot.js       Extraction « Recherche d'id interne de lot » (POST direct, repli onglet)
 ├── sigeo-dpe.js       Extraction « DPE SIGEO » (page Documents, filtre, plus récent, téléchargement)
+├── intralia-dpe.js    Extraction « DPE Intralia » (index diag.php, page du lot, DPE GED le plus récent, FlowerDocs)
 ├── dpe-scan.js        Extraction « Analyse DPE » (lecture des DPE, recoupements, classes, fournisseurs FU)
 ├── sigeo-diag.js      Étape de scénario « SIGEO : saisir un DPE » (formulaire diag_manage + PDF)
 ├── update-check.js    Vérification de mise à jour via GitHub
@@ -690,7 +786,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── lib/ocr/           Tesseract.js (OCR local) : lib, worker, cœur wasm, langue fra
 ├── icons/             Icônes de l'extension
 ├── test.html          Page de test locale des deux modes (non publiée)
-└── tests/             Tests des recherches IM, lot et DPE, analyse DPE, saisie DPE (SIGEO simulé, DPE fictifs, jsdom / Playwright)
+└── tests/             Tests des recherches IM, lot et DPE (SIGEO, Intralia), analyse DPE, saisie DPE (sites simulés, DPE fictifs, jsdom / Playwright)
 ```
 
 Tests de la recherche IM (Node + Playwright + Chrome) :
@@ -706,6 +802,13 @@ fichier, attente du chargement, fiche → page Documents, POST → PDF ou HTML,
 contre `tests/fixtures/sigeo-dpe-mock.js`), `node tests/sigeo-dpe.background.js`
 (service worker : PDF, page HTML supprimée, interruption) et
 `node tests/sigeo-dpe.panel.e2e.js`.
+DPE Intralia : `node tests/intralia-dpe.jsdom.js` (jsdom : décodage
+windows-1252, index par regex — 36 000 lignes —, normalisation, collisions,
+filtre DPE, tri « crée le », pages de connexion, contrôle du fichier
+FlowerDocs, nom de fichier, 6 cas réels anonymisés, contre
+`tests/fixtures/intralia-mock.js`) et `node tests/intralia-dpe.panel.e2e.js`
+(vrai panneau : repérage, téléchargement, vérification du contenu par pdf.js,
+Toolbox, sessions expirées, cache de l'index, profils, aucun POST).
 Analyse DPE : `node tests/dpe-scan.node.js` (moteur : classes, n° ADEME,
 fournisseurs, rattachement, puis 5 DPE fictifs — texte, scanné, ancien,
 fournisseur inconnu, PDF sans ligne — générés par

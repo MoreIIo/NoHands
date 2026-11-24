@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NoHands OSA",
-  "version": "2.17.7",
+  "version": "2.18.0",
   "description": "Excel <-> formulaires web : remplissage automatique de formulaires (saisie) et récupération de résultats en boucle (extraction), avec colonnes configurables ou détectées automatiquement.",
   "permissions": [
     "sidePanel",
@@ -17,7 +17,9 @@
   "host_permissions": [
     "<all_urls>",
     "http://sigeo.evoriel.net/*",
-    "https://sigeo.evoriel.net/*"
+    "https://sigeo.evoriel.net/*",
+    "https://intralia.oralia.local/*",
+    "https://www.oralia.flowerdocs.cloud/*"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

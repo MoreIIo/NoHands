@@ -2818,6 +2818,7 @@ function updateExtractEstimate() {
   if (extractKind() === "sigeoIm") { el.textContent = imxEstimateText(); return; }
   if (extractKind() === "sigeoLot") { el.textContent = lotEstimateText(); return; }
   if (extractKind() === "sigeoDpe") { el.textContent = dpeEstimateText(); return; }
+  if (extractKind() === "intraliaDpe") { el.textContent = intraEstimateText(); return; }
   if (extractKind() === "dpeScan") { el.textContent = dsEstimateText(); return; }
   const est = estimateExtractionMs();
   if (!est || !est.total) { el.textContent = ""; return; }
@@ -2851,6 +2852,7 @@ async function runAutomation() {
   if (extractKind() === "sigeoIm") return runImExtraction();
   if (extractKind() === "sigeoLot") return runLotExtraction();
   if (extractKind() === "sigeoDpe") return runDpeExtraction();
+  if (extractKind() === "intraliaDpe") return runIntraExtraction();
 
   const conditions = getConditions();
   const outputs = getOutputs();
@@ -3096,8 +3098,9 @@ function syncExtractKindUI() {
   $("imExtractBox").hidden = kind !== "sigeoIm";
   $("lotExtractBox").hidden = kind !== "sigeoLot";
   $("dpeExtractBox").hidden = kind !== "sigeoDpe";
+  $("intraExtractBox").hidden = kind !== "intraliaDpe";
   $("dsExtractBox").hidden = kind !== "dpeScan";
-  $("stdExtractBox").hidden = kind === "sigeoIm" || kind === "sigeoLot" || kind === "sigeoDpe" || kind === "dpeScan";
+  $("stdExtractBox").hidden = kind === "sigeoIm" || kind === "sigeoLot" || kind === "sigeoDpe" || kind === "intraliaDpe" || kind === "dpeScan";
   // Analyse DPE : colonnes de rattachement devinées si aucune n'est choisie.
   if (kind === "dpeScan" && dsConfigApplied && !$("dsFileCol").value && !$("dsImCol").value && !$("dsLotCol").value) {
     const g = dsGuessCols();
@@ -3140,7 +3143,7 @@ function getImxConfig() {
 let imxConfigApplied = false;
 function applyImxConfig(im, kind) {
   imxConfigApplied = true;
-  const r = document.querySelector(`input[name="extractKind"][value="${["sigeoIm", "sigeoLot", "sigeoDpe", "dpeScan"].includes(kind) ? kind : "standard"}"]`);
+  const r = document.querySelector(`input[name="extractKind"][value="${["sigeoIm", "sigeoLot", "sigeoDpe", "intraliaDpe", "dpeScan"].includes(kind) ? kind : "standard"}"]`);
   if (r) r.checked = true;
   const cols = getColumns();
   const guessAdr = (cols.find((c) => /adresse/i.test(c.name)) || cols[0] || {}).name || "";
@@ -3974,6 +3977,668 @@ $("dpeTestBtn").addEventListener("click", async () => {
     fail(e.message || e);
   } finally {
     $("dpeTestBtn").disabled = false;
+  }
+});
+
+/* ---------- Extraction « DPE Intralia » (immeuble + lot → DPE FlowerDocs) ----------
+   Logique (index diag.php, page diaglot.php, filtre / tri des documents GED,
+   contrôle du fichier FlowerDocs, orchestration d'une ligne) : intralia-dpe.js.
+   Ici : l'interface de l'onglet Extraction, le cache de l'index
+   (chrome.storage.local, par cabinet), l'adaptateur chrome.* (GET Intralia
+   dans un onglet Intralia — même origine → cookies —, fetch FlowerDocs,
+   chrome.downloads) et la boucle sur les lignes.
+   LECTURE SEULE sur Intralia : uniquement des GET (form1 jamais soumis,
+   IDGED jamais coché, « Passer la commande DPE » jamais cliqué). */
+
+let intraConfigApplied = false;
+let intraColsTouched = false;      // colonnes choisies par l'utilisateur (ou un profil)
+let intraCabinets = INTRA_DEFAULT_CABINETS.map((c) => Object.assign({}, c));
+let intraIdxMem = null;            // index chargé : { soc, base, ts, count, rows, idx }
+const intraIdxKey = (soc) => "intraliaIdx:" + soc;
+
+function intraSocLabel(soc) {
+  const c = intraCabinets.find((x) => x.id === String(soc));
+  return c ? c.label : "cabinet " + soc;
+}
+
+function intraRenderSoc(current) {
+  const sel = $("intraSoc");
+  const cur = String(current || sel.value || INTRA_DEFAULT_SOC);
+  const list = intraCabinets.slice();
+  if (!list.some((c) => c.id === cur)) list.push({ id: cur, label: "cabinet " + cur });
+  sel.innerHTML = "";
+  list.forEach((c) => {
+    const o = document.createElement("option");
+    o.value = c.id;
+    o.textContent = `${c.label} (${c.id})`;
+    sel.appendChild(o);
+  });
+  sel.value = cur;
+  $("intraSocWarn").hidden = cur !== INTRA_ALL_SOC;
+}
+
+// Liste lue dans le <select name="ID_SOCIETE"> de diag.php (Sicov et
+// « Tous les cabinets » toujours présents), mémorisée dans le navigateur.
+async function intraSetCabinets(list) {
+  if (!Array.isArray(list) || !list.length) return;
+  const merged = list.map((c) => ({ id: String(c.id), label: String(c.label || c.id) }));
+  INTRA_DEFAULT_CABINETS.forEach((d) => { if (!merged.some((c) => c.id === d.id)) merged.push(Object.assign({}, d)); });
+  intraCabinets = merged;
+  try { await chrome.storage.local.set({ intraliaCabinets: merged }); } catch (_) { /* ignoré */ }
+  intraRenderSoc($("intraSoc").value);
+}
+
+function intraRenderFields(selected) {
+  const box = $("intraFields");
+  const sel = new Set(selected || []);
+  box.innerHTML = "";
+  INTRA_FIELDS.forEach((f) => {
+    const lab = document.createElement("label");
+    lab.className = "checkbox-row";
+    lab.title = `${f.k} → colonne ${f.col}`;
+    lab.innerHTML = `<input type="checkbox" class="intra-field" data-k="${escapeAttr(f.k)}"${sel.has(f.k) ? " checked" : ""} /> ${escapeHtml(f.label)}`;
+    box.appendChild(lab);
+  });
+  intraUpdateFieldsCount();
+}
+
+function intraUpdateFieldsCount() {
+  const n = document.querySelectorAll(".intra-field:checked").length;
+  $("intraFieldsCount").textContent = n ? `${n} coché${n > 1 ? "s" : ""}` : "aucun";
+}
+
+// Colonnes devinées : « Immeuble » et « lots » (jamais IM_format = id SIGEO).
+function intraGuessCols() {
+  const cols = getColumns();
+  const find = (re, not) => (cols.find((c) => re.test(String(c.name).trim()) && !(not && not.test(String(c.name)))) || {}).name || "";
+  const nom = find(/^immeubles?$/i) || find(/^nom\s*(d'?\s*|de\s*l'?\s*)?immeuble$/i) ||
+    find(/immeuble/i, /^(n°|num|id|code)|\bIM\b|format|interne|intralia/i);
+  const lot = find(/^lots?$/i) || find(/^(n°|num[eé]ro)\s*(de\s*)?lots?$/i) ||
+    find(/\blots?\b/i, /\bIM\b|format|\bid\b|interne|url|r[ée]sultat|nb|intralia/i);
+  return { nom, lot };
+}
+
+function getIntraConfig() {
+  return intraNormalizeConfig({
+    nomCol: $("intraNomCol").value,
+    lotCol: $("intraLotCol").value,
+    soc: $("intraSoc").value,
+    regex: $("intraRegex").value,
+    mode: $("intraMode").value,
+    folder: $("intraFolder").value.trim(),
+    name: $("intraName").value,
+    verify: $("intraVerify").checked,
+    toolbox: $("intraToolbox").checked,
+    fields: Array.from(document.querySelectorAll(".intra-field:checked")).map((i) => i.dataset.k),
+    base: $("intraBase").value,
+    flower: $("intraFlower").value,
+    delay: $("intraDelay").value,
+    maxAgeDays: $("intraMaxAge").value
+  });
+}
+
+function applyIntraConfig(raw) {
+  intraConfigApplied = true;
+  const c = intraNormalizeConfig(raw || {});
+  intraColsTouched = !!(c.nomCol || c.lotCol);
+  const g = intraGuessCols();
+  fillColumnSelect($("intraNomCol"), c.nomCol || g.nom);
+  fillColumnSelect($("intraLotCol"), c.lotCol || g.lot);
+  intraRenderSoc(c.soc);
+  $("intraRegex").value = c.regex;
+  $("intraMode").value = c.mode;
+  $("intraFolder").value = c.folder;
+  $("intraName").value = c.name;
+  $("intraVerify").checked = c.verify;
+  $("intraToolbox").checked = c.toolbox;
+  intraRenderFields(c.fields);
+  $("intraBase").value = c.base;
+  $("intraFlower").value = c.flower;
+  $("intraDelay").value = c.delay;
+  $("intraMaxAge").value = c.maxAgeDays;
+  intraShowIdxInfo();
+}
+
+const intraIdxStale = (c, cfg) => !cfg.maxAgeDays || Date.now() - (c.ts || 0) > cfg.maxAgeDays * 86400000;
+
+async function intraCachedIndex(cfg) {
+  if (intraIdxMem && intraIdxMem.soc === cfg.soc && intraIdxMem.base === cfg.base) return intraIdxMem;
+  try {
+    const st = await chrome.storage.local.get(intraIdxKey(cfg.soc));
+    const c = st && st[intraIdxKey(cfg.soc)];
+    if (c && c.base === cfg.base && Array.isArray(c.rows)) return c;
+  } catch (_) { /* ignoré */ }
+  return null;
+}
+
+async function intraShowIdxInfo() {
+  const el = $("intraIdxInfo");
+  if (!el) return;
+  const cfg = getIntraConfig();
+  const c = await intraCachedIndex(cfg);
+  if (!c) {
+    el.textContent = `Index ${intraSocLabel(cfg.soc)} : pas encore chargé (lu au démarrage, ~${cfg.soc === INTRA_ALL_SOC ? "2 min" : "15 s"}).`;
+    return;
+  }
+  const n = c.count ?? (c.rows || []).length;
+  el.textContent = `Index ${intraSocLabel(cfg.soc)} : ${Number(n).toLocaleString("fr-FR")} lots, lu le ${new Date(c.ts).toLocaleString("fr-FR")}` +
+    (intraIdxStale(c, cfg) ? " (sera relu au démarrage)." : ".");
+}
+
+function intraOriginOf(u) { try { return new URL(u).origin; } catch (_) { return ""; } }
+
+// Onglet ouvert sur l'origine `base` (onglet cible d'abord) ; sinon, si
+// open, un onglet Intralia est ouvert en arrière-plan (diag.php, GET).
+async function intraFindTab(base, open) {
+  const origin = intraOriginOf(base);
+  if (!origin) return null;
+  const on = (u) => intraOriginOf(u || "") === origin;
+  try {
+    if (state.targetTabId != null) {
+      const t = await chrome.tabs.get(state.targetTabId);
+      if (t && on(t.url)) return t.id;
+    }
+  } catch (_) { /* onglet fermé */ }
+  try {
+    const t = ((await chrome.tabs.query({})) || []).find((x) => on(x.url));
+    if (t) return t.id;
+  } catch (_) { /* ignoré */ }
+  if (!open || !chrome.tabs.create) return null;
+  try {
+    logLine(`Aucun onglet ${origin} : ouverture de ${intraFormUrl(base)} en arrière-plan.`, "");
+    const t = await chrome.tabs.create({ url: intraFormUrl(base), active: false });
+    for (let i = 0; i < 120; i++) {
+      await sleep(250);
+      const x = await chrome.tabs.get(t.id);
+      if (x && x.status === "complete") break;
+    }
+    return t.id;
+  } catch (_) { return null; }
+}
+
+async function intraExec(tabId, cfg) {
+  const res = await chrome.scripting.executeScript({ target: { tabId }, world: "ISOLATED", func: intraPageOp, args: [cfg] });
+  const r = res && res[0] ? res[0].result : null;
+  if (!r) throw new Error("onglet injoignable (aucun résultat)");
+  return r;
+}
+
+// Index du cabinet, chargé une seule fois par traitement :
+// mémoire → cache chrome.storage.local (âge max) → GET diag.php.
+async function intraEnsureIndex(cfg, opts = {}) {
+  const key = intraIdxKey(cfg.soc);
+  if (!opts.force) {
+    if (intraIdxMem && intraIdxMem.soc === cfg.soc && intraIdxMem.base === cfg.base && !intraIdxStale(intraIdxMem, cfg)) {
+      return { index: intraIdxMem, cached: true };
+    }
+    const c = await intraCachedIndex(cfg);
+    if (c && !intraIdxStale(c, cfg)) {
+      intraIdxMem = c.idx ? c : Object.assign({}, c, { idx: intraBuildIndex(c.rows) });
+      return { index: intraIdxMem, cached: true };
+    }
+  }
+  const tabId = await intraFindTab(cfg.base, true);
+  if (tabId == null) {
+    return { status: INTRA_STATUS.INTRALIA_NON_CONNECTE, error: `aucun onglet Intralia (${cfg.base}) : ouvre Intralia dans ce navigateur et connecte-toi` };
+  }
+  const t0 = Date.now();
+  let r;
+  try { r = await intraExec(tabId, { op: "index", url: intraIndexUrl(cfg.base, cfg.soc), soc: cfg.soc }); }
+  catch (e) { return { status: INTRA_STATUS.ERREUR, error: "index Intralia : " + (e.message || e) }; }
+  if (r.cabinets && r.cabinets.length) await intraSetCabinets(r.cabinets);
+  if (!r.ok) {
+    if (r.error && !r.login) return { status: INTRA_STATUS.ERREUR, error: "index Intralia : " + r.error };
+    return {
+      status: INTRA_STATUS.INTRALIA_NON_CONNECTE,
+      error: r.login ? "page de connexion Intralia : connecte-toi dans l'onglet Intralia"
+        : `diag.php sans tableau #example3 (HTTP ${r.status || "?"}) — session expirée ?`
+    };
+  }
+  const c = { v: 1, soc: cfg.soc, base: cfg.base, ts: Date.now(), count: r.rows.length, size: r.size || 0, ms: Date.now() - t0, rows: r.rows };
+  try { await chrome.storage.local.set({ [key]: c }); } catch (_) { /* quota : l'index reste en mémoire */ }
+  intraIdxMem = Object.assign({}, c, { idx: intraBuildIndex(c.rows) });
+  return { index: intraIdxMem, fetched: true };
+}
+
+function intraB64ToBytes(b64) {
+  const s = atob(b64 || "");
+  const u = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+  return u;
+}
+const intraIsPdfBytes = (u8) => !!u8 && u8.length > 4 && u8[0] === 0x25 && u8[1] === 0x50 && u8[2] === 0x44 && u8[3] === 0x46;
+
+// Fichier FlowerDocs : depuis le panneau (permission d'hôte → session du
+// navigateur), sinon depuis un onglet FlowerDocs ouvert (même origine →
+// cookies garantis). Le contenu est contrôlé ensuite (statut + « %PDF »).
+async function intraFetchFile(url, flowerBase) {
+  let r = null, err = "";
+  try {
+    const res = await fetch(url, { credentials: "include", cache: "no-store" });
+    r = {
+      status: res.status, url: res.url, via: "le panneau",
+      contentType: res.headers.get("content-type") || "",
+      disposition: res.headers.get("content-disposition") || "",
+      bytes: new Uint8Array(await res.arrayBuffer())
+    };
+    if (intraIsPdfBytes(r.bytes)) return r;
+  } catch (e) { err = e.message || String(e); }
+  const tabId = await intraFindTab(flowerBase, false);
+  if (tabId != null) {
+    try {
+      const t = await intraExec(tabId, { op: "file", url });
+      if (t && !t.error && t.b64 !== undefined) {
+        return { status: t.status, url: t.url, contentType: t.contentType, disposition: t.disposition, bytes: intraB64ToBytes(t.b64), via: "l'onglet FlowerDocs" };
+      }
+      if (t && t.error) err = err || t.error;
+    } catch (e) { err = err || e.message || String(e); }
+  }
+  return r || { error: err || "FlowerDocs injoignable" };
+}
+
+function intraWaitDownload(id, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = async () => {
+      if (done) return;
+      const [it] = await chrome.downloads.search({ id });
+      if (!it || (it.state !== "complete" && it.state !== "interrupted")) return;
+      done = true;
+      chrome.downloads.onChanged.removeListener(onChanged);
+      clearTimeout(timer);
+      resolve(it);
+    };
+    const onChanged = (d) => { if (d.id === id && d.state) finish(); };
+    const timer = setTimeout(async () => {
+      if (done) return;
+      done = true;
+      chrome.downloads.onChanged.removeListener(onChanged);
+      const [it] = await chrome.downloads.search({ id });
+      resolve(Object.assign({}, it, { timedOut: true }));
+    }, Math.max(5000, timeoutMs || 60000));
+    chrome.downloads.onChanged.addListener(onChanged);
+    finish();
+  });
+}
+
+// Enregistre des octets DÉJÀ contrôlés (jamais une page de connexion) dans
+// Téléchargements/<dossier>/<nom> via chrome.downloads (URL blob du panneau).
+async function intraSaveBytes(bytes, filename, mime) {
+  if (!chrome.downloads || !chrome.downloads.download) return { ok: false, error: "permission « downloads » absente" };
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime || "application/octet-stream" }));
+  try {
+    const id = await chrome.downloads.download({ url, filename, conflictAction: "uniquify", saveAs: false });
+    const it = await intraWaitDownload(id, 120000);
+    if (it.state === "interrupted") return { ok: false, error: "téléchargement interrompu (" + (it.error || "?") + ")" };
+    if (it.timedOut) return { ok: false, error: "téléchargement non terminé (délai dépassé)" };
+    return { ok: true, id, filename: String(it.filename || filename).split(/[\\/]/).pop(), path: it.filename || "" };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+}
+
+// « Vérifier le contenu » : « performance énergétique » en page 1 (texte du
+// PDF via pdf.js ; OCR local de la Toolbox si la page est scannée).
+async function intraPdfPageText(bytes, pageNo) {
+  if (!window.pdfjsLib) throw new Error("pdf.js non chargé (lib/pdf.min.js)");
+  const doc = await pdfjsLib.getDocument({ data: bytes.slice(), useSystemFonts: true }).promise;
+  try {
+    if (doc.numPages < pageNo) return "";
+    const tc = await (await doc.getPage(pageNo)).getTextContent();
+    return tc.items.map((i) => i.str || "").join(" ");
+  } finally { try { doc.destroy(); } catch (_) { /* ignoré */ } }
+}
+
+async function intraOcrPage(bytes, pageNo) {
+  const worker = await tbGetOcrWorker();
+  const pdf = await pdfjsLib.getDocument({ data: bytes.slice(), useSystemFonts: true }).promise;
+  try {
+    const page = await pdf.getPage(pageNo);
+    let vp = page.getViewport({ scale: 1 });
+    vp = page.getViewport({ scale: Math.min(3, Math.max(1.5, 1700 / vp.width)) });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(vp.width);
+    canvas.height = Math.ceil(vp.height);
+    await page.render({ canvasContext: canvas.getContext("2d", { willReadFrequently: true }), viewport: vp }).promise;
+    const { data } = await worker.recognize(canvas);
+    canvas.width = canvas.height = 0;
+    return (data && data.text) || "";
+  } finally { try { pdf.destroy(); } catch (_) { /* ignoré */ } }
+}
+
+async function intraVerifyDpe(bytes) {
+  let txt = await intraPdfPageText(bytes, 1), how = "texte du PDF";
+  if (txt.replace(/\s+/g, "").length < 60) { txt = await intraOcrPage(bytes, 1); how = "OCR"; }
+  const ok = /performance\s*energ/.test(tbNorm(txt).replace(/\s+/g, " "));
+  return { ok, how, why: ok ? "" : `« performance énergétique » absent de la page 1 (${how})` };
+}
+
+// PDF téléchargé → document de la Toolbox (étapes « PDF β » par nom de fichier).
+async function intraAddToToolbox(name, bytes) {
+  const entry = { id: "d" + tbDocSeq++, name, size: bytes.length, pages: 0, text: "", fields: [], error: "", loading: true, bytes: null, pageTextLens: null, ocrText: "", ocrPages: null };
+  tbState.docs.push(entry);
+  try {
+    entry.bytes = bytes.slice();
+    const { text, pages, pageTextLens } = await tbExtractTextFromPdf(entry.bytes.slice());
+    Object.assign(entry, { text, pages, pageTextLens, fields: tbExtractFields(text) });
+    if (!text.trim()) entry.error = "aucun texte trouvé (PDF scanné/image) — lance l'OCR ci-dessous";
+  } catch (e) {
+    entry.error = e.message || String(e);
+  }
+  entry.loading = false;
+  if (!tbState.activeDocId) tbState.activeDocId = entry.id;
+  tbRenderDocs();
+}
+
+function intraParams(cfg, row, idx, re) {
+  const folder = intraFolder(cfg.folder);
+  return {
+    idx, re,
+    nom: getCellByIndex(row, colIndexByName(cfg.nomCol)).trim(),
+    lot: getCellByIndex(row, colIndexByName(cfg.lotCol)).trim(),
+    base: cfg.base, flower: cfg.flower,
+    download: cfg.mode === "download", verify: cfg.verify,
+    socLabel: intraSocLabel(cfg.soc),
+    name: (c, ext, res) => (folder ? folder + "/" : "") +
+      intraFileName(cfg.name, intraTemplateVars(c, res), (s) => resolveRowTemplate(s, row), ext)
+  };
+}
+
+function intraAdapter(cfg, tabId) {
+  return {
+    intra: (c) => intraExec(tabId, c),
+    fetchFile: (url) => intraFetchFile(url, cfg.flower),
+    save: (bytes, path, mime) => intraSaveBytes(bytes, path, mime),
+    verify: (bytes) => intraVerifyDpe(bytes),
+    stopped: () => stopRequested,
+    log: (t, c) => logLine(t, c)
+  };
+}
+
+function intraEstimateText() {
+  if (!state.rows.length) return "";
+  const cfg = getIntraConfig();
+  const ni = colIndexByName(cfg.nomCol), li = colIndexByName(cfg.lotCol);
+  if (ni < 0 || li < 0) return "";
+  const { startIdx, endIdx } = lotRowRange();
+  const keys = new Set();
+  let n = 0;
+  for (let i = startIdx; i <= endIdx; i++) {
+    const row = state.rows[i] || [];
+    const nom = getCellByIndex(row, ni), lot = getCellByIndex(row, li);
+    if (!nom.trim() || !lot.trim()) continue;
+    n++;
+    keys.add(intraNormName(nom) + "|" + intraNormLot(lot));
+  }
+  if (!n) return "";
+  const per = 700 + cfg.delay + (cfg.mode === "download" ? 1500 : 0) + (cfg.verify ? 2500 : 0);
+  const loaded = intraIdxMem && intraIdxMem.soc === cfg.soc && intraIdxMem.base === cfg.base && !intraIdxStale(intraIdxMem, cfg);
+  const idxMs = loaded ? 0 : cfg.soc === INTRA_ALL_SOC ? 100000 : 15000;
+  return `Estimation : ${n} lot${n > 1 ? "s" : ""} (${keys.size} différent${keys.size > 1 ? "s" : ""}) → ~${formatDuration(keys.size * per + idxMs)}` +
+    (idxMs ? " (index compris, s'il n'est pas en cache)" : "") + ".";
+}
+
+async function runIntraExtraction() {
+  const cfg = getIntraConfig();
+  const nomIdx = colIndexByName(cfg.nomCol), lotIdx = colIndexByName(cfg.lotCol);
+  if (nomIdx < 0 || lotIdx < 0) { logLine("DPE Intralia : choisis les colonnes nom d'immeuble et n° de lot.", "err"); return; }
+  const rx = intraCompileRegex(cfg.regex);
+  if (rx.error) { logLine("DPE Intralia : " + rx.error, "err"); return; }
+  const download = cfg.mode === "download";
+  // Demandée tout de suite (geste utilisateur).
+  if (download && !(await requestDownloadsPermission())) {
+    logLine("DPE Intralia : la permission « Téléchargements » est nécessaire (ou choisis « Repérage seul »).", "err");
+    return;
+  }
+  const conditions = getConditions();
+  const { startIdx, endIdx } = lotRowRange();
+
+  isRunning = true;
+  hasStartedRun = true;
+  stopRequested = false;
+  $("startBtn").disabled = true;
+  $("stopBtn").disabled = false;
+  $("log").innerHTML = "";
+  runLog = [];
+  lastRunOutputs = [{ col: "DPE_Statut" }, { col: "Intralia_ID_Immeuble" }, { col: "DPE_Fichier" }, { col: "DPE_Date_GED" }, { col: "DPE_Fichier_Local" }];
+  const total = Math.max(0, endIdx - startIdx + 1);
+  let done = 0, nOk = 0, nDl = 0, viaSeen = false;
+  const runStart = Date.now();
+  runDurationMs = 0;
+  setProgress(0, total);
+  $("extractEstimate").textContent = "";
+  updateRunTiming(0, total, runStart);
+  updateDoneMarkers();
+  const tick = () => { done++; setProgress(done, total); updateRunTiming(done, total, runStart); };
+  const finish = (msg, cls) => {
+    runDurationMs = Date.now() - runStart;
+    isRunning = false;
+    $("startBtn").disabled = false;
+    $("stopBtn").disabled = true;
+    $("progressTiming").textContent = `Terminé en ${formatDuration(runDurationMs)}`;
+    logLine(msg || `Terminé en ${formatDuration(runDurationMs)}.`, cls || "ok");
+    renderResultSummary();
+    updateExtractEstimate();
+    renderPreview();
+    persistSession();
+    updateDoneMarkers();
+  };
+  const socTxt = `${intraSocLabel(cfg.soc)} (${cfg.soc})`;
+  logLine(`DPE Intralia — ${download ? "repérage + téléchargement" : "repérage seul"}${cfg.verify ? " + vérification du contenu" : ""}, cabinet ${socTxt}, ${total} ligne(s).`, "");
+
+  // 1. Index des immeubles (une seule fois par traitement).
+  logLine(`Index ${socTxt} : chargement…${cfg.soc === INTRA_ALL_SOC ? " (tous les cabinets : ~2 min si pas en cache)" : ""}`, "");
+  const ix = await intraEnsureIndex(cfg);
+  if (!ix.index) {
+    logLine(`Index Intralia : ${ix.status} — ${ix.error}`, "err");
+    showStatus(ix.status === INTRA_STATUS.INTRALIA_NON_CONNECTE ? "Intralia non connecté — extraction arrêtée." : "Index Intralia illisible — extraction arrêtée.", "error");
+    finish(`Arrêté : index Intralia indisponible (${ix.status}).`, "err");
+    return;
+  }
+  const I = ix.index;
+  logLine(ix.cached
+    ? `Index ${socTxt} : ${I.count} lots (cache du ${new Date(I.ts).toLocaleString("fr-FR")}).`
+    : `Index ${socTxt} : ${I.count} lots lus en ${formatDuration(I.ms || 0)} (${((I.size || 0) / 1e6).toFixed(1)} Mo).`, "ok");
+  if (!I.count) logLine("⚠ Index vide : vérifie le cabinet choisi.", "skip");
+  intraShowIdxInfo();
+  const tabId = await intraFindTab(cfg.base, true);
+  if (tabId == null) { finish(`Arrêté : aucun onglet Intralia (${cfg.base}).`, "err"); return; }
+
+  // 2. Colonnes de sortie (créées si absentes).
+  const createdCols = {};
+  const outCols = INTRA_COLS.concat(cfg.fields.map((k) => INTRA_FIELDS.find((f) => f.k === k).col));
+  const colIdx = {};
+  outCols.forEach((c) => { colIdx[c] = resolveOutputTarget(c, createdCols); });
+  if (Object.keys(createdCols).length) renderColumns();
+
+  const ad = intraAdapter(cfg, tabId);
+  const cache = new Map(); // même nom + lot → traité une seule fois
+  const LOOKUP_ONLY = [INTRA_STATUS.AMBIGU, INTRA_STATUS.LOT_INTROUVABLE, INTRA_STATUS.IMMEUBLE_INTROUVABLE];
+
+  for (let i = startIdx; i <= endIdx; i++) {
+    if (stopRequested) { logLine("Arrêté par l'utilisateur.", "skip"); break; }
+    const row = state.rows[i] = state.rows[i] || [];
+    const rowNum = i + 1;
+    if (rowMatchesSkipCondition(row, conditions)) {
+      logLine(`Ligne ${rowNum} : ignorée (condition).`, "skip");
+      runLog.push({ row: rowNum, search: "", values: [], status: "skip", note: "Condition" });
+      tick(); continue;
+    }
+    const p = intraParams(cfg, row, I.idx, rx.re);
+    if (!p.nom || !p.lot) {
+      logLine(`Ligne ${rowNum} : ignorée (${!p.nom ? "nom d'immeuble" : "n° de lot"} vide).`, "skip");
+      runLog.push({ row: rowNum, search: "", values: [], status: "skip", note: !p.nom ? "Nom vide" : "Lot vide" });
+      tick(); continue;
+    }
+    const search = `${p.nom} / lot ${p.lot}`;
+    const key = intraNormName(p.nom) + "|" + intraNormLot(p.lot);
+    let res = cache.get(key);
+    const cached = !!res;
+    if (!res) {
+      try { res = await intraProcessRow(ad, p); }
+      catch (e) { res = { status: INTRA_STATUS.ERREUR, detail: e.message || String(e), error: e.message || String(e), info: [], candidates: [] }; }
+      if (stopRequested && res.error === "arrêté") { logLine("Arrêté par l'utilisateur.", "skip"); break; }
+      if (res.status !== INTRA_STATUS.INTRALIA_NON_CONNECTE && res.status !== INTRA_STATUS.FLOWERDOCS_NON_CONNECTE) cache.set(key, res);
+      if (cfg.toolbox && res.bytes && /\.pdf$/i.test(res.file || "")) await intraAddToToolbox(res.file, res.bytes);
+      delete res.bytes; // libère la mémoire
+    }
+    const vals = intraRowValues(res, cfg.fields);
+    outCols.forEach((c) => setCellByIndex(row, colIdx[c], vals[c] ?? ""));
+    if (!cached) (res.info || []).forEach((w) => logLine(`Ligne ${rowNum} : ${/ vérifié \(/.test(w) ? "✓" : "⚠"} ${w}`, / vérifié \(/.test(w) ? "" : "skip"));
+    if (res.via && !viaSeen) { viaSeen = true; logLine(`FlowerDocs : fichiers lus depuis ${res.via}.`, ""); }
+    const recap = [vals.DPE_Statut, vals.Intralia_ID_Immeuble, vals.DPE_Fichier, vals.DPE_Date_GED, vals.DPE_Fichier_Local];
+    const again = cached ? " [déjà traité plus haut]" : "";
+    if (res.status === INTRA_STATUS.OK) {
+      nOk++;
+      if (res.file && !cached) nDl++;
+      const c = res.chosen;
+      logLine(`Ligne ${rowNum} (${search}) : OK — ${res.cabinet} imm ${res.imm} → « ${c.name} » du ${c.date || "?"}` +
+        `${res.file ? " → " + res.file : ""} (${res.candidates.length} DPE / ${res.nDocs} doc. GED)${again}`, "ok");
+      runLog.push({ row: rowNum, search, values: recap, status: "ok" });
+    } else if (res.status === INTRA_STATUS.AUCUN_DPE_GED) {
+      logLine(`Ligne ${rowNum} (${search}) : AUCUN_DPE_GED — ${res.detail}${again}`, "skip");
+      runLog.push({ row: rowNum, search, values: recap, status: "skip", label: "Aucun DPE GED" });
+    } else if (LOOKUP_ONLY.includes(res.status)) {
+      logLine(`Ligne ${rowNum} (${search}) : ${res.status} — ${res.detail}`, "skip");
+      runLog.push({ row: rowNum, search, values: recap, status: "skip", label: res.status, check: true });
+    } else {
+      logLine(`Ligne ${rowNum} (${search}) : ${res.status} — ${res.detail || res.error || ""}`, "err");
+      runLog.push({ row: rowNum, search, values: recap, status: "err", note: res.detail || res.error || res.status });
+    }
+    tick();
+    if (res.status === INTRA_STATUS.INTRALIA_NON_CONNECTE) {
+      logLine(`Intralia : session expirée (page de connexion). Connecte-toi dans l'onglet Intralia puis relance à partir de la ligne ${rowNum}.`, "err");
+      showStatus("Intralia non connecté — extraction arrêtée.", "error");
+      break;
+    }
+    if (res.status === INTRA_STATUS.FLOWERDOCS_NON_CONNECTE) {
+      logLine(`FlowerDocs : ${res.detail}. Connecte-toi à FlowerDocs (${cfg.flower}/flower-docs-gui/) dans ce navigateur puis relance à partir de la ligne ${rowNum}. Aucun fichier n'a été enregistré pour cette ligne.`, "err");
+      showStatus("FlowerDocs non connecté — extraction arrêtée.", "error");
+      break;
+    }
+    if (cfg.delay && i < endIdx && !cached && !LOOKUP_ONLY.includes(res.status)) {
+      await sleep(Math.round(cfg.delay * (0.75 + Math.random() * 0.5)));
+    }
+  }
+
+  finish(`Terminé en ${formatDuration(Date.now() - runStart)} — ${nOk} DPE repéré(s)` +
+    (download ? `, ${nDl} téléchargé(s) dans Téléchargements/${intraFolder(cfg.folder) || ""}` : "") + ".", "ok");
+}
+
+// Interface
+$("intraSoc").addEventListener("change", () => {
+  $("intraSocWarn").hidden = $("intraSoc").value !== INTRA_ALL_SOC;
+  intraShowIdxInfo();
+  updateExtractEstimate();
+});
+["intraNomCol", "intraLotCol"].forEach((id) => $(id).addEventListener("change", () => { intraColsTouched = true; updateExtractEstimate(); }));
+["intraDelay", "intraVerify", "intraMaxAge"].forEach((id) => $(id).addEventListener("change", updateExtractEstimate));
+["intraBase", "intraMaxAge"].forEach((id) => $(id).addEventListener("change", () => intraShowIdxInfo()));
+$("intraMode").addEventListener("change", () => {
+  if ($("intraMode").value === "download") requestDownloadsPermission();
+  updateExtractEstimate();
+});
+$("intraFields").addEventListener("change", intraUpdateFieldsCount);
+$("intraRegexReset").addEventListener("click", () => { $("intraRegex").value = INTRA_DEFAULT_REGEX; persistWorkingConfig(); });
+// En passant sur ce type : colonnes devinées si pas encore choisies.
+document.querySelectorAll('input[name="extractKind"]').forEach((r) => r.addEventListener("change", () => {
+  if (extractKind() !== "intraliaDpe") return;
+  if (!intraColsTouched) {
+    const g = intraGuessCols();
+    if (g.nom) fillColumnSelect($("intraNomCol"), g.nom);
+    if (g.lot) fillColumnSelect($("intraLotCol"), g.lot);
+  }
+  intraShowIdxInfo();
+  updateExtractEstimate();
+}));
+// Liste des cabinets mémorisée (lue dans diag.php).
+(async () => {
+  try {
+    const st = await chrome.storage.local.get("intraliaCabinets");
+    if (st && Array.isArray(st.intraliaCabinets) && st.intraliaCabinets.length) {
+      intraCabinets = st.intraliaCabinets;
+      if (intraConfigApplied) intraRenderSoc($("intraSoc").value);
+    }
+  } catch (_) { /* ignoré */ }
+})();
+
+$("intraSocReload").addEventListener("click", async () => {
+  if (isRunning) { showStatus("Une extraction est en cours.", "error"); return; }
+  const cfg = getIntraConfig();
+  const tabId = await intraFindTab(cfg.base, true);
+  if (tabId == null) { showStatus("Ouvre Intralia dans un onglet et connecte-toi.", "error"); return; }
+  try {
+    const r = await intraExec(tabId, { op: "cabinets", url: intraFormUrl(cfg.base) });
+    if (r.ok) { await intraSetCabinets(r.cabinets); showStatus(`${r.cabinets.length} cabinets lus dans Intralia.`, "success"); }
+    else showStatus(r.login ? "Intralia : page de connexion — connecte-toi dans l'onglet Intralia." : "Liste des cabinets introuvable dans diag.php.", "error");
+  } catch (e) {
+    showStatus("Intralia : " + (e.message || e), "error");
+  }
+});
+
+$("intraIdxRefresh").addEventListener("click", async () => {
+  if (isRunning) { showStatus("Une extraction est en cours.", "error"); return; }
+  const cfg = getIntraConfig();
+  const btn = $("intraIdxRefresh");
+  btn.disabled = true;
+  $("intraIdxInfo").textContent = `Lecture de l'index ${intraSocLabel(cfg.soc)}…${cfg.soc === INTRA_ALL_SOC ? " (~2 min)" : ""}`;
+  try {
+    const ix = await intraEnsureIndex(cfg, { force: true });
+    if (!ix.index) {
+      $("intraIdxInfo").textContent = `✗ ${ix.status} — ${ix.error}`;
+      showStatus("Index Intralia : " + ix.error, "error");
+      return;
+    }
+    await intraShowIdxInfo();
+    showStatus(`Index Intralia mis à jour : ${ix.index.count} lots.`, "success");
+    updateExtractEstimate();
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$("intraTestBtn").addEventListener("click", async () => {
+  const out = $("intraTestResult");
+  if (isRunning) { showStatus("Une extraction est en cours.", "error"); return; }
+  const cfg = getIntraConfig();
+  const { startIdx } = lotRowRange();
+  const row = state.rows[startIdx];
+  const fail = (t) => { out.className = "hint imx-test-result err"; out.textContent = "✗ " + t; };
+  if (!row) return fail("Charge d'abord des données.");
+  if (colIndexByName(cfg.nomCol) < 0 || colIndexByName(cfg.lotCol) < 0) return fail("Choisis les colonnes nom d'immeuble et n° de lot.");
+  const rx = intraCompileRegex(cfg.regex);
+  if (rx.error) return fail(rx.error);
+  out.className = "hint imx-test-result";
+  out.textContent = `Index ${intraSocLabel(cfg.soc)}…`;
+  $("intraTestBtn").disabled = true;
+  try {
+    stopRequested = false;
+    const ix = await intraEnsureIndex(cfg);
+    if (!ix.index) return fail(`${ix.status} — ${ix.error}`);
+    intraShowIdxInfo();
+    const tabId = await intraFindTab(cfg.base, true);
+    if (tabId == null) return fail("aucun onglet Intralia.");
+    const p = intraParams(cfg, row, ix.index.idx, rx.re);
+    p.download = false; // le test ne télécharge ni n'écrit rien
+    if (!p.nom || !p.lot) return fail(`Ligne ${startIdx + 1} : nom d'immeuble ou n° de lot vide.`);
+    out.textContent = `Ligne ${startIdx + 1} (${p.nom} / lot ${p.lot})…`;
+    const res = await intraProcessRow(intraAdapter(cfg, tabId), p);
+    const c = res.chosen;
+    let txt = res.status === INTRA_STATUS.OK
+      ? `✓ Ligne ${startIdx + 1} : ${res.cabinet} imm ${res.imm} → « ${c.name} » du ${c.date || "?"} (${res.candidates.length} DPE / ${res.nDocs} document(s) GED) → ${p.name(c, intraExtOf(c.name) || ".pdf", res)}`
+      : `${[INTRA_STATUS.ERREUR, INTRA_STATUS.INTRALIA_NON_CONNECTE, INTRA_STATUS.FLOWERDOCS_NON_CONNECTE].includes(res.status) ? "✗" : "⚠"} Ligne ${startIdx + 1} : ${res.status} — ${res.detail}`;
+    const f = res.fields;
+    if (f) txt += ` — DPE saisi dans Intralia : ${f.libdpe1 || "–"} ${f.DPE1 || ""} / GES ${f.libges1 || "–"} ${f.GES1 || ""}${f.DATEDIAG ? ", du " + f.DATEDIAG : ""}`;
+    if (res.lotUrl) txt += " — " + res.lotUrl;
+    if ((res.info || []).length) txt += " — " + res.info.join(" ; ");
+    out.className = "hint imx-test-result " + (res.status === INTRA_STATUS.OK ? "ok" : "err");
+    out.textContent = txt;
+  } catch (e) {
+    fail(e.message || e);
+  } finally {
+    $("intraTestBtn").disabled = false;
   }
 });
 
@@ -8517,6 +9182,7 @@ function buildProfileConfig() {
       im: getImxConfig(),
       lot: getLotConfig(),
       dpe: getDpeConfig(),
+      intra: getIntraConfig(),
       ds: getDsConfig()
     },
     scenario: {
@@ -8576,6 +9242,7 @@ function applyProfileConfig(cfg) {
   applyImxConfig(ex.im || {}, ex.kind || "standard");
   applyLotConfig(ex.lot || {});
   applyDpeConfig(ex.dpe || {});
+  applyIntraConfig(ex.intra || {});
   applyDsConfig(ex.ds || {});
 
   const sc = cfg.scenario || {};
@@ -8845,6 +9512,7 @@ async function init() {
   if (!imxConfigApplied) applyImxConfig({}, "standard");
   if (!lotConfigApplied) applyLotConfig({});
   if (!dpeConfigApplied) applyDpeConfig({});
+  if (!intraConfigApplied) applyIntraConfig({});
   if (!dsConfigApplied) applyDsConfig({});
 
   // Lignes par défaut dans l'onglet Extraction si vide
