@@ -21,6 +21,9 @@
 //     modifiable dans span#body_x_labelIdDpe (cfg.ademeNever : jamais d'input
 //     en création, pour simuler un champ manquant) ;
 //   - cfg.refuseUpdate : tout Enregistrer sur une fiche existante est refusé ;
+//   - fournisseur : le code est stocké comme un nombre (0448957 → 448957) ; son
+//     libellé est dans span#body:x:proxyFou:x:lbl:x:lbl (cfg.fouLabelBlank :
+//     libellé vide → fournisseur non reconnu) ;
 //   - cfg.uploadHidden = N : un PDF uploadé est bien enregistré mais n'apparaît
 //     dans la liste qu'au (N+1)e affichage de la fiche (comme SIGEO, qui ne le
 //     montre parfois qu'après un nouvel « Enregistrer ») ;
@@ -41,6 +44,8 @@
 //   const srv = await require("./sigeo-diag-server.js").start();
 const http = require("http");
 
+// Code fournisseur stocké comme un nombre par SIGEO (zéros de tête supprimés).
+const fouKey = (c) => String(c || "").trim().replace(/^0+(?=\d)/, "");
 const SUPPLIERS = { "448957": "ACADE Diagnostic", "528825": "EXPERT IMMOBILIER", "410962": "DIAG A FAIRE", "590971": "DIAG IMMO 590971" };
 
 function esc(s) { return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"); }
@@ -145,7 +150,7 @@ function render(url, d, opts) {
     <option value="11"${d.type === "11" ? " selected" : ""}>Performance Energetique</option>
     <option value="15"${d.type === "15" ? " selected" : ""}>Performance Energetique</option></select></td></tr>
   <tr><td>Fournisseur</td><td><span id="body_x_proxyFou"><input type="text" id="${idOf(N.fou)}" name="${N.fou}" maxlength="9" value="${esc(d.fou)}" onkeydown="return press(cmdSave)"${cfg.fouPostback === false ? "" : ` onchange="__doPostBack('${N.fou}','')"`}>
-    <input type="submit" id="body_x_proxyFou_x_btn" value="Sélectionner" onclick="return false"><span id="body_x_proxyFou_x_lblLib">${esc(SUPPLIERS[d.fou] || "")}</span></span></td></tr>
+    <input type="submit" id="body_x_proxyFou_x_btn" value="Sélectionner" onclick="return false"><span id="body:x:proxyFou:x:lbl:x:lbl">${cfg.fouLabelBlank ? "" : esc(SUPPLIERS[fouKey(d.fou)] || "")}</span></span></td></tr>
 </table>
 <div id="div_conso" style="${showConso ? "" : "display:none"}">
 <table class="dpe">
@@ -231,7 +236,7 @@ async function start(cfg = {}) {
   const store = new Map(); // id → données enregistrées
   const flash = new Map();
   const stats = { saves: 0, creates: 0, updates: 0, uploads: 0, enterSaves: 0, saveCloses: 0, posts: 0, refused: 0 };
-  const config = Object.assign({ redirect: false, delayMs: 0, fouPostback: true, dateSynthetic: false, ademeNever: false, refuseUpdate: false, uploadHidden: 0 }, cfg);
+  const config = Object.assign({ redirect: false, delayMs: 0, fouPostback: true, dateSynthetic: false, ademeNever: false, refuseUpdate: false, uploadHidden: 0, fouLabelBlank: false }, cfg);
   let nextId = 1147729;
 
   const server = http.createServer((req, res) => {
@@ -285,7 +290,7 @@ async function start(cfg = {}) {
         if (fields.__nhEnter) stats.enterSaves++;
         const errs = [];
         if (!d.type) errs.push("Le type de diagnostic est obligatoire.");
-        if (!SUPPLIERS[d.fou]) errs.push(`Le fournisseur ${d.fou || "(vide)"} n'existe pas.`);
+        if (!SUPPLIERS[fouKey(d.fou)]) errs.push(`Le fournisseur ${d.fou || "(vide)"} n'existe pas.`);
         if (!parseDate(d.dateReal)) errs.push("La date de réalisation est invalide.");
         if (num(d.conso) === null || num(d.ges) === null) errs.push("Consommation / émission invalides.");
         if (!saved && isNew2021(d.dateReal) && !/^\d{4}[A-Z]\d{7}[A-Z]$/.test(d.ademe)) errs.push("Le N° ADEME est obligatoire pour un DPE établi depuis le 01/07/2021.");
@@ -298,6 +303,7 @@ async function start(cfg = {}) {
         }
         const n = (k) => { const x = num(d[k]); if (x !== null) d[k] = fmt2(x); };
         n("conso"); n("ges");
+        d.fou = fouKey(d.fou); // 0448957 → 448957
         const bad = String(config.corruptOnSave || "").split(",").map((x) => x.trim());
         if (bad.includes("ademe")) d.ademe = "";
         if (bad.includes("ges") && num(d.ges) !== null) d.ges = fmt2(num(d.ges) + 1);

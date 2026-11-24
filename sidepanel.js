@@ -6767,8 +6767,11 @@ async function execDiagStep(step, rowIdx, tabId, opts = {}) {
   // Fiche déjà créée par un passage précédent (« fiche DPE {id} créée mais
   // incomplète ») : reprise en modification, jamais de second DPE.
   const prevIdx = resultCol ? diagColIdx(resultCol) : -1;
-  const prevMatch = (prevIdx >= 0 ? getCellByIndex(row, prevIdx) : "").match(/fiche DPE (\d+) (?:créée|mise à jour) mais incomplète/);
-  const knownIdDiag = prevMatch ? prevMatch[1] : "";
+  // Reconnu aussi : « fiche DPE {id} », lien …/diag_manage/{imm}/{n}/{id},
+  // « diagnostic {id} » (ex. 1147922 créée sans PDF).
+  const prevMatch = String(prevIdx >= 0 ? getCellByIndex(row, prevIdx) : "")
+    .match(/fiche DPE (\d+)|diag_manage\/[^/\s]+\/[^/\s]+\/([1-9]\d*)|diagnostic (\d{4,})/);
+  const knownIdDiag = prevMatch ? (prevMatch[1] || prevMatch[2] || prevMatch[3]) : "";
 
   const norm = diagNormalizeData(diagRowData(step, rowIdx));
   if (norm.errors.length) {

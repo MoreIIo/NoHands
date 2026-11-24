@@ -59,6 +59,8 @@ const DIAG_IDS = Object.freeze({
   type: "body_x_ddlDiagnostic_ddlDiagnostic",
   fou: "body_x_proxyFou_x_txt_x_txt",
   fouBtn: "body_x_proxyFou_x_btn",
+  // Libellé du fournisseur résolu par SIGEO (id avec deux-points).
+  fouLabel: "body:x:proxyFou:x:lbl:x:lbl",
   dateReal: "body_x_txtDateReal_x_txtDateReal",
   dateFin: "body_x_txtDateFinValid_x_txtDateFinValid",
   dateFinLabel: "fake_txtDateFinValid_x_txtDateFinValid",
@@ -336,7 +338,8 @@ function diagNormalizeData(raw, now = Date.now()) {
   const t = diagType(txt("type_local"));
   if (t.ok) v.type = t.value; else errors.push(t.error);
 
-  v.fou = txt("code_fournisseur").replace(/\s+/g, "");
+  // « FU » est un préfixe affiché hors du champ : retiré, comme les espaces.
+  v.fou = txt("code_fournisseur").replace(/\s+/g, "").replace(/^fu/i, "");
   if (!v.fou) errors.push(emptyMsg("code_fournisseur"));
   else if (v.fou.length > 9) errors.push(`code fournisseur trop long (9 caractères max) : ${v.fou}`);
 
@@ -419,11 +422,18 @@ function diagSame(kind, got, want) {
     case "ademe": return diagAdemeKey(got) === diagAdemeKey(want);
     case "letter": return diagNorm(got).toUpperCase() === diagNorm(want).toUpperCase();
     case "code": return String(got ?? "").replace(/\s+/g, "") === String(want ?? "").replace(/\s+/g, "");
+    case "fou": return diagFouKey(got) === diagFouKey(want);
     case "check": return !!got === !!want;
     case "select": return String(got ?? "") === String(want ?? "");
     default: return diagNorm(got) === diagNorm(want);
   }
 }
+// Code fournisseur : SIGEO le stocke comme un nombre (zéros de tête
+// supprimés : 0448957 → 448957) ; « FU » est un préfixe d'affichage.
+function diagFouKey(v) {
+  return String(v ?? "").trim().toUpperCase().replace(/\s+/g, "").replace(/^FU/, "").replace(/^0+/, "") || "0";
+}
+
 // Valeur lisible dans le journal et les messages d'écart.
 function diagShow(kind, x) {
   if (kind === "check") return x ? "coché" : "décoché";
@@ -688,6 +698,9 @@ function diagPageOp(cfg) {
   function supplier() {
     const inp = byId(ID.fou), btn = byId(ID.fouBtn);
     if (!inp) return { name: "", dedicated: false, src: "" };
+    // Libellé officiel #body:x:proxyFou:x:lbl:x:lbl : non vide = fournisseur résolu.
+    const lab = ID.fouLabel ? byId(ID.fouLabel) : null;
+    if (lab) return { name: norm(lab.textContent), dedicated: true, labelFound: true, src: "#" + ID.fouLabel };
     const own = Array.from(doc.querySelectorAll('[id^="body_x_proxyFou"]'))
       .filter((e) => e !== inp && e !== btn && !e.contains(inp) && !/^(SCRIPT|STYLE)$/.test(e.tagName) &&
         !(e.tagName === "INPUT" && !e.readOnly) && !(e.tagName === "INPUT" && /hidden|button|submit|image/i.test(e.type)));
@@ -859,6 +872,9 @@ function diagPageOp(cfg) {
     el.value = a.value;
     fire(el, "input");
     fire(el, "change");
+    // Fournisseur : validé par la perte du focus (jamais la touche Entrée,
+    // dont le onkeydown déclenche l'enregistrement).
+    if (a.blur) { try { el.blur(); } catch (_) { /* ignoré */ } fire(el, "blur"); }
   }
 
   if (cfg.op === "read") return snapshot();
@@ -1050,7 +1066,7 @@ function diagPlan(s, v, opts = {}) {
 
   // — Phase A (postback) + « Valable jusqu'au » calculé
   add({ key: "type", label: "Type", phase: "A", kind: "select", act: { kind: "select", id: I.type }, want: v.type, got: val("type") });
-  add({ key: "fou", label: "Fournisseur", phase: "A", kind: "code", act: { kind: "value", id: I.fou }, want: v.fou, got: val("fou") });
+  add({ key: "fou", label: "Fournisseur", phase: "A", kind: "fou", act: { kind: "value", id: I.fou, blur: true }, want: v.fou, got: val("fou") });
   add({ key: "dateReal", label: "Établi le", phase: "A", kind: "date", act: { kind: "value", id: I.dateReal }, want: v.dateEtabli, got: val("dateReal") });
   const exp = diagExpectedValidity(v.dateEtabli);
   const fin = fld("dateFin");
@@ -1667,15 +1683,22 @@ async function diagProcess(ad, p) {
   const pa = diagPlan(s, v, opts);
   pa.warnings.forEach(warn);
   const bad = pa.specs.filter((x) => !x.ok);
+  // Fournisseur : code comparé sans zéros de tête (SIGEO stocke un nombre)
+  // ET libellé #body:x:proxyFou:x:lbl:x:lbl non vide, sinon écart réel.
+  const fn = s.f.fouName || {};
+  const fouSpec = pa.specs.find((x) => x.key === "fou");
+  if (fouSpec && fouSpec.ok && (fn.labelFound || fn.dedicated) && !fn.name) {
+    bad.push({ key: "fouLabel", label: "Fournisseur non reconnu par SIGEO", kind: "text", want: `libellé du code ${v.fou}`, got: "" });
+  }
   const ademeSpec = pa.specs.find((x) => x.key === "ademe");
   ademeConfirmed = !v.ademe || !!(ademeSpec && ademeSpec.ok);
   if (bad.length) return fail(`${DIAG_CODES.after} — ${diagGapText(bad)} — upload annulé`, "ERREUR", DIAG_CODES.after);
   const ademeOk = ademeSpec && ademeSpec.ok ? diagAdemeKey(ademeSpec.got) : "";
   if (ademeOk) log(`N° ADEME relu après enregistrement : ${ademeOk} (${s.f.ademe.mode === "label" ? "texte enregistré" : "champ de saisie"})`);
   log(`contrôle après enregistrement : ${pa.specs.length} valeur(s) conforme(s) · ${summary(pa)}`, "ok");
-  const fn = s.f.fouName || {};
-  if (fn.name) log(`fournisseur : ${v.fou} — ${fn.name}`);
-  else if (fn.dedicated) return fail(`fournisseur ${v.fou} non reconnu par SIGEO (nom vide à côté du code) — upload annulé`);
+  const fouRelu = fouSpec ? diagNorm(fouSpec.got) : "";
+  if (fn.name && fouRelu && fouRelu !== v.fou) log(`Fournisseur ${v.fou} relu ${fouRelu} (zéros de tête supprimés par SIGEO) — OK, libellé : ${fn.name}`);
+  else if (fn.name) log(`fournisseur : ${v.fou} — ${fn.name}`);
   else warn("nom du fournisseur non repéré sur la page (active le mode debug pour le localiser)");
 
   const okInfo = () => [res.idDiag ? "diagnostic " + res.idDiag : "diagnostic enregistré", ademeOk ? "ADEME " + ademeOk : ""].filter(Boolean).join(", ");
@@ -1950,7 +1973,7 @@ if (typeof module !== "undefined" && module.exports) {
     DIAG_IDS, DIAG_FIELDS, DIAG_PRESETS, DIAG_DEFAULTS,
     diagNorm, diagFold, diagDate, diagDateEq, diagSerialToDate, diagExpectedValidity, diagIsNewDpe, ademeSaisissableAvantEnreg,
     diagParseNum, diagNum, diagNumEq, diagBool, diagLetter, diagAdeme, diagAdemeKey, diagType, diagNormalizeData,
-    diagSame, diagShow, diagQ, DIAG_CODES, DIAG_PHASE_A,
+    diagSame, diagShow, diagQ, diagFouKey, DIAG_CODES, DIAG_PHASE_A,
     diagMatchFile, diagCheckFileAdeme, diagIsPdf, diagToBase64, diagFmtSize,
     diagUrlParts, diagUrlWithId, diagJournalKey, diagClassifyMessages, diagFindDocRow, diagRowHasFile,
     diagPageOp, diagMainHandler, diagPlan, diagCompare, diagGapText, diagCapped, diagSettle, diagProcess, diagStepHtml, diagStepRead

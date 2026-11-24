@@ -104,6 +104,20 @@ check("type, oui/non, lettres, ADEME", () => {
   assert.ok(!D.diagAdeme("2021N1001671X").nc);
 });
 
+check("fournisseur : préfixe FU, zéros de tête supprimés par SIGEO", () => {
+  const K = D.diagFouKey;
+  assert.deepStrictEqual(["0448957", "448957", "FU0448957", "fu 0448957", " 448957 ", "000", ""].map(K), ["448957", "448957", "448957", "448957", "448957", "0", "0"]);
+  assert.ok(D.diagSame("fou", "448957", "0448957") && D.diagSame("fou", "0448957", "FU448957") && !D.diagSame("fou", "448957", "448958"));
+  const raw = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { text: v }]));
+  const r = D.diagNormalizeData(raw({ code_fournisseur: "FU 0448957", date_etabli: "12/09/2022", numero_ademe: "2222E0000001A", conso_ep: "224", emission_ges: "52,6" }), Date.UTC(2026, 10, 24));
+  assert.strictEqual(r.v.fou, "0448957", "« FU » et espaces retirés avant la saisie, zéros conservés");
+  // plan : relu « 448957 » après enregistrement = conforme ; saisie validée par blur
+  const p = D.diagPlan(snap({ f: { fou: { value: "448957" } } }), Object.assign({}, REALV, { fou: "0448957" }));
+  const f = p.specs.find((x) => x.key === "fou");
+  assert.deepStrictEqual([f.kind, f.ok, f.act.blur], ["fou", true, true]);
+  assert.strictEqual(D.DIAG_IDS.fouLabel, "body:x:proxyFou:x:lbl:x:lbl");
+});
+
 check("données de la ligne : N° ADEME « NC »", () => {
   const raw = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { text: v }]));
   const r = D.diagNormalizeData(raw({ code_fournisseur: "448957", date_etabli: "30/04/2025", numero_ademe: "NC", conso_ep: "107", emission_ges: "5" }), Date.UTC(2026, 10, 23));

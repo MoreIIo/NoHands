@@ -81,7 +81,8 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
       lettre_ep_forcee: "D", lettre_ges_forcee: "B", cout_min: "1240", cout_max: "1680", date_prix: "01/01/2021", lot: "590012" }),
     /* L14 */ row(Object.assign({}, NEW, { lot: "590013" })),
     /* L15 */ row(Object.assign({}, NEW, { lot: "590014" })),
-    /* L16 */ row(Object.assign({}, OLD, { lot: "590015", numero_ademe: "NC", fichier_dpe: "DPE_2021N1001671X.pdf" }))
+    /* L16 */ row(Object.assign({}, OLD, { lot: "590015", numero_ademe: "NC", fichier_dpe: "DPE_2021N1001671X.pdf" })),
+    /* L17 */ row(Object.assign({}, NEW, { lot: "590016", code_fournisseur: "FU 0448957" }))
   ]]);
 
   await panel.evaluate((u) => {
@@ -300,6 +301,34 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
   c = await cell(15, "Saisie DPE");
   assert.ok(/^OK — diagnostic \d+ — PDF joint \(DPE_2021N1001671X\.pdf\) ⚠ N° ADEME non communiqué \(« NC »\) : non saisi/.test(c), c);
   assert.ok(!/ADEME_INVALIDE/.test(c) && !/après 1er enregistrement/.test(run.log));
+
+  // ===== 16. Fournisseur « FU 0448957 » : saisi 0448957, relu 448957 ; libellé vide = écart réel ;
+  //            reprise de la fiche existante directement à l'upload =====
+  await setOpt(".scn-diag-confirm", false);
+  await cfg("fouLabelBlank=1");
+  s0 = stats();
+  run = await runActive(panel, 16);
+  console.log("--- 16a. libellé fournisseur vide ---\n" + run.log);
+  await cfg("fouLabelBlank=0");
+  c = await cell(16, "Saisie DPE");
+  assert.ok(/Fournisseur : attendu « 0448957 » · avant « » · après « 0448957 »/.test(run.log), "FU et espace retirés avant la saisie");
+  assert.ok(/^ERREUR — ECART_APRES_ENREG — 1 écart\(s\) : Fournisseur non reconnu par SIGEO attendu « libellé du code 0448957 », relu « » — upload annulé — fiche DPE (\d+) créée mais incomplète \(PDF manquant\)/.test(c), c);
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 1, updates: 0, uploads: 0, saves: 1 });
+  const id16 = c.match(/fiche DPE (\d+)/)[1];
+  assert.strictEqual(lotDiags("590016")[0].fou, "448957", "SIGEO stocke le code sans zéros de tête");
+  // reprise sans journal de session : la colonne résultat rouvre la fiche, aucun enregistrement, upload direct
+  await panel.evaluate(() => document.querySelector(".scn-diag-forget").click());
+  s0 = stats();
+  run = await runActive(panel, 16, async () => { throw new Error("aucune confirmation attendue"); });
+  console.log("--- 16b. reprise de la fiche existante ---\n" + run.log);
+  await setOpt(".scn-diag-confirm", true);
+  assert.ok(run.log.includes(`fiche DPE ${id16} déjà créée (colonne résultat) : réouverture en modification`), run.log);
+  assert.ok(/diagnostic déjà enregistré et conforme : pas de nouvel enregistrement/.test(run.log), "pas de ressaisie du fournisseur");
+  assert.ok(/Fournisseur 0448957 relu 448957 \(zéros de tête supprimés par SIGEO\) — OK, libellé : ACADE Diagnostic/.test(run.log), run.log);
+  assert.ok(!/Fournisseur : attendu/.test(run.log), "fournisseur non retapé");
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 0, updates: 0, uploads: 1, saves: 0 }, "directement à l'upload");
+  assert.strictEqual(lotDiags("590016").length, 1);
+  assert.ok(/^OK — diagnostic \d+, ADEME 2222E0000001A — PDF joint/.test(await cell(16, "Saisie DPE")), await cell(16, "Saisie DPE"));
 
   assert.strictEqual(srv.stats.enterSaves, 0, "jamais de touche Entrée");
   assert.strictEqual(srv.stats.saveCloses, 0, "jamais « Enreg. et fermer »");
