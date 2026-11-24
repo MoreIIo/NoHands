@@ -9,6 +9,7 @@ const path = require("path");
 const { JSDOM } = require("jsdom");
 const intra = require("../intralia-dpe.js");
 const ds = require("../dpe-scan.js");
+const diag = require("../sigeo-diag.js");
 const mock = require("./fixtures/intralia-mock.js");
 const pdfjs = require(path.join(__dirname, "..", "lib/pdf.min.js"));
 pdfjs.GlobalWorkerOptions.workerSrc = path.join(__dirname, "..", "lib/pdf.worker.min.js");
@@ -317,7 +318,7 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
     assert.deepStrictEqual([o.status, o.file], ["OK", "COUR SAINT-HUBERT_lot130_2015-01-01.doc"]);
   });
 
-  const anv = (res) => intra.intraAnalysisValues(res, ds);
+  const anv = (res) => intra.intraSaisieValues(res, { DS_COLS: ds.DS_COLS, dsRecordValues: ds.dsRecordValues, validity: diag.diagExpectedValidity });
   await check("analyse du PDF (moteur Analyse DPE) : fournisseur → n° FU, n° ADEME, dates, conso, GES", async () => {
     saved.length = 0;
     const res = await intra.intraProcessRow(adapter(), params("PARC FLEURI LE CONCERTO 1", "732", { analyze: true }));
@@ -346,20 +347,41 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
     assert.strictEqual(srv.stats.flower.length, n0 + 1, "un seul GET FlowerDocs");
   });
 
-  await check("analyse : un échec ne change pas DPE_Statut ; « Pas de PDF » sans DPE", async () => {
+  await check("saisie : données Intralia + fournisseur / ADEME du PDF ; un échec d'analyse ne change pas DPE_Statut", async () => {
     const boom = await intra.intraProcessRow(adapter({ analyze: async () => { throw new Error("PDF illisible"); } }), params("PARC FLEURI LE CONCERTO 1", "732", { analyze: true }));
     const v = anv(boom);
-    assert.deepStrictEqual([boom.status, v["DPE analyse"], v["Remarques DPE"], v["Fournisseur DPE"]], ["OK", "ÉCHEC", "PDF illisible", ""]);
-    const notPdf = await intra.intraProcessRow(adapter(), params("COUR SAINT-HUBERT", "130", { analyze: true, re: intra.intraCompileRegex("additif").re }));
-    assert.deepStrictEqual([notPdf.status, anv(notPdf)["DPE analyse"]], ["OK", "ÉCHEC"], "fichier .doc : enregistré, analyse impossible");
-    const none = await intra.intraProcessRow(adapter(), params("OPERA", "9", { analyze: true }));
-    assert.strictEqual(anv(none)["DPE analyse"], "Pas de PDF");
+    assert.deepStrictEqual([boom.status, v["DPE analyse"], v["Établi le"], v["Énergie primaire (kWh/m²/an)"], v["Classe énergie"], v["N° FU"]], ["OK", "À VÉRIFIER", "05/06/2012", "105", "C", ""]);
+    assert.ok(/analyse du PDF impossible \(PDF illisible\)/.test(v["Remarques DPE"]), v["Remarques DPE"]);
+    // Intralia prioritaire : « 180.5 » saisi dans Intralia → 180,5 (le PDF dit 180).
+    const m = anv(await intra.intraProcessRow(adapter(), params("RESIDENCE CHATEAUBRIAND", "278", { analyze: true })));
+    assert.deepStrictEqual([m["DPE analyse"], m["Énergie primaire (kWh/m²/an)"], m["N° FU"], m["Valable jusqu'au"], m["Remarques DPE"]], ["OK", "180,5", "0448957", "31/12/2022", ""],
+      "validité calculée comme SIGEO (DPE 2013-2017 → 31/12/2022)");
+    // Champ vide dans Intralia → valeur du PDF, signalée.
+    const e = anv(await intra.intraProcessRow(adapter(), params("COEUR DE VILLE", "5", { analyze: true })));
+    assert.deepStrictEqual([e["DPE analyse"], e["Établi le"], e["Énergie primaire (kWh/m²/an)"], e["N° FU"]], ["À VÉRIFIER", "04/04/2019", "95", "0426828"]);
+    assert.ok(/date du DPE vide dans Intralia : valeur du PDF/.test(e["Remarques DPE"]), e["Remarques DPE"]);
+    // Date du PDF ≠ Intralia → à vérifier ; DPE récent : coûts d'Intralia, remarque ADEME conservée.
+    const fake = (rec) => adapter({ analyze: async () => Object.assign(ds.dsNewRecord(), rec) });
+    const d = anv(await intra.intraProcessRow(fake({ etabli: { y: 2013, m: 1, d: 2 }, remarques: ["n° ADEME non trouvé", "valeurs lues par OCR : à contrôler"], supplier: { entry: { name: "ACADE", code: "0448957" } } }),
+      params("PARC FLEURI LE CONCERTO 1", "732", { analyze: true })));
+    assert.ok(/PDF établi le 02\/01\/2013 ≠ Intralia 05\/06\/2012/.test(d["Remarques DPE"]), d["Remarques DPE"]);
+    assert.ok(!/ADEME|OCR/.test(d["Remarques DPE"]), "DPE ancien : pas de remarque ADEME / OCR des valeurs (prises dans Intralia)");
+    const n = intra.intraSaisieValues({ status: "OK", chosen: { name: "x.pdf" }, file: "x.pdf", fields: { DATEDIAG: "2023-04-17", DPE1: "221", libdpe1: "D", GES1: "6", libges1: "B", MTDIAGMIN: "479", MTDIAGMAX: "649" },
+      analysis: Object.assign(ds.dsNewRecord(), { ademe: "2321E1261645S", remarques: ["n° ADEME lu par OCR : à contrôler"], supplier: { entry: { name: "ACADE", code: "448957" } } }) },
+    { DS_COLS: ds.DS_COLS, dsRecordValues: ds.dsRecordValues, validity: diag.diagExpectedValidity });
+    assert.deepStrictEqual([n["Établi le"], n["Valable jusqu'au"], n["Coût min (€/an)"], n["Coût max (€/an)"], n["N° ADEME"], n["DPE analyse"], n["Remarques DPE"]],
+      ["17/04/2023", "16/04/2033", "479", "649", "2321E1261645S", "À VÉRIFIER", "n° ADEME lu par OCR : à contrôler"]);
+    // Sans DPE / erreurs.
+    const none = anv(await intra.intraProcessRow(adapter(), params("OPERA", "9", { analyze: true })));
+    assert.deepStrictEqual([none["DPE analyse"], none["Remarques DPE"]], ["Pas de PDF", "AUCUN_DPE_GED — 0 document(s) GED, aucun DPE"]);
     assert.strictEqual(anv(await intra.intraProcessRow(adapter(), params("LES ACACIAS", "3", { analyze: true })))["DPE analyse"], "Pas de PDF");
     srv.setFlowerLogged(false);
     try {
       const fl = await intra.intraProcessRow(adapter(), params("PARC FLEURI LE CONCERTO 1", "732", { download: false, analyze: true }));
-      assert.deepStrictEqual([fl.status, anv(fl)["DPE analyse"]], [S.FLOWERDOCS_NON_CONNECTE, ""], "repérage + analyse : FlowerDocs déconnecté = arrêt");
+      assert.deepStrictEqual([fl.status, anv(fl)["DPE analyse"]], [S.FLOWERDOCS_NON_CONNECTE, "ÉCHEC"], "repérage + analyse : FlowerDocs déconnecté = arrêt");
     } finally { srv.setFlowerLogged(true); }
+    assert.deepStrictEqual(intra.intraSaisieCols(ds.DS_COLS).slice(0, 4), ["DPE analyse", "PDF analysé", "N° FU", "Fournisseur DPE"]);
+    assert.strictEqual(intra.intraNormalizeConfig({}).out, "saisie");
   });
 
   await check("performance : 36 000 lignes parsées par regex", async () => {

@@ -599,23 +599,29 @@ Windows → `_` ; extension = celle du fichier reçu). Pour les étapes
 `pdfcheck` / `pdfwrite` du scénario : cocher **ajouter les PDF téléchargés
 à la Toolbox**, puis retrouver le PDF par `{DPE_Fichier_Local}`.
 
-**Analyse du PDF** (cochée par défaut, v2.18.1) : le DPE retenu est lu par le
-moteur de l'**Analyse DPE** (`dpe-scan.js` : texte pdf.js, OCR local si la
-page est scannée — réglable : scans + valeurs manquantes / toujours la page
-DPE / sans OCR). Mêmes colonnes que l'Analyse DPE — `DPE analyse`,
-`PDF analysé`, `N° FU`, `N° ADEME`, `Établi le`, `Valable jusqu'au`,
+**Colonnes pour la saisie SIGEO** (v2.18.2) : mêmes noms que l'Analyse DPE,
+lus par l'étape « SIGEO : saisir un DPE » (préréglage « Colonnes de l'Analyse
+DPE ») — `DPE analyse` (OK / À VÉRIFIER / Pas de PDF / ÉCHEC), `PDF analysé`,
+`N° FU`, `Fournisseur DPE`, `Établi le`, `Valable jusqu'au`, `N° ADEME`,
 `Énergie primaire (kWh/m²/an)`, `Classe énergie`, `GES (kg CO2/m²/an)`,
-`Classe GES`, `Coût min/max (€/an)`, `Remarques DPE` — plus
-`Fournisseur DPE` (nom du cabinet). Le **n° FU** vient de la liste
-« Fournisseurs → n° FU » de l'Analyse DPE (fournisseurs inconnus signalés en
-fin de traitement, à ajouter avec « Ajouter les fournisseurs inconnus »). Ces
-colonnes alimentent directement l'étape « SIGEO : saisir un DPE » (préréglage
-« Analyse DPE », PDF joint retrouvé par `PDF analysé` dans le dossier
-`Téléchargements/DPE`). En *repérage seul*, le PDF est lu en mémoire sans être
-enregistré. Un échec d'analyse ne change pas `DPE_Statut` (`DPE analyse` =
-`ÉCHEC`) ; sans DPE retenu, `DPE analyse` = `Pas de PDF`.
+`Classe GES`, `Coût min/max (€/an)`, `Remarques DPE`.
+- **Données du DPE = celles saisies dans Intralia** (`DATEDIAG`, kWh/m²,
+  lettres, kgCO2/m², coûts min/max pour un DPE ≥ 01/07/2021). « Valable
+  jusqu'au » est calculé comme SIGEO (la `datefinval` d'Intralia n'est pas
+  fiable). Champ vide dans Intralia → valeur lue dans le PDF, signalée.
+- **Fournisseur (→ N° FU) et N° ADEME = lus dans le PDF** (case « analyser le
+  PDF », cochée par défaut ; moteur de l'Analyse DPE, texte + OCR local
+  réglable). Le n° FU vient de la liste « Fournisseurs → n° FU » de l'Analyse
+  DPE ; fournisseurs inconnus signalés en fin de traitement. Pour un DPE
+  d'avant le 01/07/2021, pas de remarque sur le n° ADEME (pas de champ en
+  création dans SIGEO). Date du PDF ≠ Intralia → à vérifier.
+- `Remarques DPE` ne garde que ce qui demande une action ; sans DPE retenu,
+  elle reprend le statut (`AUCUN_DPE_GED — …`).
+- **Colonnes écrites** : *utiles à la saisie SIGEO seulement* (par défaut)
+  ou *toutes* (détail Intralia, liens, UUID… ci-dessous).
+En *repérage seul*, le PDF est lu en mémoire sans être enregistré.
 
-Colonnes écrites (créées si absentes) : `Intralia_Cabinet`,
+En mode « toutes », colonnes écrites en plus : `Intralia_Cabinet`,
 `Intralia_ID_Immeuble`, `Intralia_URL_Lot`, `DPE_Statut` (`OK` |
 `AUCUN_DPE_GED` | `LOT_INTROUVABLE` | `IMMEUBLE_INTROUVABLE` | `AMBIGU` |
 `INTRALIA_NON_CONNECTE` | `FLOWERDOCS_NON_CONNECTE` | `ERREUR`),

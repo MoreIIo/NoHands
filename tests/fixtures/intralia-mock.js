@@ -74,17 +74,18 @@ const LOTS = {
       ["photo façade.png", "2014-02-02", U(5), null]
     ]
   },
-  "19/5305/130": { docs: [["DURAND_928_24.08.11_DP.pdf", "2011-08-24", U(6), dpe({ ademe: "1159V1000130B", etabli: "24/08/2011", valable: "23/08/2021", ep: 230, ges: 40, cabinet: "DIAG 75" })], ["additif bail.doc", "2015-01-01", U(7), null]] },
+  "19/5305/130": { form: { libdpe1: "D", DPE1: "230", libges1: "E", GES1: "40", DATEDIAG: "24/08/2011", datefinval: "31/12/2011" }, docs: [["DURAND_928_24.08.11_DP.pdf", "2011-08-24", U(6), dpe({ ademe: "1159V1000130B", etabli: "24/08/2011", valable: "23/08/2021", ep: 230, ges: 40, cabinet: "DIAG 75" })], ["additif bail.doc", "2015-01-01", U(7), null]] },
   // DPE de 2007 : pas de n° ADEME, cabinet absent de la liste des fournisseurs.
-  "19/49/543": { docs: [["dpedupontmarie.pdf", "2007-09-25", U(8), dpe({ etabli: "20/09/2007", valable: "19/09/2017", ep: 280, ges: 60, cabinet: "DIAGNOSTICS DU NORD" })], ["courrier.msg", "2010-01-01", U(9), null]] },
+  "19/49/543": { form: { libdpe1: "E", DPE1: "280", libges1: "F", GES1: "60", DATEDIAG: "20/09/2007" }, docs: [["dpedupontmarie.pdf", "2007-09-25", U(8), dpe({ etabli: "20/09/2007", valable: "19/09/2017", ep: 280, ges: 60, cabinet: "DIAGNOSTICS DU NORD" })], ["courrier.msg", "2010-01-01", U(9), null]] },
   "19/5762/278": {
+    form: { libdpe1: "D", DPE1: "180.5", libges1: "D", GES1: "30", DATEDIAG: "01/09/2015" },
     docs: [["MARTIN_DPE.pdf", "2015-09-01", U(10), dpe({ ademe: "1559V1000278C", etabli: "01/09/2015", valable: "31/08/2025", ep: 180, ges: 30, cabinet: "ACADE" })],
       ["MARTIN_DPE.pdf", "2015-09-01", U(11), dpe({ ademe: "1559V1000278C", etabli: "01/09/2015", valable: "31/08/2025", ep: 180, ges: 30, cabinet: "ACADE" })],
       ["diagnostic gaz.pdf", "2016-01-01", U(12), CHAUD_TEXT]]
   },
   "19/175/9": { docs: [] },
   "19/242/211": { docs: [["entretien chaudiere 2019.pdf", "2019-10-10", U(13), CHAUD_TEXT], ["additif bail.msg", "2018-03-03", U(14), null]] },
-  "19/600/12": { docs: [["DPE 2021.pdf", "2021-03-01", U(15), CHAUD_TEXT], ["dpe.pdf", "2016-02-02", U(16), dpe({ ademe: "1659V1000012D", etabli: "02/02/2016", valable: "01/02/2026", ep: 120, ges: 15, cabinet: "SOCOTECH" })]] },
+  "19/600/12": { form: { libdpe1: "C", DPE1: "120", libges1: "C", GES1: "15", DATEDIAG: "02/02/2016" }, docs: [["DPE 2021.pdf", "2021-03-01", U(15), CHAUD_TEXT], ["dpe.pdf", "2016-02-02", U(16), dpe({ ademe: "1659V1000012D", etabli: "02/02/2016", valable: "01/02/2026", ep: 120, ges: 15, cabinet: "SOCOTECH" })]] },
   "19/610/5": { docs: [["Diagnostic de performance énergétique.pdf", "2019-04-04", U(17), dpe({ ademe: "1959V1000005E", etabli: "04/04/2019", valable: "03/04/2029", ep: 95, ges: 12, cabinet: "PROTECH" })]] }
 };
 

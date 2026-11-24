@@ -155,7 +155,7 @@ const ROWS = [
   console.log("test :", testTxt);
   assert.ok(testTxt.startsWith("✓ Ligne 2 : SICOV imm 5004 → « dpe.pdf » du 2013-07-17 (2 DPE / 5 document(s) GED) → DPE/PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf"), testTxt);
   assert.ok(testTxt.includes("DPE saisi dans Intralia : C 105 / GES D 25, du 05/06/2012"), testTxt);
-  assert.ok(testTxt.includes("analyse OK : EXPERT IMMOBILIER (FU 0528825), ADEME 1259V1000732X, établi le 05/06/2012 → 04/06/2022, 105 kWh/m² C, 25 kg CO2/m² D"), testTxt);
+  assert.ok(testTxt.includes("saisie OK : EXPERT IMMOBILIER (FU 0528825), ADEME 1259V1000732X, établi le 05/06/2012 → 04/06/2022, 105 kWh/m² C, 25 kg CO2/m² D"), testTxt);
   assert.strictEqual(await panel.evaluate(() => state.rows[0].length), 4, "le test n'écrit rien");
   assert.strictEqual(saved.length, 0, "le test n'enregistre rien");
   srv.stats.flower.length = 0;
@@ -166,6 +166,8 @@ const ROWS = [
 
   // 1. Repérage seul, sans analyse du PDF : aucun accès à FlowerDocs.
   await panel.uncheck("#intraAnalyze");
+  assert.strictEqual(await panel.inputValue("#intraOut"), "saisie", "par défaut : colonnes utiles à la saisie");
+  await panel.selectOption("#intraOut", "all");
   const run = async () => {
     await panel.click("#startBtn");
     await panel.waitForFunction(() => !isRunning && /Terminé|Arrêté/.test($("log").textContent), null, { timeout: 90000 });
@@ -179,7 +181,10 @@ const ROWS = [
   const col = (n) => { const i = H.indexOf(n); assert.ok(i >= 4, "colonne " + n); return i; };
   const C = Object.fromEntries(["Intralia_Cabinet", "Intralia_ID_Immeuble", "Intralia_URL_Lot", "DPE_Statut", "DPE_Detail", "DPE_Fichier", "DPE_Date_GED", "DPE_UUID",
     "DPE_Lien_FlowerDocs", "DPE_Fichier_Local", "Intralia_DPE_Classe", "Intralia_DPE_kWh_m2", "Intralia_GES_Classe", "Intralia_GES_kgCO2_m2", "Intralia_Date_Diag"].map((n) => [n, col(n)]));
-  assert.strictEqual(H.length, 4 + 15, "10 colonnes fixes + 5 champs cochés");
+  assert.strictEqual(H.length, 4 + 15 + 14, "« toutes » : 10 colonnes fixes + 5 champs cochés + 14 colonnes de saisie");
+  const gs = (r, n) => out.rows[r - 1][H.indexOf(n)];
+  assert.deepStrictEqual(["DPE analyse", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "N° FU"].map((n) => gs(2, n)),
+    ["À VÉRIFIER", "05/06/2012", "04/06/2022", "105", "C", ""], "sans analyse du PDF : données Intralia, fournisseur à saisir");
   const g = (r, n) => out.rows[r - 1][C[n]];
   assert.deepStrictEqual(["Intralia_Cabinet", "Intralia_ID_Immeuble", "Intralia_URL_Lot", "DPE_Statut", "DPE_Fichier", "DPE_Date_GED", "DPE_UUID", "DPE_Lien_FlowerDocs", "DPE_Fichier_Local",
     "Intralia_DPE_Classe", "Intralia_DPE_kWh_m2", "Intralia_GES_Classe", "Intralia_GES_kgCO2_m2", "Intralia_Date_Diag"].map((n) => g(2, n)),
@@ -206,7 +211,7 @@ const ROWS = [
   assert.ok(/Ligne 14 : ignorée \(nom d'immeuble vide\)/.test(out.log), out.log);
   assert.ok(/Ligne 12 .*\[déjà traité plus haut\]/.test(out.log), out.log);
   assert.ok(/Index SICOV \(19\) : 14 lots \(cache du/.test(out.log), "index chargé une seule fois (test) puis réutilisé");
-  assert.ok(/6 OK · 0 erreur\(s\) · 4 à vérifier · 3 ignorée\(s\)/.test(out.recap), out.recap);
+  assert.ok(/6 OK · 0 erreur\(s\) ·/.test(out.recap), out.recap);
   assert.strictEqual(srv.stats.index.length, 1, "diag.php lu une seule fois");
   assert.strictEqual(srv.stats.lots.length - lots0, 7, "une page diaglot.php par lot trouvé (ligne 12 = cache)");
   assert.strictEqual(saved.length, 0, "repérage seul : rien téléchargé");
@@ -218,23 +223,29 @@ const ROWS = [
   await panel.check("#intraToolbox");
   await panel.check("#intraAnalyze");
   await panel.selectOption("#intraOcr", "never");
+  await panel.selectOption("#intraOut", "saisie");
+  await panel.evaluate((rows) => { state.rows = rows; renderColumns(); }, ROWS); // tableau vierge
   out = await run();
   console.log("--- journal (téléchargement) ---\n" + out.log);
   const H2 = out.rows[0];
   const ac = ["DPE analyse", "PDF analysé", "N° FU", "Fournisseur DPE", "N° ADEME", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "Remarques DPE"];
   const ga = (r) => ac.map((n) => { const i = H2.indexOf(n); assert.ok(i >= 0, "colonne " + n); return out.rows[r - 1][i]; });
-  assert.strictEqual(H2.length, 4 + 15 + 14, "+ 13 colonnes « Analyse DPE » + Fournisseur DPE");
+  assert.deepStrictEqual(H2.slice(4), ["DPE analyse", "PDF analysé", "N° FU", "Fournisseur DPE", "Établi le", "Valable jusqu'au", "N° ADEME", "Énergie primaire (kWh/m²/an)",
+    "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "Coût min (€/an)", "Coût max (€/an)", "Remarques DPE"], "uniquement les colonnes de saisie");
   assert.strictEqual(H2.indexOf("Fournisseur DPE"), H2.indexOf("N° FU") + 1);
   assert.deepStrictEqual(ga(2).slice(0, 11), ["OK", "PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf", "0528825", "EXPERT IMMOBILIER", "1259V1000732X", "05/06/2012", "04/06/2022", "105", "C", "25", "D"]);
   assert.deepStrictEqual(ga(3).slice(0, 5), ["À VÉRIFIER", "Cour Saint-Hubert_lot130_2011-08-24.pdf", "0394076x", "DIAG 75", "1159V1000130B"]);
   assert.deepStrictEqual(ga(4).slice(0, 5), ["À VÉRIFIER", "RESIDENCE BEAUSEJOUR_lot543_2007-09-25.pdf", "", "DIAGNOSTICS DU NORD", "non trouvé"]);
+  assert.strictEqual(ga(4)[11], "fournisseur absent de la liste : « DIAGNOSTICS DU NORD »", "pas de remarque ADEME pour un DPE ancien");
+  assert.strictEqual(ga(5)[7], "180,5", "énergie primaire d'Intralia (le PDF dit 180)");
+  assert.strictEqual(ga(6)[11], "AUCUN_DPE_GED — 0 document(s) GED, aucun DPE");
   assert.deepStrictEqual(ga(5).slice(2, 5), ["0448957", "ACADE", "1559V1000278C"]);
   assert.deepStrictEqual([ga(6)[0], ga(8)[0], ga(9)[0]], ["Pas de PDF", "Pas de PDF", "Pas de PDF"]);
   assert.deepStrictEqual(ga(12), ga(2), "ligne déjà traitée : même analyse");
-  assert.deepStrictEqual([ga(13)[0], ga(13)[11]], ["ÉCHEC", "aucun texte exploitable (document vide ou scanné sans OCR)"]);
-  assert.ok(/Ligne 2 : analyse OK : EXPERT IMMOBILIER \(FU 0528825\), ADEME 1259V1000732X/.test(out.log), out.log);
-  assert.ok(/Ligne 4 : analyse À VÉRIFIER : DIAGNOSTICS DU NORD \(FU \?\), ADEME non trouvé.*fournisseur absent de la liste/.test(out.log), out.log);
-  assert.ok(/analyse des PDF : 2 OK, 2 à vérifier, 1 échec\(s\)/.test(out.log), out.log);
+  assert.deepStrictEqual([ga(13)[0], ga(13)[5], ga(13)[11]], ["À VÉRIFIER", "02/02/2016", "analyse du PDF impossible (aucun texte exploitable (document vide ou scanné sans OCR)) : fournisseur et n° ADEME à saisir"]);
+  assert.ok(/Ligne 2 : saisie OK : EXPERT IMMOBILIER \(FU 0528825\), ADEME 1259V1000732X/.test(out.log), out.log);
+  assert.ok(/Ligne 4 : saisie À VÉRIFIER : DIAGNOSTICS DU NORD \(FU \?\), ADEME non trouvé.*fournisseur absent de la liste/.test(out.log), out.log);
+  assert.ok(/prêts pour la saisie : 2 OK, 3 à vérifier\./.test(out.log), out.log);
   assert.ok(/Fournisseurs absents de la liste \(n° FU vide\) : DIAGNOSTICS DU NORD/.test(out.log), out.log);
   assert.strictEqual(await panel.evaluate(() => $("dsSupAddUnknown").hidden), false);
   const pre = await panel.evaluate(() => DIAG_PRESETS.analyse);
@@ -246,15 +257,15 @@ const ROWS = [
     ["DPE/RÉSIDENCE CHATEAUBRIAND_lot278_2015-09-01.pdf", "%PDF-", "blob:", "uniquify", false],
     ["DPE/LES TILLEULS_lot12_2021-03-01.pdf", "%PDF-", "blob:", "uniquify", false]
   ]);
-  const gl = (r) => out.rows[r - 1][C.DPE_Fichier_Local];
+  const gl = (r) => out.rows[r - 1][H2.indexOf("PDF analysé")];
   assert.deepStrictEqual([gl(2), gl(5), gl(6), gl(12)], ["PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf", "RÉSIDENCE CHATEAUBRIAND_lot278_2015-09-01.pdf", "", "PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf"]);
   assert.ok(/6 DPE repéré\(s\), 5 téléchargé\(s\) dans Téléchargements\/DPE/.test(out.log), out.log);
   assert.ok(/FlowerDocs : fichiers lus depuis le panneau\./.test(out.log), out.log);
   const tb = await panel.evaluate(() => tbState.docs.map((d) => [d.name, d.pages, /performance énergétique/i.test(d.text)]));
   assert.deepStrictEqual(tb.map((d) => d[0]), saved.map((s) => s.name.split("/").pop()), "PDF ajoutés à la Toolbox");
   assert.ok(tb[0][1] === 1 && tb[0][2], "texte lu par pdf.js : " + JSON.stringify(tb[0]));
-  const tbDoc = await panel.evaluate(() => { const r = tbGetDocForStep({ pdfDocMode: "match", pdfDocMatch: "{DPE_Fichier_Local}" }, state.rows[1]); return r.doc ? r.doc.name : r.error; });
-  assert.strictEqual(tbDoc, "PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf", "étape PDF β : PDF retrouvé par {DPE_Fichier_Local}");
+  const tbDoc = await panel.evaluate(() => { const r = tbGetDocForStep({ pdfDocMode: "match", pdfDocMatch: "{PDF analysé}" }, state.rows[1]); return r.doc ? r.doc.name : r.error; });
+  assert.strictEqual(tbDoc, "PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf", "étape PDF β : PDF retrouvé par {PDF analysé}");
   assert.strictEqual(srv.stats.index.length, 1, "index toujours en cache");
 
   // 3. Vérifier le contenu (pdf.js) : le DPE 2021 est un rapport de chaudière.
@@ -264,8 +275,6 @@ const ROWS = [
   await panel.fill("#endRow", "13");
   out = await run();
   console.log("--- journal (vérification) ---\n" + out.log);
-  assert.deepStrictEqual([out.rows[12][C.DPE_Statut], out.rows[12][C.DPE_Fichier], out.rows[12][C.DPE_Date_GED], out.rows[12][C.DPE_Fichier_Local]],
-    ["OK", "dpe.pdf", "2016-02-02", "LES TILLEULS_lot12_2016-02-02.pdf"]);
   assert.deepStrictEqual(ga(13).slice(0, 5), ["OK", "LES TILLEULS_lot12_2016-02-02.pdf", "0048730", "SOCOTECH", "1659V1000012D"], "analyse du DPE vérifié");
   assert.ok(/« DPE 2021\.pdf » \(2021-03-01\) écarté : « performance énergétique » absent de la page 1 \(texte du PDF\)/.test(out.log), out.log);
   assert.ok(/Ligne 13 : ✓ « dpe\.pdf » vérifié \(texte du PDF\)/.test(out.log), out.log);
@@ -278,8 +287,8 @@ const ROWS = [
   await panel.fill("#endRow", "5");
   out = await run();
   console.log("--- journal (FlowerDocs déconnecté) ---\n" + out.log);
-  assert.strictEqual(out.rows[1][C.DPE_Statut], "FLOWERDOCS_NON_CONNECTE");
-  assert.strictEqual(out.rows[1][C.DPE_Fichier_Local], "");
+  assert.deepStrictEqual([ga(2)[0], ga(2)[1]], ["ÉCHEC", ""]);
+  assert.ok(ga(2)[11].startsWith("FLOWERDOCS_NON_CONNECTE"), ga(2)[11]);
   assert.strictEqual(saved.length, n0, "jamais de page de connexion enregistrée");
   assert.ok(/relance à partir de la ligne 2/.test(out.log), out.log);
   assert.ok(!/Ligne 3 /.test(out.log), "boucle arrêtée");
@@ -289,7 +298,7 @@ const ROWS = [
   srv.setIntraLogged(false);
   await panel.selectOption("#intraMode", "find");
   out = await run();
-  assert.strictEqual(out.rows[1][C.DPE_Statut], "INTRALIA_NON_CONNECTE");
+  assert.ok(ga(2)[11].startsWith("INTRALIA_NON_CONNECTE"), ga(2)[11]);
   assert.ok(/Intralia : session expirée .*relance à partir de la ligne 2/.test(out.log), out.log);
   assert.ok(!/Ligne 3 /.test(out.log), "boucle arrêtée");
   // Bouton « Rafraîchir » sans session : message clair, ancien index gardé.

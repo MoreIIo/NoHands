@@ -573,7 +573,15 @@
           <option value="never">sans OCR</option>
         </select>
       </div>
-      <p class="hint" id="intraAnalyzeHint">Mêmes colonnes que « Analyse DPE » (<code>DPE analyse</code>, <code>PDF analysé</code>, <code>N° FU</code>, <code>N° ADEME</code>, <code>Établi le</code>, <code>Valable jusqu'au</code>…, prêtes pour l'étape « SIGEO : saisir un DPE ») + <code>Fournisseur DPE</code>. Le n° FU vient de la liste « Fournisseurs → n° FU » de l'Analyse DPE (<span id="intraSupCount"></span>). En repérage seul, le PDF est lu sans être enregistré.</p>
+      <p class="hint" id="intraAnalyzeHint">Données du DPE (établi le, énergie primaire, GES, classes, coûts) : celles <strong>saisies dans Intralia</strong> ; « Valable jusqu'au » calculé comme SIGEO. Lus dans le PDF (texte / OCR) : <strong>fournisseur → N° FU</strong> (liste « Fournisseurs → n° FU » de l'Analyse DPE, <span id="intraSupCount"></span>) et <strong>N° ADEME</strong>. En repérage seul, le PDF est lu sans être enregistré.</p>
+      <div class="field-row">
+        <label for="intraOut">Colonnes écrites :</label>
+        <select id="intraOut">
+          <option value="saisie">utiles à la saisie SIGEO seulement</option>
+          <option value="all">toutes (détail Intralia, liens, UUID…)</option>
+        </select>
+      </div>
+      <p class="hint">Saisie : <code>DPE analyse</code> (OK / À VÉRIFIER / Pas de PDF / ÉCHEC), <code>PDF analysé</code>, <code>N° FU</code>, <code>Fournisseur DPE</code>, <code>Établi le</code>, <code>Valable jusqu'au</code>, <code>N° ADEME</code>, énergie primaire, classe énergie, GES, classe GES, coûts min/max, <code>Remarques DPE</code> — les noms lus par l'étape « SIGEO : saisir un DPE » (préréglage « Colonnes de l'Analyse DPE »).</p>
       <details class="imx-adv" id="intraFieldsBox">
         <summary>DPE déjà saisi dans Intralia → colonnes (<span id="intraFieldsCount"></span>)</summary>
         <p class="hint">Valeurs lues dans le formulaire DPE de la page du lot (jamais enregistré). <code>DATEDIAG</code> est la date du DPE ; <code>DPE_Date_GED</code> la date de dépôt du fichier dans la GED.</p>

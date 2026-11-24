@@ -312,6 +312,7 @@ function intraNormalizeConfig(c = {}) {
     verify: !!c.verify,
     toolbox: !!c.toolbox,
     analyze: c.analyze !== false,
+    out: c.out === "all" ? "all" : "saisie",
     ocr: ["auto", "always", "never"].includes(c.ocr) ? c.ocr : "auto",
     fields,
     base: intraTrimSlash(c.base) || INTRA_DEFAULT_BASE,
@@ -343,24 +344,86 @@ function intraRowValues(res, fieldKeys) {
   return v;
 }
 
-// Colonnes de l'Analyse DPE pour un résultat (ds = { DS_COLS, dsRecordValues }
-// de dpe-scan.js) : mêmes valeurs que le type « Analyse DPE », plus le nom du
-// fournisseur. Aucun DPE retenu → « Pas de PDF » ; erreur / non connecté → vide.
-function intraAnalysisValues(res, ds) {
+// Colonnes « saisie SIGEO » (mêmes noms que l'Analyse DPE, lues par l'étape
+// « SIGEO : saisir un DPE ») pour un résultat :
+//  - données du DPE saisies dans INTRALIA (form1) : établi le (DATEDIAG),
+//    énergie primaire, classe énergie, GES, classe GES, coûts (DPE ≥ 01/07/2021) ;
+//    « Valable jusqu'au » calculé comme SIGEO (ds.validity) — la datefinval
+//    d'Intralia n'est pas fiable ; valeur du PDF seulement si Intralia est vide ;
+//  - lus dans le PDF (texte / OCR) : fournisseur → N° FU, N° ADEME.
+// ds = { DS_COLS, dsRecordValues, validity(date) }. Aucun DPE → « Pas de PDF ».
+function intraSaisieValues(res, ds) {
   const v = {};
   ds.DS_COLS.forEach((c) => { v[c] = ""; });
   v[INTRA_SUPPLIER_COL] = "";
   const S = INTRA_STATUS;
+  const why = `${res.status || ""}${res.detail ? " — " + res.detail : ""}`;
   if ([S.AUCUN_DPE_GED, S.LOT_INTROUVABLE, S.IMMEUBLE_INTROUVABLE, S.AMBIGU].includes(res.status)) {
-    v[ds.DS_COLS[0]] = "Pas de PDF";
+    v["DPE analyse"] = "Pas de PDF";
+    v["Remarques DPE"] = why;
     return v;
   }
-  const a = res.analysis;
-  if (res.status !== S.OK || !res.chosen || !a) return v;
-  const vals = ds.dsRecordValues(a, res.file || res.chosen.name);
-  ds.DS_COLS.forEach((c, k) => { v[c] = vals[k] ?? ""; });
-  if (!a.error) v[INTRA_SUPPLIER_COL] = a.supplier ? a.supplier.entry.name : (a.societe || "");
+  if (res.status !== S.OK || !res.chosen) {
+    if (res.status) { v["DPE analyse"] = "ÉCHEC"; v["Remarques DPE"] = why; }
+    return v;
+  }
+  const f = res.fields || {};
+  const a = res.analysis || null;
+  const pdf = {};
+  if (a && !a.error) {
+    const vals = ds.dsRecordValues(a, "");
+    ds.DS_COLS.forEach((c, k) => { pdf[c] = vals[k] ?? ""; });
+  }
+  const rem = [];
+  const num = (x) => String(x ?? "").trim().replace(/\s+/g, "").replace(".", ",");
+  const date = (x) => {
+    const t = String(x ?? "").trim();
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(t);
+    return m ? `${m[3]}/${m[2]}/${m[1]}` : /^0+\/0+\/0+$/.test(t) ? "" : t;
+  };
+  const pick = (col, intraVal, label) => {
+    if (intraVal) return intraVal;
+    if (pdf[col]) { rem.push(`${label} vide dans Intralia : valeur du PDF`); return pdf[col]; }
+    rem.push(`${label} non renseigné`);
+    return "";
+  };
+  v["Établi le"] = pick("Établi le", date(f.DATEDIAG), "date du DPE");
+  v["Valable jusqu'au"] = (ds.validity && ds.validity(v["Établi le"])) || pdf["Valable jusqu'au"] || "";
+  v["Énergie primaire (kWh/m²/an)"] = pick("Énergie primaire (kWh/m²/an)", num(f.DPE1), "énergie primaire");
+  v["Classe énergie"] = pick("Classe énergie", f.libdpe1, "classe énergie");
+  v["GES (kg CO2/m²/an)"] = pick("GES (kg CO2/m²/an)", num(f.GES1), "GES");
+  v["Classe GES"] = pick("Classe GES", f.libges1, "classe GES");
+  const dm = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v["Établi le"]);
+  const isNew = !!dm && (+dm[3] > 2021 || (+dm[3] === 2021 && +dm[2] >= 7));
+  if (isNew) {
+    v["Coût min (€/an)"] = num(f.MTDIAGMIN) || pdf["Coût min (€/an)"] || "";
+    v["Coût max (€/an)"] = num(f.MTDIAGMAX) || pdf["Coût max (€/an)"] || "";
+  }
+  if (!a) rem.push("PDF non analysé : fournisseur et n° ADEME à saisir");
+  else if (a.error) rem.push(`analyse du PDF impossible (${a.error}) : fournisseur et n° ADEME à saisir`);
+  else {
+    v["N° FU"] = pdf["N° FU"] || "";
+    v[INTRA_SUPPLIER_COL] = a.supplier ? a.supplier.entry.name : (a.societe || "");
+    v["N° ADEME"] = pdf["N° ADEME"] || "";
+    // Remarques du PDF utiles ici : fournisseur, et n° ADEME pour un DPE ≥ 01/07/2021
+    // (avant, SIGEO n'a pas de champ N° ADEME en création).
+    (a.remarques || []).filter((r) => /fournisseur|n° FU/i.test(r) || (isNew && /ADEME/i.test(r))).forEach((r) => rem.push(r));
+    if (pdf["Établi le"] && v["Établi le"] && pdf["Établi le"] !== v["Établi le"]) {
+      rem.push(`PDF établi le ${pdf["Établi le"]} ≠ Intralia ${v["Établi le"]} : vérifier que le PDF est bien ce DPE`);
+    }
+  }
+  v["PDF analysé"] = res.file || res.chosen.name;
+  v["DPE analyse"] = rem.length ? "À VÉRIFIER" : "OK";
+  v["Remarques DPE"] = rem.join(" ; ");
   return v;
+}
+
+// Colonnes écrites en mode « utiles à la saisie » (ordre de l'Analyse DPE,
+// Fournisseur DPE après N° FU).
+function intraSaisieCols(dsCols) {
+  const cols = dsCols.slice();
+  cols.splice(cols.indexOf("N° FU") + 1, 0, INTRA_SUPPLIER_COL);
+  return cols;
 }
 
 // Variables du modèle de nom de fichier pour le DPE retenu c.
@@ -723,7 +786,7 @@ if (typeof module !== "undefined" && module.exports) {
     INTRA_STATUS, INTRA_COLS, INTRA_FIELDS, INTRA_SUPPLIER_COL,
     intraNormName, intraNormLot, intraFold, intraIndexUrl, intraFormUrl, intraLotUrl, intraFlowerViewUrl, intraFlowerDownloadUrl,
     intraBuildIndex, intraSimilarity, intraCloseNames, intraLookup, intraCompileRegex, intraIsDpeName, intraSelectDpe,
-    intraSanitize, intraFolder, intraExtOf, intraFileName, intraClassifyFile, intraNormalizeConfig, intraRowValues, intraTemplateVars, intraAnalysisValues,
+    intraSanitize, intraFolder, intraExtOf, intraFileName, intraClassifyFile, intraNormalizeConfig, intraRowValues, intraTemplateVars, intraSaisieValues, intraSaisieCols,
     intraPageOp, intraGetFile, intraProcessRow
   };
 }
