@@ -302,7 +302,7 @@
       <label><input type="radio" name="extractKind" value="sigeoIm" /> Recherche IM SIGEO (adresse → N° E.I.)</label>
       <label><input type="radio" name="extractKind" value="sigeoLot" /> Recherche d'id interne de lot (IM + LT → id SIGEO)</label>
       <label><input type="radio" name="extractKind" value="sigeoDpe" /> DPE SIGEO (vérifier + télécharger le plus récent)</label>
-      <label><input type="radio" name="extractKind" value="intraliaDpe" /> DPE Intralia (immeuble + lot → DPE FlowerDocs le plus récent)</label>
+      <label><input type="radio" name="extractKind" value="intraliaDpe" /> DPE extraction (immeuble + lot → fichier prêt pour la saisie SIGEO)</label>
       <label><input type="radio" name="extractKind" value="dpeScan" /> Analyse DPE (dossier de PDF → Excel : dates, énergie, GES, fournisseur FU)</label>
     </div>
 
@@ -531,7 +531,7 @@
     </div>
 
     <div id="intraExtractBox" hidden>
-      <p class="hint">Pour chaque ligne : le couple <strong>nom d'immeuble + n° de lot</strong> est cherché dans l'index Intralia du cabinet (<code>diag.php</code>, lu une fois puis mis en cache), la page DPE du lot (<code>diaglot.php</code>) est lue, et le <strong>DPE le plus récent</strong> de la GED (date « crée le ») est repéré par son nom puis, au choix, téléchargé depuis <strong>FlowerDocs</strong>. Intralia est seulement <strong>lu</strong> (aucun enregistrement, aucun document rattaché, aucune commande). Il faut être connecté à Intralia et à FlowerDocs dans ce navigateur.</p>
+      <p class="hint"><strong>Tout en un</strong>, à partir du <strong>nom d'immeuble</strong> et du <strong>n° de lot</strong> seulement. Pour chaque ligne : <strong>Intralia</strong> (lot, DPE saisi, DPE le plus récent de la GED) → <strong>FlowerDocs</strong> (PDF enregistré dans <code>Téléchargements\DPE</code>, fournisseur et n° ADEME lus dans le PDF) → <strong>SIGEO</strong> (IM retrouvé par l'adresse de l'immeuble, id interne du lot, URL de la fiche DPE). Résultat : un <strong>fichier prêt pour la saisie</strong> (onglet Saisie → « Modèle DPE »). Il faut être connecté à Intralia, FlowerDocs et SIGEO, avec la <strong>recherche d'immeubles SIGEO</strong> ouverte dans un onglet. Intralia et SIGEO sont seulement lus.</p>
       <div class="field-row">
         <label for="intraNomCol">Colonne nom d'immeuble :</label>
         <select id="intraNomCol" data-colselect="plain"></select>
@@ -551,48 +551,56 @@
         <button class="btn" id="intraIdxRefresh" type="button" title="Relit diag.php pour le cabinet choisi et remplace l'index en cache"><svg class="icon icon-sm"><use href="#icon-loop"/></svg> Rafraîchir l'index Intralia</button>
       </div>
       <div class="field-row">
-        <label for="intraMode">Mode :</label>
-        <select id="intraMode">
-          <option value="find">Repérage seul (remplir les colonnes)</option>
-          <option value="download">Repérage + téléchargement</option>
-        </select>
+        <button class="btn" id="intraTestBtn" type="button" title="Cherche le lot de la ligne de départ, liste les DPE de la GED et analyse le PDF retenu (lu en mémoire) — rien n'est enregistré ni écrit"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester sur la ligne de départ</button>
       </div>
-      <div class="field-row">
-        <label for="intraFolder">Dossier :</label>
-        <input type="text" id="intraFolder" value="DPE" title="Sous-dossier de Téléchargements" style="max-width:110px" />
-        <label for="intraName">nom :</label>
-        <input type="text" id="intraName" value="{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf" title="{Colonne} = valeur de la ligne ; {DPE_Date_GED}, {DPE_Fichier} (nom GED sans extension), {DPE_UUID}, {Intralia_ID_Immeuble}, {Intralia_Cabinet} et les colonnes Intralia_… cochées. Caractères interdits par Windows → _. Extension = celle du fichier reçu." style="flex:1;min-width:140px" />
-      </div>
-      <label class="checkbox-row" title="Charge chaque candidat (du plus récent au plus ancien) et garde le premier dont la page 1 contient « performance énergétique » (texte du PDF, OCR local si la page est scannée). Plus lent."><input type="checkbox" id="intraVerify" /> vérifier le contenu (« performance énergétique » en page 1)</label>
-      <label class="checkbox-row" title="Les PDF téléchargés sont aussi chargés dans la Toolbox, sous leur nom de fichier : les étapes « PDF β » du scénario les retrouvent avec {DPE_Fichier_Local}. Garde les fichiers en mémoire jusqu'à la fermeture du panneau."><input type="checkbox" id="intraToolbox" /> ajouter les PDF téléchargés à la Toolbox</label>
-      <div class="field-row">
-        <label class="checkbox-row" style="margin:0" title="Le PDF du DPE retenu est analysé comme dans « Analyse DPE » (texte + OCR local) : fournisseur et son n° FU, n° ADEME, établi le, valable jusqu'au, énergie primaire, GES, classes, coûts."><input type="checkbox" id="intraAnalyze" checked /> analyser le PDF (fournisseur / n° FU, n° ADEME…)</label>
-        <select id="intraOcr" title="L'OCR lit les pages scannées et l'étiquette énergie. ~10-30 s par page.">
-          <option value="auto">OCR : scans + valeurs manquantes</option>
-          <option value="always">OCR : toujours la page DPE</option>
-          <option value="never">sans OCR</option>
-        </select>
-      </div>
-      <p class="hint" id="intraAnalyzeHint">Données du DPE (établi le, énergie primaire, GES, classes, coûts) : celles <strong>saisies dans Intralia</strong> ; « Valable jusqu'au » calculé comme SIGEO. Lus dans le PDF (texte / OCR) : <strong>fournisseur → N° FU</strong> (liste « Fournisseurs → n° FU » de l'Analyse DPE, <span id="intraSupCount"></span>) et <strong>N° ADEME</strong>. En repérage seul, le PDF est lu sans être enregistré.</p>
-      <div class="field-row">
-        <label for="intraImCol" title="N° d'immeuble SIGEO (IM_format, IM0393534 ou 393534)">IM SIGEO :</label>
-        <select id="intraImCol" data-colselect="optional"></select>
-        <label for="intraIdCol" title="Colonne où l'id interne du lot est déjà connu (ex. id_server) : réutilisé s'il est rempli, sinon cherché et écrit dedans. « aucune » : colonne « ID interne SIGEO ».">id interne :</label>
-        <select id="intraIdCol" data-colselect="optional"></select>
-      </div>
-      <p class="hint">Pour chaque DPE trouvé, l'<strong>id interne du lot SIGEO</strong> est cherché (IM + n° de lot, réglages de « Recherche d'id interne de lot ») sauf s'il est déjà connu, puis l'<strong>URL de la fiche DPE</strong> est écrite (<code>…/diag_manage/{IM}/{id interne}/0</code>). Il faut être connecté à SIGEO. IM « aucune » = pas de recherche SIGEO.</p>
-      <div class="field-row">
-        <label for="intraOut">Colonnes écrites :</label>
-        <select id="intraOut">
-          <option value="saisie">fichier prêt pour la saisie SIGEO</option>
-          <option value="all">toutes (détail Intralia, liens, UUID…)</option>
-        </select>
-      </div>
-      <p class="hint">Fichier prêt : <code>DPE analyse</code> (OK / À VÉRIFIER / Pas de PDF / ÉCHEC), <code>URL fiche DPE</code>, <code>Type de local</code>, <code>PDF analysé</code>, <code>N° FU</code>, <code>Fournisseur DPE</code>, <code>Établi le</code>, <code>Valable jusqu'au</code>, <code>N° ADEME</code>, énergie primaire, classe énergie, GES, classe GES, coûts min/max, <code>Date d'indexation des prix</code>, <code>Remarques DPE</code> (+ <code>ID interne SIGEO</code>). Ensuite : onglet Saisie → <strong>Modèle DPE</strong> règle l'étape tout seul sur ces colonnes ; choisis le dossier <code>Téléchargements\DPE</code>.</p>
-      <details class="imx-adv" id="intraFieldsBox">
-        <summary>DPE déjà saisi dans Intralia → colonnes (<span id="intraFieldsCount"></span>)</summary>
-        <p class="hint">Valeurs lues dans le formulaire DPE de la page du lot (jamais enregistré). <code>DATEDIAG</code> est la date du DPE ; <code>DPE_Date_GED</code> la date de dépôt du fichier dans la GED.</p>
-        <div id="intraFields" class="intra-fields"></div>
+      <p class="hint imx-test-result" id="intraTestResult"></p>
+      <details class="imx-adv" id="intraOpts">
+        <summary>Options</summary>
+        <div class="field-row">
+          <label for="intraMode">PDF :</label>
+          <select id="intraMode">
+            <option value="download">télécharger (fichier prêt pour la saisie)</option>
+            <option value="find">ne pas télécharger (repérage seul)</option>
+          </select>
+        </div>
+        <div class="field-row">
+          <label for="intraFolder">Dossier :</label>
+          <input type="text" id="intraFolder" value="DPE" title="Sous-dossier de Téléchargements" style="max-width:110px" />
+          <label for="intraName">nom :</label>
+          <input type="text" id="intraName" value="{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf" title="{Colonne} = valeur de la ligne ; {DPE_Date_GED}, {DPE_Fichier} (nom GED sans extension), {DPE_UUID}, {Intralia_ID_Immeuble}, {Intralia_Cabinet} et les colonnes Intralia_… cochées. Caractères interdits par Windows → _. Extension = celle du fichier reçu." style="flex:1;min-width:140px" />
+        </div>
+        <div class="field-row">
+          <label class="checkbox-row" style="margin:0" title="Le PDF du DPE retenu est analysé comme dans « Analyse DPE » (texte + OCR local) : fournisseur et son n° FU, n° ADEME, établi le, valable jusqu'au, énergie primaire, GES, classes, coûts."><input type="checkbox" id="intraAnalyze" checked /> analyser le PDF (fournisseur / n° FU, n° ADEME…)</label>
+          <select id="intraOcr" title="L'OCR lit les pages scannées et l'étiquette énergie. ~10-30 s par page.">
+            <option value="auto">OCR : scans + valeurs manquantes</option>
+            <option value="always">OCR : toujours la page DPE</option>
+            <option value="never">sans OCR</option>
+          </select>
+        </div>
+        <p class="hint" id="intraAnalyzeHint">Données du DPE (établi le, énergie primaire, GES, classes, coûts) : celles <strong>saisies dans Intralia</strong> ; « Valable jusqu'au » calculé comme SIGEO. Lus dans le PDF (texte / OCR) : <strong>fournisseur → N° FU</strong> (liste « Fournisseurs → n° FU » de l'Analyse DPE, <span id="intraSupCount"></span>) et <strong>N° ADEME</strong>. En repérage seul, le PDF est lu sans être enregistré.</p>
+        <label class="checkbox-row" title="IM retrouvé par l'adresse Intralia (ou lu dans une colonne), id interne du lot, URL de la fiche DPE."><input type="checkbox" id="intraSigeo" checked /> SIGEO : IM, id interne du lot et URL de la fiche DPE</label>
+        <div class="field-row">
+          <label for="intraImCol" title="Vide (auto) : IM cherché dans la recherche d'immeubles SIGEO avec l'adresse de l'immeuble lue dans Intralia, départagé par le lot. Sinon : colonne contenant l'IM (IM_format, IM0393534 ou 393534).">IM SIGEO :</label>
+          <select id="intraImCol" data-colselect="auto"></select>
+          <label for="intraIdCol" title="Colonne où l'id interne du lot est déjà connu (ex. id_server) : réutilisé s'il est rempli, sinon cherché et écrit dedans. « aucune » : colonne « ID interne SIGEO ».">id interne :</label>
+          <select id="intraIdCol" data-colselect="optional"></select>
+        </div>
+        <p class="hint">IM « auto » : recherche d'immeubles SIGEO par l'adresse Intralia (par adresse, puis par nom), réglages de « Recherche IM SIGEO » ; plusieurs IM à la même adresse → celui qui contient le lot. Id interne : recherche « IM + LT » de « Recherche d'id interne de lot ». Fiche : <code>…/diag_manage/{IM}/{id interne}/0</code>.</p>
+        <div class="field-row">
+          <label for="intraOut">Colonnes écrites :</label>
+          <select id="intraOut">
+            <option value="saisie">fichier prêt pour la saisie SIGEO</option>
+            <option value="all">toutes (détail Intralia, liens, UUID…)</option>
+          </select>
+        </div>
+        <p class="hint">Fichier prêt : <code>DPE analyse</code> (OK / À VÉRIFIER / Pas de PDF / ÉCHEC), <code>URL fiche DPE</code>, <code>Type de local</code>, <code>PDF analysé</code>, <code>N° FU</code>, <code>Fournisseur DPE</code>, <code>Établi le</code>, <code>Valable jusqu'au</code>, <code>N° ADEME</code>, énergie primaire, classe énergie, GES, classe GES, coûts min/max, <code>Date d'indexation des prix</code>, <code>Remarques DPE</code> (+ <code>ID interne SIGEO</code>). Ensuite : onglet Saisie → <strong>Modèle DPE</strong> règle l'étape tout seul sur ces colonnes ; choisis le dossier <code>Téléchargements\DPE</code>.</p>
+        <label class="checkbox-row" title="Charge chaque candidat (du plus récent au plus ancien) et garde le premier dont la page 1 contient « performance énergétique » (texte du PDF, OCR local si la page est scannée). Plus lent."><input type="checkbox" id="intraVerify" /> vérifier le contenu (« performance énergétique » en page 1)</label>
+        <label class="checkbox-row" title="Les PDF téléchargés sont aussi chargés dans la Toolbox, sous leur nom de fichier : les étapes « PDF β » du scénario les retrouvent avec {DPE_Fichier_Local}. Garde les fichiers en mémoire jusqu'à la fermeture du panneau."><input type="checkbox" id="intraToolbox" /> ajouter les PDF téléchargés à la Toolbox</label>
+        <details class="imx-adv" id="intraFieldsBox">
+          <summary>DPE déjà saisi dans Intralia → colonnes (<span id="intraFieldsCount"></span>)</summary>
+          <p class="hint">Valeurs lues dans le formulaire DPE de la page du lot (jamais enregistré). <code>DATEDIAG</code> est la date du DPE ; <code>DPE_Date_GED</code> la date de dépôt du fichier dans la GED.</p>
+          <div id="intraFields" class="intra-fields"></div>
+        </details>
       </details>
       <details class="imx-adv" id="intraAdv">
         <summary>Réglages avancés</summary>
@@ -620,12 +628,8 @@
           <label for="intraMaxAge">index en cache (jours) :</label>
           <input type="number" id="intraMaxAge" value="7" min="0" step="1" title="Au-delà, l'index est relu au démarrage. 0 = relu à chaque traitement." />
         </div>
+        <p class="hint">Colonnes « toutes » en plus : <code>Intralia_Cabinet</code>, <code>Intralia_ID_Immeuble</code>, <code>Intralia_URL_Lot</code>, <code>DPE_Statut</code> (OK / AUCUN_DPE_GED / LOT_INTROUVABLE / IMMEUBLE_INTROUVABLE / AMBIGU / INTRALIA_NON_CONNECTE / FLOWERDOCS_NON_CONNECTE / ERREUR), <code>DPE_Detail</code>, <code>DPE_Fichier</code>, <code>DPE_Date_GED</code>, <code>DPE_UUID</code>, <code>DPE_Lien_FlowerDocs</code>, <code>DPE_Fichier_Local</code> + les champs cochés ci-dessus.</p>
       </details>
-      <p class="hint">Colonnes écrites (créées si absentes) : <code>Intralia_Cabinet</code>, <code>Intralia_ID_Immeuble</code>, <code>Intralia_URL_Lot</code>, <code>DPE_Statut</code> (OK / AUCUN_DPE_GED / LOT_INTROUVABLE / IMMEUBLE_INTROUVABLE / AMBIGU / INTRALIA_NON_CONNECTE / FLOWERDOCS_NON_CONNECTE / ERREUR), <code>DPE_Detail</code>, <code>DPE_Fichier</code>, <code>DPE_Date_GED</code>, <code>DPE_UUID</code>, <code>DPE_Lien_FlowerDocs</code>, <code>DPE_Fichier_Local</code> + les champs cochés ci-dessus.</p>
-      <div class="field-row">
-        <button class="btn" id="intraTestBtn" type="button" title="Cherche le lot de la ligne de départ, liste les DPE de la GED et analyse le PDF retenu (lu en mémoire) — rien n'est enregistré ni écrit"><svg class="icon icon-sm"><use href="#icon-play"/></svg> Tester sur la ligne de départ</button>
-      </div>
-      <p class="hint imx-test-result" id="intraTestResult"></p>
     </div>
 
     <div id="dsExtractBox" hidden>

@@ -69,6 +69,7 @@ const INTRA_SAISIE_COLS = Object.freeze([
   "Remarques DPE"
 ]);
 const INTRA_ID_COL = "ID interne SIGEO";
+const INTRA_IM_COL = "IM SIGEO";
 // Popup « Diagnostic » SIGEO d'un lot : {IM} = n° d'immeuble, {ID} = id interne du lot.
 const INTRA_FICHE_DEFAULT = "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/{IM}/{ID}/0";
 
@@ -320,28 +321,32 @@ function intraClassifyFile(r, gedName) {
   return { kind: "OTHER", ext, mime: r.contentType || "application/octet-stream" };
 }
 
-// Configuration complète (valeurs par défaut, migrations futures).
+// Configuration complète (valeurs par défaut, migrations).
+// v2 (v2.20.0, « DPE extraction » tout en un) : une config d'avant passe en
+// téléchargement + analyse + fichier prêt pour la saisie.
 function intraNormalizeConfig(c = {}) {
+  const old = !(Number(c.v) >= 2);
   const num = (v, d) => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= 0 ? n : d; };
   const fields = Array.isArray(c.fields)
     ? c.fields.filter((k) => INTRA_FIELDS.some((f) => f.k === k))
     : INTRA_FIELDS.filter((f) => f.def).map((f) => f.k);
   return {
-    v: 1,
+    v: 2,
     nomCol: String(c.nomCol ?? ""),
     lotCol: String(c.lotCol ?? ""),
     soc: String(c.soc ?? "").trim() || INTRA_DEFAULT_SOC,
     regex: String(c.regex ?? "").trim() || INTRA_DEFAULT_REGEX,
-    mode: c.mode === "download" ? "download" : "find",
+    mode: old || c.mode !== "find" ? "download" : "find",
     folder: c.folder === undefined || c.folder === null ? INTRA_DEFAULT_FOLDER : String(c.folder),
     name: String(c.name ?? "").trim() || INTRA_DEFAULT_NAME,
     verify: !!c.verify,
     toolbox: !!c.toolbox,
-    analyze: c.analyze !== false,
+    analyze: old || c.analyze !== false,
+    sigeo: c.sigeo !== false,
     imCol: String(c.imCol ?? ""),
     idCol: String(c.idCol ?? ""),
     fiche: String(c.fiche ?? "").trim() || INTRA_FICHE_DEFAULT,
-    out: c.out === "all" ? "all" : "saisie",
+    out: !old && c.out === "all" ? "all" : "saisie",
     ocr: ["auto", "always", "never"].includes(c.ocr) ? c.ocr : "auto",
     fields,
     base: intraTrimSlash(c.base) || INTRA_DEFAULT_BASE,
@@ -759,7 +764,7 @@ async function intraProcessRow(ad, p) {
   }
 
   const m = look.matches[0];
-  Object.assign(res, { cabinet: m.cabinet, soc: m.soc, imm: m.imm, lotType: m.type || "", lotUrl: intraLotUrl(p.base, m.soc, m.imm, m.idLot || m.lot) });
+  Object.assign(res, { cabinet: m.cabinet, soc: m.soc, imm: m.imm, lotType: m.type || "", adr: m.adr || "", nomIntralia: m.nom || "", lotUrl: intraLotUrl(p.base, m.soc, m.imm, m.idLot || m.lot) });
   if (ad.stopped()) return done(S.ERREUR, "arrêté", { error: "arrêté" });
 
   let page;
@@ -845,7 +850,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     INTRA_DEFAULT_BASE, INTRA_DEFAULT_FLOWER, INTRA_DEFAULT_SOC, INTRA_ALL_SOC, INTRA_DEFAULT_CABINETS,
     INTRA_DEFAULT_REGEX, INTRA_DEFAULT_NAME, INTRA_DEFAULT_FOLDER, INTRA_DEFAULT_DELAY, INTRA_DEFAULT_MAX_AGE_DAYS,
-    INTRA_STATUS, INTRA_COLS, INTRA_FIELDS, INTRA_SUPPLIER_COL, INTRA_SAISIE_COLS, INTRA_ID_COL, INTRA_FICHE_DEFAULT,
+    INTRA_STATUS, INTRA_COLS, INTRA_FIELDS, INTRA_SUPPLIER_COL, INTRA_SAISIE_COLS, INTRA_ID_COL, INTRA_IM_COL, INTRA_FICHE_DEFAULT,
     intraFicheUrl, intraTypeLocal,
     intraNormName, intraNormLot, intraFold, intraIndexUrl, intraFormUrl, intraLotUrl, intraFlowerViewUrl, intraFlowerDownloadUrl,
     intraBuildIndex, intraSimilarity, intraCloseNames, intraLookup, intraCompileRegex, intraIsDpeName, intraSelectDpe,

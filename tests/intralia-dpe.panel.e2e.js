@@ -148,7 +148,10 @@ const ROWS = [
   assert.ok(ui.box && !ui.std && !ui.dpe, "seul le bloc Intralia est visible");
   assert.deepStrictEqual([ui.cfg.nomCol, ui.cfg.lotCol], ["Immeuble", "lots"], "colonnes devinées (jamais IM_format)");
   assert.deepStrictEqual([ui.cfg.soc, ui.cfg.mode, ui.cfg.folder, ui.cfg.name, ui.cfg.delay, ui.cfg.verify, ui.cfg.analyze, ui.cfg.ocr],
-    ["19", "find", "DPE", "{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf", 400, false, true, "auto"]);
+    ["19", "download", "DPE", "{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf", 400, false, true, "auto"]);
+  assert.strictEqual(await panel.evaluate(() => document.querySelector('input[name="extractKind"][value="intraliaDpe"]').parentElement.textContent.trim()),
+    "DPE extraction (immeuble + lot → fichier prêt pour la saisie SIGEO)");
+  await panel.click("#intraOpts summary");
   assert.ok(/^\d+ fournisseurs$/.test(await panel.textContent("#intraSupCount")), "liste fournisseurs de l'Analyse DPE");
   assert.deepStrictEqual(ui.cfg.fields, ["libdpe1", "DPE1", "libges1", "GES1", "DATEDIAG"]);
   assert.deepStrictEqual(ui.socs, ["Sicov (19)", "Tous les cabinets (100)"]);
@@ -187,11 +190,13 @@ const ROWS = [
 
   // 1. Repérage seul, sans analyse du PDF : aucun accès à FlowerDocs.
   await panel.uncheck("#intraAnalyze");
+  await panel.selectOption("#intraMode", "find");
   assert.strictEqual(await panel.inputValue("#intraOut"), "saisie", "par défaut : colonnes utiles à la saisie");
   await panel.selectOption("#intraOut", "all");
   const run = async () => {
     await panel.click("#startBtn");
-    await panel.waitForFunction(() => !isRunning && /Terminé|Arrêté/.test($("log").textContent), null, { timeout: 90000 });
+    try { await panel.waitForFunction(() => !isRunning && /Terminé|Arrêté/.test($("log").textContent), null, { timeout: 90000 }); }
+    catch (e) { console.log("TIMEOUT log:\n" + await panel.evaluate(() => [isRunning, $("log").innerText].join("\n"))); throw e; }
     return panel.evaluate(() => ({ rows: state.rows, log: $("log").innerText, recap: $("resultSummary").innerText }));
   };
   const lots0 = srv.stats.lots.length;
@@ -259,9 +264,9 @@ const ROWS = [
     ["38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0", "habitation"]);
   assert.deepStrictEqual([gx(3, "ID interne SIGEO"), gx(4, "ID interne SIGEO"), gx(12, "ID interne SIGEO"), gx(6, "ID interne SIGEO")], ["12", "5", "38", ""]);
   assert.deepStrictEqual([gx(5, "DPE analyse"), gx(5, "URL fiche DPE")], ["À VÉRIFIER", ""]);
-  assert.strictEqual(gx(5, "Remarques DPE"), "fiche SIGEO introuvable : Introuvable (IM 393004 / LT 278)");
-  assert.ok(/Ligne 2 : SIGEO lot id 38 .*→ http:\/\/sigeo\.evoriel\.net\/popup\.aspx\/fr\/sig_imm\/diag_manage\/393001\/38\/0/.test(out.log), out.log);
-  assert.ok(/Ligne 12 : SIGEO lot id 38 .*\[cache\]/.test(out.log), out.log);
+  assert.strictEqual(gx(5, "Remarques DPE"), "fiche SIGEO introuvable : lot 278 introuvable dans SIGEO — IM0393004 : Introuvable");
+  assert.ok(/Ligne 2 : SIGEO IM0393001 lot id 38 .*IM de la colonne → http:\/\/sigeo\.evoriel\.net\/popup\.aspx\/fr\/sig_imm\/diag_manage\/393001\/38\/0/.test(out.log), out.log);
+  assert.ok(/Ligne 12 : SIGEO IM0393001 lot id 38 .*\[cache\]/.test(out.log), out.log);
   assert.strictEqual(H2.indexOf("Fournisseur DPE"), H2.indexOf("N° FU") + 1);
   assert.deepStrictEqual(ga(2).slice(0, 11), ["OK", "PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf", "0528825", "EXPERT IMMOBILIER", "1259V1000732X", "05/06/2012", "04/06/2022", "105", "C", "25", "D"]);
   assert.deepStrictEqual(ga(3).slice(0, 5), ["À VÉRIFIER", "Cour Saint-Hubert_lot130_2011-08-24.pdf", "0394076x", "DIAG 75", "1159V1000130B"]);
@@ -361,7 +366,7 @@ const ROWS = [
   // id interne déjà connu (ex. colonne id_server) : réutilisé, pas de recherche SIGEO.
   const posts0 = lsrv.stats.post;
   const known = await panel.evaluate(async () => intraSigeoLookup({ imIdx: 0, knownIdx: 1, fiche: "", lc: getLotConfig(), run: {}, ad: null }, ["IM0393999", "77"], "5"));
-  assert.deepStrictEqual(known, { status: "OK", id: "77", known: true, url: "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393999/77/0" });
+  assert.deepStrictEqual(known, { status: "OK", im: "393999", id: "77", known: true, url: "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393999/77/0" });
   assert.strictEqual(lsrv.stats.post, posts0);
   // Session SIGEO expirée : arrêt avec la ligne de reprise.
   await ctx.clearCookies();
@@ -383,12 +388,61 @@ const ROWS = [
     const after = getIntraConfig();
     return { kind: c.extraction.kind, after: extractKind(), def: [def.mode, def.folder, def.soc, def.analyze], cfg: [after.mode, after.folder, after.soc, after.fields.join(","), after.base === c.extraction.intra.base, after.analyze, after.ocr] };
   });
-  assert.deepStrictEqual(prof, { kind: "intraliaDpe", after: "intraliaDpe", def: ["find", "DPE", "19", true],
+  assert.deepStrictEqual(prof, { kind: "intraliaDpe", after: "intraliaDpe", def: ["download", "DPE", "19", true],
     cfg: ["download", "DPE/Intralia", "31", "libdpe1,DPE1,libges1,GES1,DATEDIAG,REFERENCE", true, false, "always"] });
+
+  // 7. Le cas réel : seulement « immeuble » + « lots ». IM retrouvé dans la
+  // recherche d'immeubles SIGEO par l'adresse Intralia, départagé par le lot.
+  // Faux SIGEO sur UNE origine : recherche d'immeubles (sigeo-im-mock.html) +
+  // lot_browse (sigeo-lot-server.js, relayé).
+  const imHtml = fs.readFileSync(path.join(__dirname, "fixtures/sigeo-im-mock.html"), "utf8").replace("// Autres voies", [
+    'add("IM0393001", "CONCERTO 1", "12 RUE DES MUSICIENS 59000 LILLE");',
+    'add("IM0393005", "CONCERTO 2", "14 RUE DES MUSICIENS 59000 LILLE");',
+    'add("IM0393002", "ST HUBERT GERANCE", "5 COUR SAINT HUBERT 59000 LILLE");',
+    'add("IM0393022", "ST HUBERT SYNDIC", "5 COUR SAINT HUBERT 59000 LILLE");', "// Autres voies"].join("\n"));
+  Object.assign(lotMock.DB, { 393022: [{ lt: 7, id: 90, type: "Cave" }] }); // même adresse, pas le lot 130
+  const sigeo = await new Promise((resolve) => {
+    const px = http.createServer((req, res) => {
+      if (req.url.startsWith("/imsearch")) { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(imHtml); return; }
+      const up = http.request(lsrv.origin + req.url, { method: req.method, headers: Object.assign({}, req.headers, { host: new URL(lsrv.origin).host }) }, (r) => {
+        const h = Object.assign({}, r.headers);
+        if (h.location) h.location = h.location.replace(lsrv.origin, "");
+        res.writeHead(r.statusCode, h); r.pipe(res);
+      });
+      req.pipe(up);
+    });
+    px.listen(0, "127.0.0.1", () => resolve({ px, origin: `http://127.0.0.1:${px.address().port}` }));
+  });
+  await stab.goto(sigeo.origin + "/__login");
+  await stab.goto(sigeo.origin + "/imsearch");
+  await panel.evaluate(([u, rows]) => {
+    $("lotUrl").value = u;
+    state.rows = rows; renderColumns();
+    applyIntraConfig(Object.assign(getIntraConfig(), { soc: "19", nomCol: "", lotCol: "", imCol: "", idCol: "", mode: "find", analyze: false, out: "saisie" }));
+  }, [sigeo.origin + "/page.aspx/fr/sig_imm/lot_browse/syn", [["immeuble", "lots"], ["PARC FLEURI LE CONCERTO 1", "732"], ["COUR SAINT-HUBERT", "130"], ["RESIDENCE CHATEAUBRIAND", "278"]]]);
+  assert.deepStrictEqual(await panel.evaluate(() => { const c = getIntraConfig(); return [c.nomCol, c.lotCol, c.imCol, c.idCol, c.sigeo]; }), ["immeuble", "lots", "", "", true]);
+  await panel.fill("#startRow", "2");
+  await panel.fill("#endRow", "");
+  out = await run();
+  console.log("--- journal (immeuble + lots seulement) ---\n" + out.log);
+  const H7 = out.rows[0];
+  assert.deepStrictEqual(H7.slice(2, 6), ["IM SIGEO", "ID interne SIGEO", "DPE analyse", "URL fiche DPE"]);
+  const g7 = (r, n) => out.rows[r - 1][H7.indexOf(n)];
+  assert.deepStrictEqual([g7(2, "IM SIGEO"), g7(2, "ID interne SIGEO"), g7(2, "URL fiche DPE")], ["IM0393001", "38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0"]);
+  assert.deepStrictEqual([g7(3, "IM SIGEO"), g7(3, "ID interne SIGEO"), g7(3, "URL fiche DPE")], ["IM0393002", "12", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393002/12/0"]);
+  assert.ok(/Ligne 3 : SIGEO IM0393002 lot id 12 .*IM par l'adresse \(2 candidats, départagés par le lot\)/.test(out.log), out.log);
+  assert.deepStrictEqual([g7(4, "IM SIGEO"), g7(4, "URL fiche DPE")], ["", ""]);
+  assert.ok(/fiche SIGEO introuvable : IM introuvable pour « 9 BOULEVARD DE LA LIBERTÉ 59800 LILLE »/.test(g7(4, "Remarques DPE")), g7(4, "Remarques DPE"));
+  // Recherche d'immeubles absente de l'onglet (et pas d'URL réglée) : arrêt avec un message clair.
+  await stab.goto(sigeo.origin + "/page.aspx/fr/sig_imm/lot_browse/syn");
+  out = await run();
+  assert.ok(/SIGEO : ouvre la recherche d'immeubles SIGEO .* Relance à partir de la ligne 2\./.test(out.log), out.log);
+  assert.ok(!/Ligne 3 /.test(out.log), "boucle arrêtée");
+  sigeo.px.close();
 
   assert.deepStrictEqual(srv.stats.posts, [], "lecture seule : aucun POST vers Intralia");
   assert.deepStrictEqual(errors, [], "erreurs JS du panneau");
-  console.log("\n✓ onglet Extraction (DPE Intralia) OK");
+  console.log("\n✓ onglet Extraction (DPE extraction) OK");
   await browser.close();
   await srv.close();
   web.close();

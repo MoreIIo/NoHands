@@ -201,10 +201,16 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
   await check("configuration par défaut (profils / stockage)", async () => {
     const c = intra.intraNormalizeConfig({});
     assert.deepStrictEqual([c.soc, c.mode, c.folder, c.name, c.regex, c.verify, c.delay, c.maxAgeDays, c.base, c.flower, c.analyze, c.ocr],
-      ["19", "find", "DPE", "{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf", intra.INTRA_DEFAULT_REGEX, false, 400, 7, "https://intralia.oralia.local", "https://www.oralia.flowerdocs.cloud", true, "auto"]);
-    assert.deepStrictEqual([intra.intraNormalizeConfig({ analyze: false, ocr: "never" }).analyze, intra.intraNormalizeConfig({ ocr: "x" }).ocr], [false, "auto"]);
+      ["19", "download", "DPE", "{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf", intra.INTRA_DEFAULT_REGEX, false, 400, 7, "https://intralia.oralia.local", "https://www.oralia.flowerdocs.cloud", true, "auto"]);
+    assert.deepStrictEqual([c.v, c.sigeo, c.out, c.imCol], [2, true, "saisie", ""], "tout en un par défaut (IM auto)");
+    // Migration : une config d'avant (v1) passe en tout en un ; une config v2 garde ses choix.
+    const m1 = intra.intraNormalizeConfig({ v: 1, mode: "find", analyze: false, out: "all" });
+    assert.deepStrictEqual([m1.mode, m1.analyze, m1.out], ["download", true, "saisie"]);
+    const m2 = intra.intraNormalizeConfig({ v: 2, mode: "find", analyze: false, out: "all", sigeo: false });
+    assert.deepStrictEqual([m2.mode, m2.analyze, m2.out, m2.sigeo], ["find", false, "all", false]);
+    assert.deepStrictEqual([intra.intraNormalizeConfig({ v: 2, analyze: false, ocr: "never" }).analyze, intra.intraNormalizeConfig({ ocr: "x" }).ocr], [false, "auto"]);
     assert.deepStrictEqual(c.fields, ["libdpe1", "DPE1", "libges1", "GES1", "DATEDIAG"]);
-    const d = intra.intraNormalizeConfig({ mode: "download", folder: "", fields: ["REFERENCE", "inconnu"], soc: "100", base: "https://x.local/", delay: "0" });
+    const d = intra.intraNormalizeConfig({ v: 2, mode: "download", folder: "", fields: ["REFERENCE", "inconnu"], soc: "100", base: "https://x.local/", delay: "0" });
     assert.deepStrictEqual([d.mode, d.folder, d.fields, d.soc, d.base, d.delay], ["download", "", ["REFERENCE"], "100", "https://x.local", 0]);
   });
 

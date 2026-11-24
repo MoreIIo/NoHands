@@ -217,8 +217,8 @@ deux modes :
    (affichage).
    Le bouton « Colonnes de l'Analyse DPE » reprend celles écrites par
    l'extraction *Analyse DPE* (`{N° FU}`, `{Établi le}`, `{Classe énergie}`,
-   `{DPE fichier}`…) ; « Fichier DPE Intralia » celles du fichier prêt de
-   l'extraction *DPE Intralia* (+ URL `{URL fiche DPE}`). « Modèle DPE »
+   `{DPE fichier}`…) ; « Fichier DPE extraction » celles du fichier prêt de
+   l'extraction *DPE extraction* (+ URL `{URL fiche DPE}`). « Modèle DPE »
    choisit tout seul le bon préréglage d'après les colonnes du fichier chargé.
    Dates : la valeur brute du classeur est lue (n° de série Excel → jj/mm/aaaa,
    SheetJS affichant sinon `m/d/yy`). Nombres : virgule, **au plus 2
@@ -350,7 +350,7 @@ deux modes :
 ## 3. Onglet Extraction (ex-OSA)
 
 **Type d'extraction** : *Standard* (ci-dessous), **Recherche IM SIGEO**,
-**Recherche d'id interne de lot**, **DPE SIGEO**, **DPE Intralia** ou
+**Recherche d'id interne de lot**, **DPE SIGEO**, **DPE extraction** ou
 **Analyse DPE** (voir plus bas).
 
 1. **Conditions** : ignorer certaines lignes (ex : colonne X = "NON").
@@ -520,30 +520,42 @@ statut » : par défaut `OK & téléchargé`, `OK trouvé (non téléchargé)`
 Session expirée → arrêt avec la ligne à partir de laquelle relancer.
 Pause entre lots réglable (1 s par défaut) pour ne pas surcharger SIGEO.
 
-### DPE Intralia (immeuble + lot → DPE FlowerDocs le plus récent)
+### DPE extraction (immeuble + lot → fichier prêt pour la saisie SIGEO)
 
-Équivalent de *DPE SIGEO* pour **Intralia** (intranet Oralia) : pour chaque
-ligne (nom d'immeuble + **vrai** n° de lot), retrouve le n° d'immeuble
-Intralia, lit la page DPE du lot, choisit le DPE le plus récent de la GED et
-le télécharge depuis FlowerDocs. Logique dans `intralia-dpe.js`.
+Option tout-en-un (ex-« DPE Intralia ») : **le fichier d'entrée n'a besoin
+que de deux colonnes, le nom de l'immeuble et le n° de lot**. Pour chaque
+ligne, dans l'ordre : Intralia (n° d'immeuble, page DPE du lot, DPE saisi,
+DPE le plus récent de la GED) → FlowerDocs (téléchargement du PDF, lecture du
+fournisseur / n° FU et du n° ADEME) → **SIGEO** (IM de l'immeuble retrouvé
+par l'adresse Intralia, id interne du lot, URL de la fiche DPE) → une ligne du
+fichier prêt pour la saisie. Logique dans `intralia-dpe.js`.
 
 **Intralia n'est que lu** : uniquement des `GET` ; le formulaire du lot
 (`form1`, qui enregistrerait le DPE) n'est jamais soumis, les cases `IDGED`
 (rattachement de document) ne sont jamais cochées, « Passer la commande DPE »
 n'est jamais cliqué.
 
-1. Connecte-toi à Intralia **et** à FlowerDocs dans ce navigateur (un onglet
-   Intralia ouvert suffit ; à défaut, l'extension en ouvre un en arrière-plan).
-2. Charge le fichier (Données), choisis **DPE Intralia**, puis les colonnes
-   **nom d'immeuble** (défaut `Immeuble`) et **n° de lot** (défaut `lots` —
-   le vrai n° de lot, jamais `IM_format` qui est l'id SIGEO).
+1. Dans ce navigateur : connecte-toi à **Intralia**, à **FlowerDocs** et à
+   **SIGEO**, et laisse ouverte dans un onglet SIGEO la **recherche
+   d'immeubles** (page avec « Nom », « Site », « Rechercher ») — ou renseigne
+   son URL dans *Recherche IM SIGEO*.
+2. Charge le fichier (Données), choisis **DPE extraction** : les colonnes
+   **immeuble** (`Immeuble`) et **lots** (le vrai n° de lot, jamais
+   `IM_format`) sont devinées.
 3. **Cabinet Intralia** : Sicov (19) par défaut ; la liste complète est lue
    dans le `<select name="ID_SOCIETE">` de `diag.php` (bouton ↻, ou
    automatiquement au premier chargement de l'index). *Tous les cabinets*
    (100) : ~90 Mo, ~2 min de lecture la première fois.
-4. **Mode** : *repérage seul* (colonnes remplies) ou *repérage +
-   téléchargement*. **Tester sur la ligne de départ** n'écrit et ne
-   télécharge rien.
+4. **Lancer**. **Tester sur la ligne de départ** fait toute la chaîne sur une
+   ligne sans rien écrire ni télécharger.
+
+Tout le reste est dans **Options** (déplié au besoin) : mode *télécharger*
+(défaut) ou *repérage seul*, dossier et nom des PDF, analyse du PDF / OCR,
+étape SIGEO (case « trouver la fiche DPE dans SIGEO »), colonne IM (défaut
+*auto*) et colonne id interne, colonnes écrites (*saisie* par défaut ou
+*toutes*), vérification du contenu, Toolbox, champs Intralia, réglages
+avancés. Les réglages enregistrés avant la v2.20.0 sont remis sur le
+tout-en-un (télécharger + analyse + SIGEO + colonnes de saisie).
 
 **Étape 1 — index des immeubles** (une seule fois par traitement) :
 `GET /gerance/diag.php?action=R&ID_SOCIETE={id}&ID_GEST=0&TYPEB=0&DPE_TOUS=checked&GES=0`
@@ -600,17 +612,27 @@ Windows → `_` ; extension = celle du fichier reçu). Pour les étapes
 `pdfcheck` / `pdfwrite` du scénario : cocher **ajouter les PDF téléchargés
 à la Toolbox**, puis retrouver le PDF par `{DPE_Fichier_Local}`.
 
-**Chaîne complète → fichier prêt pour la saisie SIGEO** (v2.19.0). Pour chaque
-ligne, dans l'ordre : Intralia (lot, DPE saisi, DPE de la GED) → FlowerDocs
-(PDF téléchargé, fournisseur / n° ADEME lus dans le PDF) → **SIGEO : id
-interne du lot** (IM + n° de lot, avec les réglages et le cache de « Recherche
-d'id interne de lot », dans un onglet SIGEO connecté ; réutilisé s'il est déjà
-dans la colonne « id interne », ex. `id_server`) → **URL de la fiche DPE**
-`http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/{IM}/{id interne}/0`
-(modèle modifiable dans « Réglages avancés »). Colonnes : « IM SIGEO »
-(devinée : `IM_format`) et « id interne » (devinée : `id_server`, sinon
-colonne `ID interne SIGEO` créée) ; IM « aucune » = pas d'étape SIGEO. Session
-SIGEO expirée → arrêt avec la ligne de reprise.
+**Étape 4 — SIGEO : IM, id interne, URL de la fiche** (v2.20.0) :
+- **IM** : colonne IM *auto* (défaut) → recherche d'immeubles SIGEO (moteur
+  et réglages de *Recherche IM SIGEO*) avec l'**adresse Intralia** de
+  l'immeuble : d'abord « par adresse » (voie + CP), puis par le nom de
+  l'immeuble, puis par la voie dans « Nom » ; correspondance sur la colonne
+  Adresse de SIGEO (n°, BIS/TER, voie, CP). Plusieurs IM à la même adresse →
+  le lot est cherché dans chacun : un seul le contient → retenu ; plusieurs →
+  `AMBIGU` ; aucun → introuvable (adresses proches dans la remarque). Une
+  colonne IM peut aussi être choisie (ex. `IM_format`).
+- **Id interne du lot** : IM + n° de lot, avec les réglages et le cache de
+  *Recherche d'id interne de lot* ; réutilisé s'il est déjà dans la colonne
+  « id interne » (ex. `id_server`).
+- **URL de la fiche DPE** :
+  `http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/{IM}/{id interne}/0`
+  (modèle modifiable dans « Réglages avancés »).
+- Même onglet SIGEO pour les deux recherches : celui où la recherche
+  d'immeubles est ouverte (repéré par « Nom » + « Rechercher » + « Site » ou
+  la bascule « Par nom / Par adresse »). Aucun onglet de ce type et pas d'URL
+  réglée → arrêt avec un message clair. Session SIGEO expirée → arrêt avec la
+  ligne de reprise. Échec pour une ligne → « URL fiche DPE » vide, `DPE
+  analyse` = À VÉRIFIER et la raison dans `Remarques DPE`.
 Le fichier final (mode par défaut « fichier prêt pour la saisie SIGEO ») ne
 contient que : `DPE analyse`, `URL fiche DPE`, `Type de local` (type du lot
 Intralia : appartement / maison… → habitation, commerce / bureau / local… →
@@ -618,9 +640,10 @@ hors habitation, autre → à vérifier), `PDF analysé`, `N° FU`,
 `Fournisseur DPE`, `Établi le`, `Valable jusqu'au`, `N° ADEME`, énergie
 primaire, classe énergie, GES, classe GES, coûts min/max, `Date d'indexation
 des prix` (DPE ≥ 01/07/2021 : 01/01/année de référence Intralia, sinon le
-PDF), `Remarques DPE` (+ `ID interne SIGEO`). Ensuite : onglet Saisie →
+PDF), `Remarques DPE`, précédées de `IM SIGEO` (IM + 7 chiffres, si IM
+auto) et `ID interne SIGEO`. Ensuite : onglet Saisie →
 **Modèle DPE** reconnaît ce fichier et règle l'étape « SIGEO : saisir un DPE »
-toute seule (préréglage « Fichier DPE Intralia » : colonnes + URL
+toute seule (préréglage « Fichier DPE extraction » : colonnes + URL
 `{URL fiche DPE}` reprise telle quelle) ; il reste à choisir le dossier
 `Téléchargements\DPE` et à lancer le scénario (en simulation d'abord).
 
@@ -826,7 +849,7 @@ de la dernière *release* si elle existe, sinon des derniers messages de commit.
 ├── sigeo-im.js        Extraction « Recherche IM SIGEO » (parsing, recherche, pagination, filtrage)
 ├── sigeo-lot.js       Extraction « Recherche d'id interne de lot » (POST direct, repli onglet)
 ├── sigeo-dpe.js       Extraction « DPE SIGEO » (page Documents, filtre, plus récent, téléchargement)
-├── intralia-dpe.js    Extraction « DPE Intralia » (index diag.php, page du lot, DPE GED le plus récent, FlowerDocs)
+├── intralia-dpe.js    Extraction « DPE extraction » (index diag.php, page du lot, DPE GED le plus récent, FlowerDocs, fichier prêt)
 ├── dpe-scan.js        Extraction « Analyse DPE » (lecture des DPE, recoupements, classes, fournisseurs FU)
 ├── sigeo-diag.js      Étape de scénario « SIGEO : saisir un DPE » (formulaire diag_manage + PDF)
 ├── update-check.js    Vérification de mise à jour via GitHub
@@ -852,14 +875,17 @@ fichier, attente du chargement, fiche → page Documents, POST → PDF ou HTML,
 contre `tests/fixtures/sigeo-dpe-mock.js`), `node tests/sigeo-dpe.background.js`
 (service worker : PDF, page HTML supprimée, interruption) et
 `node tests/sigeo-dpe.panel.e2e.js`.
-DPE Intralia : `node tests/intralia-dpe.jsdom.js` (jsdom : décodage
+DPE extraction : `node tests/intralia-dpe.jsdom.js` (jsdom : décodage
 windows-1252, index par regex — 36 000 lignes —, normalisation, collisions,
 filtre DPE, tri « crée le », pages de connexion, contrôle du fichier
 FlowerDocs, nom de fichier, 6 cas réels anonymisés, analyse des PDF par le
 moteur Analyse DPE — n° FU, n° ADEME —, contre `tests/fixtures/intralia-mock.js`)
 et `node tests/intralia-dpe.panel.e2e.js` (vrai panneau : repérage,
 téléchargement, analyse, vérification du contenu par pdf.js, Toolbox,
-sessions expirées, cache de l'index, profils, aucun POST).
+sessions expirées, cache de l'index, profils, fichier d'entrée « immeuble +
+lots » seulement avec IM retrouvé par l'adresse dans un faux SIGEO —
+recherche d'immeubles + lot_browse sur la même origine, deux IM à la même
+adresse départagés par le lot —, aucun POST).
 Analyse DPE : `node tests/dpe-scan.node.js` (moteur : classes, n° ADEME,
 fournisseurs, rattachement, puis 5 DPE fictifs — texte, scanné, ancien,
 fournisseur inconnu, PDF sans ligne — générés par

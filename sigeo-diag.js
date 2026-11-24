@@ -1919,7 +1919,7 @@ function diagStepHtml(step, esc) {
         <div class="scn-row">
           <button class="btn sm scn-diag-preset" data-preset="default" type="button">Noms par défaut</button>
           <button class="btn sm scn-diag-preset" data-preset="analyse" type="button" title="Colonnes écrites par l'extraction « Analyse DPE »">Colonnes de l'Analyse DPE</button>
-          <button class="btn sm scn-diag-preset" data-preset="intralia" type="button" title="Fichier final de l'extraction « DPE Intralia » (colonnes + URL de la fiche)">Fichier DPE Intralia</button>
+          <button class="btn sm scn-diag-preset" data-preset="intralia" type="button" title="Fichier final de l'extraction « DPE extraction » (colonnes + URL de la fiche)">Fichier DPE extraction</button>
         </div>
       </details>
       <div class="scn-row scn-only-diag">
