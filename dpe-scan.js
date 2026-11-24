@@ -34,7 +34,7 @@ const DS_TYPE_DIAG = "Performance Energetique";
 const DS_COLS = [
   "DPE analyse", "PDF analysé", "N° FU", "Établi le", "Valable jusqu'au", "N° ADEME",
   "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES",
-  "Coût min (€/an)", "Coût max (€/an)", "Prix indexés au", "Remarques DPE"
+  "Coût min (€/an)", "Coût max (€/an)", "Remarques DPE"
 ];
 
 // Liste fournisseurs fournie par Maëlle (modifiable dans le panneau).
@@ -754,7 +754,6 @@ function dsExtract(src, rec = dsNewRecord()) {
   if (!rec.ademe && !rec.nonOfficiel) rec.remarques.push("n° ADEME non trouvé");
   if (dsCoutsUtiles(rec)) {
     if (rec.coutMin === null) rec.remarques.push("estimation des coûts non trouvée");
-    else if (!rec.prixRef) rec.remarques.push("date d'indexation des prix non trouvée");
   }
   return rec;
 }
@@ -1163,7 +1162,7 @@ function dsRecordValues(rec, fileName) {
     // trouvé » — compris tous deux par l'étape de saisie (pas de N° saisi).
     dsDateFr(rec.etabli), dsDateFr(rec.valable), rec.ademe || (rec.nonOfficiel ? "NC" : "non trouvé"),
     dsFmtNum(rec.epM2), rec.lettreEp || "", dsFmtNum(rec.gesM2), rec.lettreGes || "",
-    couts ? dsFmtNum(rec.coutMin) : "", couts ? dsFmtNum(rec.coutMax) : "", couts ? dsDateFr(rec.prixRef) : "",
+    couts ? dsFmtNum(rec.coutMin) : "", couts ? dsFmtNum(rec.coutMax) : "",
     rem.join(" ; ")
   ];
 }

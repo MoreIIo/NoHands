@@ -126,7 +126,7 @@ const DIAG_PRESETS = Object.freeze({
     date_validite: "{Valable jusqu'au}", date_debut_validite: "", numero_ademe: "{N° ADEME}", conso_ep: "{Énergie primaire (kWh/m²/an)}",
     emission_ges: "{GES (kg CO2/m²/an)}", lettre_ep_forcee: "{Classe énergie}", lettre_ges_forcee: "{Classe GES}",
     altitude_800m: "", nouvelles_valeurs: "", cout_min: "{Coût min (€/an)}", cout_max: "{Coût max (€/an)}",
-    date_prix: "{Prix indexés au}", resultat: "", commentaire: "", fichier_dpe: "{PDF analysé}", lot: "{lot}"
+    date_prix: "", resultat: "", commentaire: "", fichier_dpe: "{PDF analysé}", lot: "{lot}"
   })
 });
 
@@ -1089,7 +1089,8 @@ function diagPlan(s, v, opts = {}) {
   const couts = [["coutMin", v.coutMin, "Coût min", "num"], ["coutMax", v.coutMax, "Coût max", "num"], ["datePrix", v.datePrix, "Date d'indexation des prix", "date"]];
   if (s.couts && s.couts.visible) {
     for (const [key, want, label, kind] of couts) {
-      if (!want) { warnings.push(`bloc « coûts annuels » affiché mais ${label} vide dans les données`); continue; }
+      // Date d'indexation des prix : facultative (non écrite par l'Analyse DPE).
+      if (!want) { if (key !== "datePrix") warnings.push(`bloc « coûts annuels » affiché mais ${label} vide dans les données`); continue; }
       const f = fld(key);
       if (!f.present) { warnings.push(`champ ${label} introuvable dans le bloc coûts`); continue; }
       add({ key, label, phase: "B", kind, act: { kind: "value", id: I[key] }, want, got: f.value });

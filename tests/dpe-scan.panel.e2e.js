@@ -121,9 +121,9 @@ const ROWS = [
   const pick = (r, names) => names.map((n) => get(r, n));
   const MAIN = ["DPE analyse", "N° FU", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "N° ADEME"];
   assert.deepStrictEqual(pick(1, MAIN), ["OK", "0448957", "19/10/2022", "18/10/2032", "208", "D", "19", "C", "2275E1234567X"]);
-  assert.deepStrictEqual(pick(1, ["Coût min (€/an)", "Coût max (€/an)", "Prix indexés au", "PDF analysé"]),
-    ["1230", "1700", "01/01/2021", "IM0393664_10_DPE_2022-10-19.pdf"]);
-  for (const gone of ["Fournisseur DPE", "Fournisseur (liste)", "Type diagnostic", "Énergie primaire totale (kWh/an)", "GES total (kg CO2/an)",
+  assert.deepStrictEqual(pick(1, ["Coût min (€/an)", "Coût max (€/an)", "PDF analysé"]),
+    ["1230", "1700", "IM0393664_10_DPE_2022-10-19.pdf"]);
+  for (const gone of ["Prix indexés au", "Fournisseur DPE", "Fournisseur (liste)", "Type diagnostic", "Énergie primaire totale (kWh/an)", "GES total (kg CO2/an)",
     "Surface (m²)", "Adresse DPE", "Diagnostiqueur", "N° certification", "Lecture"]) assert.ok(!H.includes(gone), "colonne inutile à la saisie : " + gone);
   // Scan (rattaché par IM + lot), OCR Tesseract.js, SOCOTEC ≈ SOCOTECH, petite surface
   assert.deepStrictEqual(pick(2, ["DPE analyse", "N° FU", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES"]),

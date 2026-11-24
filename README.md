@@ -574,16 +574,16 @@ Colonnes écrites (créées si absentes) — **uniquement ce qui sert à la sais
 du DPE dans SIGEO** (v2.17.2) : `DPE analyse` (OK / À VÉRIFIER / ÉCHEC / Pas
 de PDF / PDF introuvable), `PDF analysé` (fichier à joindre), `N° FU`,
 `Établi le`, `Valable jusqu'au`, `N° ADEME`, `Énergie primaire (kWh/m²/an)`,
-`Classe énergie`, `GES (kg CO2/m²/an)`, `Classe GES`, `Coût min (€/an)`,
-`Coût max (€/an)` et `Prix indexés au` (date d'indexation des prix ; ces
-trois-là seulement pour un DPE établi depuis le 01/07/2021, SIGEO n'ayant pas
-d'estimation avant), et `Remarques DPE` (ce qui a fait passer la ligne
+`Classe énergie`, `GES (kg CO2/m²/an)`, `Classe GES`, `Coût min (€/an)` et
+`Coût max (€/an)` (ces deux-là seulement pour un DPE établi depuis le
+01/07/2021, SIGEO n'ayant pas d'estimation avant), et `Remarques DPE` (ce qui a fait passer la ligne
 « À VÉRIFIER » : valeur manquante, lue par OCR seule, écart étiquette /
 calcul, fournisseur rapproché ou absent de la liste — avec le nom lu…).
 Les totaux annuels, la surface, l'adresse, le diagnostiqueur et la
 certification restent lus pour les recoupements mais ne sont plus écrits.
 Le bouton « Colonnes de l'Analyse DPE » de l'étape de saisie utilise
-`{PDF analysé}` et `{Prix indexés au}`.
+`{PDF analysé}` pour le fichier ; la date d'indexation des prix est
+facultative (colonne `date_prix` vide par défaut, sans avertissement).
 
 ## 4. Onglet Export
 
@@ -734,7 +734,8 @@ par le journal et par la colonne résultat ; depuis 2.17.1 : PDF visible
 seulement après un nouvel « Enregistrer », PDF jamais visible puis relances
 sans nouvel upload).
 
-**Version** : 2.17.4 — **Saisir un DPE** : N° ADEME « NC » / non communiqué / non trouvé / 99999 accepté (rien de saisi, avertissement) ; option « confirmer avant de joindre le PDF » valable aussi sur la ligne active (décochée → PDF joint automatiquement). **Analyse DPE** : N° ADEME absent → « NC » (évaluation thermique / non émis ADEME) ou « non trouvé ».
+**Version** : 2.17.5 — **Analyse DPE** : colonne `Prix indexés au` retirée (inutile à la saisie) ; dans l'étape de saisie, la date d'indexation des prix devient facultative.
+2.17.4 — **Saisir un DPE** : N° ADEME « NC » / non communiqué / non trouvé / 99999 accepté (rien de saisi, avertissement) ; option « confirmer avant de joindre le PDF » valable aussi sur la ligne active (décochée → PDF joint automatiquement). **Analyse DPE** : N° ADEME absent → « NC » (évaluation thermique / non émis ADEME) ou « non trouvé ».
 2.17.3 — **DPE SIGEO** : si aucun DPE n'est trouvé en gérance (ou si la page est introuvable), la fiche lot **syndic** est vérifiée (`…/page.aspx/fr/sig_imm/lot_manage/syn/{IM_format}/{lot}`, champ « Repli syndic », vide = désactivé) ; nouvelle colonne `DPE source` (gérance / syndic / gérance + syndic), variable `{source}` dans les textes de statut ; la page Documents est suivie depuis une fiche lot qui contient d'autres tableaux.
 2.17.2 — **Analyse DPE** : n'écrit plus que les colonnes utiles à la saisie SIGEO (plus de totaux annuels, surface, adresse, diagnostiqueur, certification, lecture, fournisseur lu / de la liste, type) ; nouvelle colonne `Prix indexés au` ; coûts et date des prix seulement pour un DPE ≥ 01/07/2021 ; préréglage de l'étape de saisie : `{PDF analysé}`, `{Prix indexés au}`.
 2.17.1 — **SIGEO : saisir un DPE** : faux négatif de la
