@@ -381,6 +381,20 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
       assert.deepStrictEqual([fl.status, anv(fl)["DPE analyse"]], [S.FLOWERDOCS_NON_CONNECTE, "ÉCHEC"], "repérage + analyse : FlowerDocs déconnecté = arrêt");
     } finally { srv.setFlowerLogged(true); }
     assert.deepStrictEqual(intra.intraSaisieCols(ds.DS_COLS).slice(0, 4), ["DPE analyse", "PDF analysé", "N° FU", "Fournisseur DPE"]);
+    // Coûts lus par le libellé « Montant théorique des dépenses énergétiques » (Entre / et).
+    const html = `<form name="form1"><table><tr><td><b>Montant théorique des dépenses énergétiques :</b></td>
+      <td>Entre :<br><input type="text" name="MtDepMin" value="247"><br>et :<br><input type="text" name="MtDepMax" value="335"></td></tr>
+      <tr><td>Date</td><td><input name="datediag" value="17/04/2023"><input name="DPE1" value="0"><input name="MTDIAGMIN" value="0"></td></tr></table></form>`;
+    const pl = await runOp(tab, { op: "parseLot", html });
+    assert.deepStrictEqual([pl.fields.MTDIAGMIN, pl.fields.MTDIAGMAX, pl.fields.DATEDIAG, pl.fields.DPE1], ["247", "335", "17/04/2023", "0"], "libellé + nom en minuscules");
+    const pdfRec = Object.assign(ds.dsNewRecord(), { epM2: 221, coutMin: 479, coutMax: 649, etabli: { y: 2023, m: 4, d: 17 }, supplier: { entry: { name: "ACADE", code: "448957" } }, ademe: "2321E1261645S" });
+    const z = intra.intraSaisieValues({ status: "OK", chosen: { name: "x.pdf" }, fields: pl.fields, analysis: pdfRec },
+      { DS_COLS: ds.DS_COLS, dsRecordValues: ds.dsRecordValues, validity: diag.diagExpectedValidity });
+    assert.deepStrictEqual([z["Coût min (€/an)"], z["Coût max (€/an)"], z["Énergie primaire (kWh/m²/an)"]], ["247", "335", "221"], "coûts d'Intralia ; 0 dans Intralia → valeur du scan");
+    assert.ok(/énergie primaire vide dans Intralia : valeur du PDF/.test(z["Remarques DPE"]), z["Remarques DPE"]);
+    const z2 = intra.intraSaisieValues({ status: "OK", chosen: { name: "x.pdf" }, fields: { DATEDIAG: "17/04/2023", DPE1: "221", libdpe1: "D", GES1: "6", libges1: "B", MTDIAGMIN: "0", MTDIAGMAX: "0,00" }, analysis: pdfRec },
+      { DS_COLS: ds.DS_COLS, dsRecordValues: ds.dsRecordValues, validity: diag.diagExpectedValidity });
+    assert.deepStrictEqual([z2["Coût min (€/an)"], z2["Coût max (€/an)"]], ["479", "649"], "coûts à 0 dans Intralia → scan");
     assert.strictEqual(intra.intraNormalizeConfig({}).out, "saisie");
   });
 

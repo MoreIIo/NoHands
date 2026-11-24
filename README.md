@@ -608,7 +608,9 @@ DPE ») — `DPE analyse` (OK / À VÉRIFIER / Pas de PDF / ÉCHEC), `PDF analys
 - **Données du DPE = celles saisies dans Intralia** (`DATEDIAG`, kWh/m²,
   lettres, kgCO2/m², coûts min/max pour un DPE ≥ 01/07/2021). « Valable
   jusqu'au » est calculé comme SIGEO (la `datefinval` d'Intralia n'est pas
-  fiable). Champ vide dans Intralia → valeur lue dans le PDF, signalée.
+  fiable). Coûts : les cases « Montant théorique des dépenses énergétiques :
+  Entre … et … » de la page du lot. Champ vide ou à 0 dans Intralia → valeur
+  lue dans le PDF, signalée (v2.18.3).
 - **Fournisseur (→ N° FU) et N° ADEME = lus dans le PDF** (case « analyser le
   PDF », cochée par défaut ; moteur de l'Analyse DPE, texte + OCR local
   réglable). Le n° FU vient de la liste « Fournisseurs → n° FU » de l'Analyse

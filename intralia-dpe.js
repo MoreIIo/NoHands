@@ -375,7 +375,11 @@ function intraSaisieValues(res, ds) {
     ds.DS_COLS.forEach((c, k) => { pdf[c] = vals[k] ?? ""; });
   }
   const rem = [];
-  const num = (x) => String(x ?? "").trim().replace(/\s+/g, "").replace(".", ",");
+  // Vide, « 0 », « 0,00 »… = pas d'info dans Intralia → valeur du scan.
+  const num = (x) => {
+    const t = String(x ?? "").trim().replace(/\s+/g, "").replace(".", ",");
+    return /^0*(,0*)?$/.test(t) ? "" : t;
+  };
   const date = (x) => {
     const t = String(x ?? "").trim();
     const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(t);
@@ -396,8 +400,8 @@ function intraSaisieValues(res, ds) {
   const dm = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v["Établi le"]);
   const isNew = !!dm && (+dm[3] > 2021 || (+dm[3] === 2021 && +dm[2] >= 7));
   if (isNew) {
-    v["Coût min (€/an)"] = num(f.MTDIAGMIN) || pdf["Coût min (€/an)"] || "";
-    v["Coût max (€/an)"] = num(f.MTDIAGMAX) || pdf["Coût max (€/an)"] || "";
+    v["Coût min (€/an)"] = pick("Coût min (€/an)", num(f.MTDIAGMIN), "coût min");
+    v["Coût max (€/an)"] = pick("Coût max (€/an)", num(f.MTDIAGMAX), "coût max");
   }
   if (!a) rem.push("PDF non analysé : fournisseur et n° ADEME à saisir");
   else if (a.error) rem.push(`analyse du PDF impossible (${a.error}) : fournisseur et n° ADEME à saisir`);
@@ -532,7 +536,11 @@ async function intraPageOp(cfg) {
       let e = null;
       try { e = form.elements && form.elements.namedItem(n); } catch (_) { e = null; }
       if (e && !e.tagName && e.length) e = e[0];
-      return e || doc.querySelector(`[name="${n}"]`);
+      if (e) return e;
+      e = doc.querySelector(`[name="${n}"]`);
+      if (e) return e;
+      const low = n.toLowerCase(); // nom écrit avec une autre casse
+      return Array.from(doc.querySelectorAll("[name]")).find((x) => String(x.getAttribute("name")).toLowerCase() === low) || null;
     };
     // Valeur posée en JavaScript dans la page (document.form1.X.value = '…').
     const jsValue = (n) => {
@@ -574,6 +582,17 @@ async function intraPageOp(cfg) {
     f.typediag = !td || td.value === "" ? "" : td.value === "0" ? "avant le 01/07/2021" : "après le 01/07/2021";
     ["DPE1", "GES1", "DATEDIAG", "datefinval", "MTDIAGMIN", "MTDIAGMAX", "MTDIAG", "ANNEREFDIAG", "REFERENCE"]
       .forEach((n) => { const v = read(n); f[n] = v ? v.value : ""; });
+    // « Montant théorique des dépenses énergétiques : Entre [..] et [..] » :
+    // cases lues par leur libellé (ce que l'on voit à l'écran), prioritaires
+    // sur MTDIAGMIN / MTDIAGMAX.
+    const lab = Array.from(doc.querySelectorAll("td, th, label, b, strong, span, div, p"))
+      .find((x) => x.textContent.length < 120 && /montant\s+th[ée]orique\s+des\s+d[ée]penses/i.test(x.textContent) && !x.querySelector("input"));
+    if (lab) {
+      const scope = lab.closest("tr") || lab.parentElement;
+      const ins = scope ? Array.from(scope.querySelectorAll("input")).filter((i) => !/^(hidden|checkbox|radio|submit|button|image)$/i.test(i.getAttribute("type") || "")) : [];
+      const vals = ins.map((i) => norm(i.getAttribute("value") ?? ""));
+      if (ins.length >= 2 && (vals[0] || vals[1])) { f.MTDIAGMIN = vals[0]; f.MTDIAGMAX = vals[1]; }
+    }
 
     // Documents GED : chaque input.IDGED (jamais coché) → sa ligne.
     const seen = new Set();
