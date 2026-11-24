@@ -54,6 +54,11 @@ const INTRA_STATUS = Object.freeze({
   ERREUR: "ERREUR"
 });
 
+// Option « analyser le PDF » : colonnes de l'Analyse DPE (DS_COLS de
+// dpe-scan.js : N° FU, N° ADEME, Établi le…, lues par l'étape « SIGEO :
+// saisir un DPE ») + le nom du fournisseur.
+const INTRA_SUPPLIER_COL = "Fournisseur DPE";
+
 // Colonnes toujours écrites (créées si absentes).
 const INTRA_COLS = Object.freeze([
   "Intralia_Cabinet", "Intralia_ID_Immeuble", "Intralia_URL_Lot",
@@ -306,6 +311,8 @@ function intraNormalizeConfig(c = {}) {
     name: String(c.name ?? "").trim() || INTRA_DEFAULT_NAME,
     verify: !!c.verify,
     toolbox: !!c.toolbox,
+    analyze: c.analyze !== false,
+    ocr: ["auto", "always", "never"].includes(c.ocr) ? c.ocr : "auto",
     fields,
     base: intraTrimSlash(c.base) || INTRA_DEFAULT_BASE,
     flower: intraTrimSlash(c.flower) || INTRA_DEFAULT_FLOWER,
@@ -333,6 +340,26 @@ function intraRowValues(res, fieldKeys) {
     const f = INTRA_FIELDS.find((x) => x.k === k);
     if (f) v[f.col] = res.fields ? String(res.fields[k] ?? "") : "";
   }
+  return v;
+}
+
+// Colonnes de l'Analyse DPE pour un résultat (ds = { DS_COLS, dsRecordValues }
+// de dpe-scan.js) : mêmes valeurs que le type « Analyse DPE », plus le nom du
+// fournisseur. Aucun DPE retenu → « Pas de PDF » ; erreur / non connecté → vide.
+function intraAnalysisValues(res, ds) {
+  const v = {};
+  ds.DS_COLS.forEach((c) => { v[c] = ""; });
+  v[INTRA_SUPPLIER_COL] = "";
+  const S = INTRA_STATUS;
+  if ([S.AUCUN_DPE_GED, S.LOT_INTROUVABLE, S.IMMEUBLE_INTROUVABLE, S.AMBIGU].includes(res.status)) {
+    v[ds.DS_COLS[0]] = "Pas de PDF";
+    return v;
+  }
+  const a = res.analysis;
+  if (res.status !== S.OK || !res.chosen || !a) return v;
+  const vals = ds.dsRecordValues(a, res.file || res.chosen.name);
+  ds.DS_COLS.forEach((c, k) => { v[c] = vals[k] ?? ""; });
+  if (!a.error) v[INTRA_SUPPLIER_COL] = a.supplier ? a.supplier.entry.name : (a.societe || "");
   return v;
 }
 
@@ -565,12 +592,15 @@ async function intraPageOp(cfg) {
  *   fetchFile(url):      { status, contentType, disposition, bytes, via } | { error }
  *   save(bytes, path, mime): { ok, filename, error? }  (chrome.downloads)
  *   verify(bytes):       { ok, how, why }  (« performance énergétique » p. 1)
+ *   analyze(bytes, name): enregistrement de dsAnalyzeDoc (dpe-scan.js)
  *   stopped(), log(text, cls)
  * }
- * p = { idx, nom, lot, base, flower, re, download, verify, socLabel,
+ * p = { idx, nom, lot, base, flower, re, download, verify, analyze, socLabel,
  *       name(chosen, ext, res) → chemin relatif sous Téléchargements }
  * Résultat : { status (INTRA_STATUS), detail, cabinet, soc, imm, lotUrl,
- *   fields, chosen, candidates, nDocs, file, bytes?, info[], error? } */
+ *   fields, chosen, candidates, nDocs, file, analysis?, bytes?, info[], error? }
+ * L'analyse (n° FU, n° ADEME…) ne change jamais DPE_Statut : un échec
+ * d'analyse est rapporté dans res.analysis.error. */
 
 async function intraGetFile(ad, p, c) {
   const url = intraFlowerDownloadUrl(p.flower, c.uuid);
@@ -649,24 +679,40 @@ async function intraProcessRow(ad, p) {
   res.chosen = chosen;
   const others = res.candidates.length - 1;
   const okDetail = `${res.candidates.length} DPE sur ${res.nDocs} document(s) GED` + (others > 0 ? ` (autres : ${res.candidates.filter((x) => x !== chosen).map((x) => `${x.name} ${x.date}`).join(" ; ")})` : "");
-  if (!p.download) return done(S.OK, okDetail);
+  // Le PDF n'est chargé que pour l'enregistrer ou l'analyser.
+  if (!p.download && !p.analyze) return done(S.OK, okDetail);
 
   if (!file) {
     file = await intraGetFile(ad, p, chosen);
     if (file.kind === "LOGIN") return done(S.FLOWERDOCS_NON_CONNECTE, file.error, { error: file.error });
-    if (file.kind !== "PDF" && file.kind !== "OTHER") return done(S.ERREUR, file.error, { error: file.error });
+    if (file.kind !== "PDF" && file.kind !== "OTHER") {
+      if (p.download) return done(S.ERREUR, file.error, { error: file.error });
+      res.analysis = { error: file.error }; // repérage seul : DPE repéré, seule l'analyse échoue
+      return done(S.OK, okDetail);
+    }
   }
   if (file.via) res.via = file.via;
-  const path = p.name(chosen, file.ext, res);
-  let sv;
-  try { sv = await ad.save(file.bytes, path, file.mime); } catch (e) { sv = { ok: false, error: (e && e.message) || String(e) }; }
-  if (!sv || !sv.ok) {
-    const why = "enregistrement impossible : " + ((sv && sv.error) || "?");
-    return done(S.ERREUR, why, { error: why });
+  if (p.download) {
+    const path = p.name(chosen, file.ext, res);
+    let sv;
+    try { sv = await ad.save(file.bytes, path, file.mime); } catch (e) { sv = { ok: false, error: (e && e.message) || String(e) }; }
+    if (!sv || !sv.ok) {
+      const why = "enregistrement impossible : " + ((sv && sv.error) || "?");
+      return done(S.ERREUR, why, { error: why });
+    }
+    res.file = sv.filename || path.split("/").pop();
+    res.path = path;
+    res.bytes = file.bytes;
   }
-  res.file = sv.filename || path.split("/").pop();
-  res.path = path;
-  res.bytes = file.bytes;
+  if (p.analyze) {
+    if (file.kind !== "PDF") {
+      res.analysis = { error: `fichier ${file.ext || "non PDF"} : analyse impossible` };
+    } else {
+      try { res.analysis = await ad.analyze(file.bytes, res.file || chosen.name); }
+      catch (e) { res.analysis = { error: (e && e.message) || String(e) }; }
+      if (!res.analysis) res.analysis = { error: "analyse sans résultat" };
+    }
+  }
   return done(S.OK, okDetail);
 }
 
@@ -674,10 +720,10 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     INTRA_DEFAULT_BASE, INTRA_DEFAULT_FLOWER, INTRA_DEFAULT_SOC, INTRA_ALL_SOC, INTRA_DEFAULT_CABINETS,
     INTRA_DEFAULT_REGEX, INTRA_DEFAULT_NAME, INTRA_DEFAULT_FOLDER, INTRA_DEFAULT_DELAY, INTRA_DEFAULT_MAX_AGE_DAYS,
-    INTRA_STATUS, INTRA_COLS, INTRA_FIELDS,
+    INTRA_STATUS, INTRA_COLS, INTRA_FIELDS, INTRA_SUPPLIER_COL,
     intraNormName, intraNormLot, intraFold, intraIndexUrl, intraFormUrl, intraLotUrl, intraFlowerViewUrl, intraFlowerDownloadUrl,
     intraBuildIndex, intraSimilarity, intraCloseNames, intraLookup, intraCompileRegex, intraIsDpeName, intraSelectDpe,
-    intraSanitize, intraFolder, intraExtOf, intraFileName, intraClassifyFile, intraNormalizeConfig, intraRowValues, intraTemplateVars,
+    intraSanitize, intraFolder, intraExtOf, intraFileName, intraClassifyFile, intraNormalizeConfig, intraRowValues, intraTemplateVars, intraAnalysisValues,
     intraPageOp, intraGetFile, intraProcessRow
   };
 }

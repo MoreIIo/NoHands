@@ -128,8 +128,9 @@ const ROWS = [
   console.log("UI :", JSON.stringify(ui));
   assert.ok(ui.box && !ui.std && !ui.dpe, "seul le bloc Intralia est visible");
   assert.deepStrictEqual([ui.cfg.nomCol, ui.cfg.lotCol], ["Immeuble", "lots"], "colonnes devinées (jamais IM_format)");
-  assert.deepStrictEqual([ui.cfg.soc, ui.cfg.mode, ui.cfg.folder, ui.cfg.name, ui.cfg.delay, ui.cfg.verify],
-    ["19", "find", "DPE", "{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf", 400, false]);
+  assert.deepStrictEqual([ui.cfg.soc, ui.cfg.mode, ui.cfg.folder, ui.cfg.name, ui.cfg.delay, ui.cfg.verify, ui.cfg.analyze, ui.cfg.ocr],
+    ["19", "find", "DPE", "{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf", 400, false, true, "auto"]);
+  assert.ok(/^\d+ fournisseurs$/.test(await panel.textContent("#intraSupCount")), "liste fournisseurs de l'Analyse DPE");
   assert.deepStrictEqual(ui.cfg.fields, ["libdpe1", "DPE1", "libges1", "GES1", "DATEDIAG"]);
   assert.deepStrictEqual(ui.socs, ["Sicov (19)", "Tous les cabinets (100)"]);
   assert.ok(ui.warn, "avertissement « tous les cabinets » masqué");
@@ -154,14 +155,17 @@ const ROWS = [
   console.log("test :", testTxt);
   assert.ok(testTxt.startsWith("✓ Ligne 2 : SICOV imm 5004 → « dpe.pdf » du 2013-07-17 (2 DPE / 5 document(s) GED) → DPE/PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf"), testTxt);
   assert.ok(testTxt.includes("DPE saisi dans Intralia : C 105 / GES D 25, du 05/06/2012"), testTxt);
+  assert.ok(testTxt.includes("analyse OK : EXPERT IMMOBILIER (FU 0528825), ADEME 1259V1000732X, établi le 05/06/2012 → 04/06/2022, 105 kWh/m² C, 25 kg CO2/m² D"), testTxt);
   assert.strictEqual(await panel.evaluate(() => state.rows[0].length), 4, "le test n'écrit rien");
-  assert.strictEqual(saved.length, 0, "le test ne télécharge rien");
+  assert.strictEqual(saved.length, 0, "le test n'enregistre rien");
+  srv.stats.flower.length = 0;
   assert.strictEqual(srv.stats.index.length, 1);
   const socs2 = await panel.evaluate(() => Array.from($("intraSoc").options).map((o) => o.textContent));
   assert.deepStrictEqual(socs2, ["SICOV (19)", "CABINET NORD (31)", "CABINET SUD (42)", "Tous les cabinets (100)"], "liste lue dans diag.php");
   assert.ok(/Index SICOV : 14 lots, lu le/.test(await panel.textContent("#intraIdxInfo")));
 
-  // 1. Repérage seul
+  // 1. Repérage seul, sans analyse du PDF : aucun accès à FlowerDocs.
+  await panel.uncheck("#intraAnalyze");
   const run = async () => {
     await panel.click("#startBtn");
     await panel.waitForFunction(() => !isRunning && /Terminé|Arrêté/.test($("log").textContent), null, { timeout: 90000 });
@@ -208,11 +212,33 @@ const ROWS = [
   assert.strictEqual(saved.length, 0, "repérage seul : rien téléchargé");
   assert.strictEqual(srv.stats.flower.length, 0, "repérage seul : aucun GET FlowerDocs");
 
-  // 2. Repérage + téléchargement (+ Toolbox)
+  // 2. Repérage + téléchargement + analyse du PDF (+ Toolbox). OCR coupé :
+  // les DPE simulés ont une couche texte (le « DPE 2021 » n'en a pas assez).
   await panel.selectOption("#intraMode", "download");
   await panel.check("#intraToolbox");
+  await panel.check("#intraAnalyze");
+  await panel.selectOption("#intraOcr", "never");
   out = await run();
   console.log("--- journal (téléchargement) ---\n" + out.log);
+  const H2 = out.rows[0];
+  const ac = ["DPE analyse", "PDF analysé", "N° FU", "Fournisseur DPE", "N° ADEME", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "Remarques DPE"];
+  const ga = (r) => ac.map((n) => { const i = H2.indexOf(n); assert.ok(i >= 0, "colonne " + n); return out.rows[r - 1][i]; });
+  assert.strictEqual(H2.length, 4 + 15 + 14, "+ 13 colonnes « Analyse DPE » + Fournisseur DPE");
+  assert.strictEqual(H2.indexOf("Fournisseur DPE"), H2.indexOf("N° FU") + 1);
+  assert.deepStrictEqual(ga(2).slice(0, 11), ["OK", "PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf", "0528825", "EXPERT IMMOBILIER", "1259V1000732X", "05/06/2012", "04/06/2022", "105", "C", "25", "D"]);
+  assert.deepStrictEqual(ga(3).slice(0, 5), ["À VÉRIFIER", "Cour Saint-Hubert_lot130_2011-08-24.pdf", "0394076x", "DIAG 75", "1159V1000130B"]);
+  assert.deepStrictEqual(ga(4).slice(0, 5), ["À VÉRIFIER", "RESIDENCE BEAUSEJOUR_lot543_2007-09-25.pdf", "", "DIAGNOSTICS DU NORD", "non trouvé"]);
+  assert.deepStrictEqual(ga(5).slice(2, 5), ["0448957", "ACADE", "1559V1000278C"]);
+  assert.deepStrictEqual([ga(6)[0], ga(8)[0], ga(9)[0]], ["Pas de PDF", "Pas de PDF", "Pas de PDF"]);
+  assert.deepStrictEqual(ga(12), ga(2), "ligne déjà traitée : même analyse");
+  assert.deepStrictEqual([ga(13)[0], ga(13)[11]], ["ÉCHEC", "aucun texte exploitable (document vide ou scanné sans OCR)"]);
+  assert.ok(/Ligne 2 : analyse OK : EXPERT IMMOBILIER \(FU 0528825\), ADEME 1259V1000732X/.test(out.log), out.log);
+  assert.ok(/Ligne 4 : analyse À VÉRIFIER : DIAGNOSTICS DU NORD \(FU \?\), ADEME non trouvé.*fournisseur absent de la liste/.test(out.log), out.log);
+  assert.ok(/analyse des PDF : 2 OK, 2 à vérifier, 1 échec\(s\)/.test(out.log), out.log);
+  assert.ok(/Fournisseurs absents de la liste \(n° FU vide\) : DIAGNOSTICS DU NORD/.test(out.log), out.log);
+  assert.strictEqual(await panel.evaluate(() => $("dsSupAddUnknown").hidden), false);
+  const pre = await panel.evaluate(() => DIAG_PRESETS.analyse);
+  ["N° FU", "N° ADEME", "Établi le", "PDF analysé"].forEach((c) => assert.ok(Object.values(pre).some((v) => v.includes("{" + c + "}")), "colonne lue par « SIGEO : saisir un DPE » : " + c));
   assert.deepStrictEqual(saved.map((s) => [s.name, s.head, s.url, s.conflictAction, s.saveAs]), [
     ["DPE/PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf", "%PDF-", "blob:", "uniquify", false],
     ["DPE/Cour Saint-Hubert_lot130_2011-08-24.pdf", "%PDF-", "blob:", "uniquify", false],
@@ -224,7 +250,7 @@ const ROWS = [
   assert.deepStrictEqual([gl(2), gl(5), gl(6), gl(12)], ["PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf", "RÉSIDENCE CHATEAUBRIAND_lot278_2015-09-01.pdf", "", "PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf"]);
   assert.ok(/6 DPE repéré\(s\), 5 téléchargé\(s\) dans Téléchargements\/DPE/.test(out.log), out.log);
   assert.ok(/FlowerDocs : fichiers lus depuis le panneau\./.test(out.log), out.log);
-  const tb = await panel.evaluate(() => tbState.docs.map((d) => [d.name, d.pages, /PERFORMANCE ENERGETIQUE/.test(d.text)]));
+  const tb = await panel.evaluate(() => tbState.docs.map((d) => [d.name, d.pages, /performance énergétique/i.test(d.text)]));
   assert.deepStrictEqual(tb.map((d) => d[0]), saved.map((s) => s.name.split("/").pop()), "PDF ajoutés à la Toolbox");
   assert.ok(tb[0][1] === 1 && tb[0][2], "texte lu par pdf.js : " + JSON.stringify(tb[0]));
   const tbDoc = await panel.evaluate(() => { const r = tbGetDocForStep({ pdfDocMode: "match", pdfDocMatch: "{DPE_Fichier_Local}" }, state.rows[1]); return r.doc ? r.doc.name : r.error; });
@@ -240,6 +266,7 @@ const ROWS = [
   console.log("--- journal (vérification) ---\n" + out.log);
   assert.deepStrictEqual([out.rows[12][C.DPE_Statut], out.rows[12][C.DPE_Fichier], out.rows[12][C.DPE_Date_GED], out.rows[12][C.DPE_Fichier_Local]],
     ["OK", "dpe.pdf", "2016-02-02", "LES TILLEULS_lot12_2016-02-02.pdf"]);
+  assert.deepStrictEqual(ga(13).slice(0, 5), ["OK", "LES TILLEULS_lot12_2016-02-02.pdf", "0048730", "SOCOTECH", "1659V1000012D"], "analyse du DPE vérifié");
   assert.ok(/« DPE 2021\.pdf » \(2021-03-01\) écarté : « performance énergétique » absent de la page 1 \(texte du PDF\)/.test(out.log), out.log);
   assert.ok(/Ligne 13 : ✓ « dpe\.pdf » vérifié \(texte du PDF\)/.test(out.log), out.log);
   await panel.uncheck("#intraVerify");
@@ -280,13 +307,14 @@ const ROWS = [
   // 6. Profil : configuration sauvegardée / restaurée.
   const prof = await panel.evaluate(() => {
     $("intraMode").value = "download"; $("intraFolder").value = "DPE/Intralia"; $("intraSoc").value = "31";
+    $("intraAnalyze").checked = false; $("intraOcr").value = "always";
     document.querySelector('.intra-field[data-k="REFERENCE"]').checked = true;
     const c = buildProfileConfig(); applyIntraConfig({}); const def = getIntraConfig(); applyProfileConfig(c);
     const after = getIntraConfig();
-    return { kind: c.extraction.kind, after: extractKind(), def: [def.mode, def.folder, def.soc], cfg: [after.mode, after.folder, after.soc, after.fields.join(","), after.base === c.extraction.intra.base] };
+    return { kind: c.extraction.kind, after: extractKind(), def: [def.mode, def.folder, def.soc, def.analyze], cfg: [after.mode, after.folder, after.soc, after.fields.join(","), after.base === c.extraction.intra.base, after.analyze, after.ocr] };
   });
-  assert.deepStrictEqual(prof, { kind: "intraliaDpe", after: "intraliaDpe", def: ["find", "DPE", "19"],
-    cfg: ["download", "DPE/Intralia", "31", "libdpe1,DPE1,libges1,GES1,DATEDIAG,REFERENCE", true] });
+  assert.deepStrictEqual(prof, { kind: "intraliaDpe", after: "intraliaDpe", def: ["find", "DPE", "19", true],
+    cfg: ["download", "DPE/Intralia", "31", "libdpe1,DPE1,libges1,GES1,DATEDIAG,REFERENCE", true, false, "always"] });
 
   assert.deepStrictEqual(srv.stats.posts, [], "lecture seule : aucun POST vers Intralia");
   assert.deepStrictEqual(errors, [], "erreurs JS du panneau");

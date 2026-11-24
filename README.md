@@ -599,6 +599,22 @@ Windows → `_` ; extension = celle du fichier reçu). Pour les étapes
 `pdfcheck` / `pdfwrite` du scénario : cocher **ajouter les PDF téléchargés
 à la Toolbox**, puis retrouver le PDF par `{DPE_Fichier_Local}`.
 
+**Analyse du PDF** (cochée par défaut, v2.18.1) : le DPE retenu est lu par le
+moteur de l'**Analyse DPE** (`dpe-scan.js` : texte pdf.js, OCR local si la
+page est scannée — réglable : scans + valeurs manquantes / toujours la page
+DPE / sans OCR). Mêmes colonnes que l'Analyse DPE — `DPE analyse`,
+`PDF analysé`, `N° FU`, `N° ADEME`, `Établi le`, `Valable jusqu'au`,
+`Énergie primaire (kWh/m²/an)`, `Classe énergie`, `GES (kg CO2/m²/an)`,
+`Classe GES`, `Coût min/max (€/an)`, `Remarques DPE` — plus
+`Fournisseur DPE` (nom du cabinet). Le **n° FU** vient de la liste
+« Fournisseurs → n° FU » de l'Analyse DPE (fournisseurs inconnus signalés en
+fin de traitement, à ajouter avec « Ajouter les fournisseurs inconnus »). Ces
+colonnes alimentent directement l'étape « SIGEO : saisir un DPE » (préréglage
+« Analyse DPE », PDF joint retrouvé par `PDF analysé` dans le dossier
+`Téléchargements/DPE`). En *repérage seul*, le PDF est lu en mémoire sans être
+enregistré. Un échec d'analyse ne change pas `DPE_Statut` (`DPE analyse` =
+`ÉCHEC`) ; sans DPE retenu, `DPE analyse` = `Pas de PDF`.
+
 Colonnes écrites (créées si absentes) : `Intralia_Cabinet`,
 `Intralia_ID_Immeuble`, `Intralia_URL_Lot`, `DPE_Statut` (`OK` |
 `AUCUN_DPE_GED` | `LOT_INTROUVABLE` | `IMMEUBLE_INTROUVABLE` | `AMBIGU` |
@@ -607,7 +623,8 @@ Colonnes écrites (créées si absentes) : `Intralia_Cabinet`,
 DPE…), `DPE_Fichier` (nom dans la GED), `DPE_Date_GED`, `DPE_UUID`,
 `DPE_Lien_FlowerDocs`, `DPE_Fichier_Local` + les champs cochés
 (`Intralia_DPE_Classe`, `Intralia_DPE_kWh_m2`, `Intralia_GES_Classe`,
-`Intralia_GES_kgCO2_m2`, `Intralia_Date_Diag`, …).
+`Intralia_GES_kgCO2_m2`, `Intralia_Date_Diag`, …) + les colonnes de l'analyse
+du PDF (ci-dessus).
 Traitement séquentiel, pause de 300 à 500 ms entre deux lots (réglable),
 bouton ■ Arrêter, journal par ligne ; un même nom + lot n'est traité qu'une
 fois. Page de connexion Intralia → `INTRALIA_NON_CONNECTE`, arrêt avec la
@@ -805,10 +822,11 @@ contre `tests/fixtures/sigeo-dpe-mock.js`), `node tests/sigeo-dpe.background.js`
 DPE Intralia : `node tests/intralia-dpe.jsdom.js` (jsdom : décodage
 windows-1252, index par regex — 36 000 lignes —, normalisation, collisions,
 filtre DPE, tri « crée le », pages de connexion, contrôle du fichier
-FlowerDocs, nom de fichier, 6 cas réels anonymisés, contre
-`tests/fixtures/intralia-mock.js`) et `node tests/intralia-dpe.panel.e2e.js`
-(vrai panneau : repérage, téléchargement, vérification du contenu par pdf.js,
-Toolbox, sessions expirées, cache de l'index, profils, aucun POST).
+FlowerDocs, nom de fichier, 6 cas réels anonymisés, analyse des PDF par le
+moteur Analyse DPE — n° FU, n° ADEME —, contre `tests/fixtures/intralia-mock.js`)
+et `node tests/intralia-dpe.panel.e2e.js` (vrai panneau : repérage,
+téléchargement, analyse, vérification du contenu par pdf.js, Toolbox,
+sessions expirées, cache de l'index, profils, aucun POST).
 Analyse DPE : `node tests/dpe-scan.node.js` (moteur : classes, n° ADEME,
 fournisseurs, rattachement, puis 5 DPE fictifs — texte, scanné, ancien,
 fournisseur inconnu, PDF sans ligne — générés par

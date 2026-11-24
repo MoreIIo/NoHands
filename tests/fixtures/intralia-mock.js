@@ -37,7 +37,29 @@ const IMMS = [
 ];
 
 // Contenu des fichiers GED (texte de la page 1 du PDF généré).
-const DPE_TEXT = ["DIAGNOSTIC DE PERFORMANCE ENERGETIQUE (logement)", "Etabli le : 05/06/2012", "Adresse : 12 rue des Musiciens 59000 LILLE", "Consommation conventionnelle : 105 kWh/m2/an"];
+// DPE au format « ancien » (2006-2021, texte seul) lu par l'Analyse DPE
+// (dpe-scan.js) : n° ADEME, dates, cabinet (→ n° FU par la liste), conso, GES.
+const thousands = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+const dpe = (o) => [
+  "Diagnostic de performance énergétique - logement (6.A)",
+  ...(o.ademe ? [`N° : ${o.ademe}`] : []),
+  `Valable jusqu'au : ${o.valable}`,
+  "Type de bâtiment : appartement",
+  "Année de construction : 1930",
+  "Surface habitable : 52 m²",
+  "Adresse : 12 rue des Musiciens 59000 LILLE",
+  `Date de visite : ${o.etabli}`,
+  `Date d'établissement : ${o.etabli}`,
+  `Diagnostiqueur : ${o.diag || "Jean TESTEUR"}`,
+  `Cabinet : ${o.cabinet}`,
+  "Consommations annuelles par énergie",
+  "obtenues par la méthode 3CL-DPE, version 2012, estimées au logement, prix moyens des énergies indexés au 15/08/2011",
+  `Consommations d'énergie pour les usages recensés   ${thousands(Math.round(o.ep * 52 / 1.8))},00   ${thousands(o.ep * 52)},00   ${o.cout || "574,00"} €`,
+  `Consommation conventionnelle : ${o.ep} kWhEP/m².an`,
+  `Estimation des émissions : ${o.ges} kg éqCO2/m².an`,
+  "Logement économe                                   Logement énergivore"
+];
+const DPE_TEXT = dpe({ ademe: "1259V1000732X", etabli: "05/06/2012", valable: "04/06/2022", ep: 105, ges: 25, cabinet: "EXPERT IMMOBILIER" });
 const CHAUD_TEXT = ["RAPPORT D'ENTRETIEN DE CHAUDIERE GAZ", "Intervention du technicien le 01/03/2021", "Controle de combustion et nettoyage du bruleur", "Attestation d'entretien annuel"];
 
 // Pages des lots : formulaire DPE (form1) + documents GED [nom, date « crée le », uuid, contenu].
@@ -46,21 +68,24 @@ const LOTS = {
     form: { libdpe1: "C", DPE1: "105", libges1: "JS:D", GES1: "25", typediag: "0", DATEDIAG: "05/06/2012", datefinval: "31/12/2012", MTDIAGMIN: "", MTDIAGMAX: "", MTDIAG: "574", ANNEREFDIAG: "2010", REFERENCE: "1032/5004/0732" },
     docs: [
       ["entretien chaudière 2020.pdf", "2020-01-10", U(1), CHAUD_TEXT],
-      ["dpe.pdf", "2013-07-17", U(2), DPE_TEXT],
+      ["dpe.pdf", "2013-07-17", U(2), DPE_TEXT],                       // EXPERT IMMOBILIER → FU 0528825
       ["EDL entrée.pdf", "2012-09-01", U(3), CHAUD_TEXT],
-      ["DPE ancien.pdf", "2009-05-02", U(4), DPE_TEXT],
+      ["DPE ancien.pdf", "2009-05-02", U(4), dpe({ ademe: "0959V1000111A", etabli: "02/05/2009", valable: "01/05/2019", ep: 160, ges: 30, cabinet: "ACDI" })],
       ["photo façade.png", "2014-02-02", U(5), null]
     ]
   },
-  "19/5305/130": { docs: [["DURAND_928_24.08.11_DP.pdf", "2011-08-24", U(6), DPE_TEXT], ["additif bail.doc", "2015-01-01", U(7), null]] },
-  "19/49/543": { docs: [["dpedupontmarie.pdf", "2007-09-25", U(8), DPE_TEXT], ["courrier.msg", "2010-01-01", U(9), null]] },
+  "19/5305/130": { docs: [["DURAND_928_24.08.11_DP.pdf", "2011-08-24", U(6), dpe({ ademe: "1159V1000130B", etabli: "24/08/2011", valable: "23/08/2021", ep: 230, ges: 40, cabinet: "DIAG 75" })], ["additif bail.doc", "2015-01-01", U(7), null]] },
+  // DPE de 2007 : pas de n° ADEME, cabinet absent de la liste des fournisseurs.
+  "19/49/543": { docs: [["dpedupontmarie.pdf", "2007-09-25", U(8), dpe({ etabli: "20/09/2007", valable: "19/09/2017", ep: 280, ges: 60, cabinet: "DIAGNOSTICS DU NORD" })], ["courrier.msg", "2010-01-01", U(9), null]] },
   "19/5762/278": {
-    docs: [["MARTIN_DPE.pdf", "2015-09-01", U(10), DPE_TEXT], ["MARTIN_DPE.pdf", "2015-09-01", U(11), DPE_TEXT], ["diagnostic gaz.pdf", "2016-01-01", U(12), CHAUD_TEXT]]
+    docs: [["MARTIN_DPE.pdf", "2015-09-01", U(10), dpe({ ademe: "1559V1000278C", etabli: "01/09/2015", valable: "31/08/2025", ep: 180, ges: 30, cabinet: "ACADE" })],
+      ["MARTIN_DPE.pdf", "2015-09-01", U(11), dpe({ ademe: "1559V1000278C", etabli: "01/09/2015", valable: "31/08/2025", ep: 180, ges: 30, cabinet: "ACADE" })],
+      ["diagnostic gaz.pdf", "2016-01-01", U(12), CHAUD_TEXT]]
   },
   "19/175/9": { docs: [] },
   "19/242/211": { docs: [["entretien chaudiere 2019.pdf", "2019-10-10", U(13), CHAUD_TEXT], ["additif bail.msg", "2018-03-03", U(14), null]] },
-  "19/600/12": { docs: [["DPE 2021.pdf", "2021-03-01", U(15), CHAUD_TEXT], ["dpe.pdf", "2016-02-02", U(16), DPE_TEXT]] },
-  "19/610/5": { docs: [["Diagnostic de performance énergétique.pdf", "2019-04-04", U(17), DPE_TEXT]] }
+  "19/600/12": { docs: [["DPE 2021.pdf", "2021-03-01", U(15), CHAUD_TEXT], ["dpe.pdf", "2016-02-02", U(16), dpe({ ademe: "1659V1000012D", etabli: "02/02/2016", valable: "01/02/2026", ep: 120, ges: 15, cabinet: "SOCOTECH" })]] },
+  "19/610/5": { docs: [["Diagnostic de performance énergétique.pdf", "2019-04-04", U(17), dpe({ ademe: "1959V1000005E", etabli: "04/04/2019", valable: "03/04/2029", ep: 95, ges: 12, cabinet: "PROTECH" })]] }
 };
 
 // Les 6 cas réels attendus (anonymisés), cabinet Sicov (19).
@@ -179,9 +204,9 @@ function unknownLotPage() {
   return `<!DOCTYPE html><html><head><title>Lot</title></head><body><p>Lot inconnu.</p></body></html>`;
 }
 
-// PDF minimal (une page, Helvetica, texte ASCII).
+// PDF minimal (une page, Helvetica, texte windows-1252).
 function makePdf(lines) {
-  const content = "BT /F1 12 Tf 50 750 Td " + lines.map((l, i) => (i ? "0 -16 Td " : "") + "(" + l.replace(/[\\()]/g, "\\$&") + ") Tj").join(" ") + " ET";
+  const content = "BT /F1 9 Tf 40 780 Td " + lines.map((l, i) => (i ? "0 -13 Td " : "") + "(" + l.replace(/[\\()]/g, "\\$&") + ") Tj").join(" ") + " ET";
   const objs = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -195,7 +220,7 @@ function makePdf(lines) {
   const xref = out.length;
   out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n` + offs.map((o) => String(o).padStart(10, "0") + " 00000 n \n").join("");
   out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
-  return Buffer.from(out, "latin1");
+  return enc1252(out);
 }
 
 function docByUuid(uuid) {
@@ -271,4 +296,4 @@ async function start() {
   };
 }
 
-module.exports = { start, CAB, IMMS, LOTS, U, REAL_CASES, DPE_TEXT, CHAUD_TEXT, enc1252, diagHtml, diagFormPage, lotHtml, loginPage, unknownLotPage, makePdf };
+module.exports = { start, CAB, IMMS, LOTS, U, REAL_CASES, DPE_TEXT, CHAUD_TEXT, dpe, enc1252, diagHtml, diagFormPage, lotHtml, loginPage, unknownLotPage, makePdf };

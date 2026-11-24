@@ -5,9 +5,20 @@
 // le faux serveur tests/fixtures/intralia-mock.js, pages en windows-1252) ;
 // le téléchargement FlowerDocs passe par le même faux serveur.
 const assert = require("assert");
+const path = require("path");
 const { JSDOM } = require("jsdom");
 const intra = require("../intralia-dpe.js");
+const ds = require("../dpe-scan.js");
 const mock = require("./fixtures/intralia-mock.js");
+const pdfjs = require(path.join(__dirname, "..", "lib/pdf.min.js"));
+pdfjs.GlobalWorkerOptions.workerSrc = path.join(__dirname, "..", "lib/pdf.worker.min.js");
+const SUPPLIERS = ds.dsParseSuppliers(ds.DS_DEFAULT_SUPPLIERS).entries;
+// Analyse du PDF par le vrai moteur « Analyse DPE » (texte pdf.js, sans OCR).
+async function analyzeReal(bytes) {
+  const r = await ds.dsReadPdf(pdfjs, bytes.slice());
+  try { return await ds.dsAnalyzeDoc(r.pages, null, { ocr: "never", suppliers: SUPPLIERS }); }
+  finally { r.doc.destroy(); }
+}
 
 let failures = 0;
 async function check(name, fn) {
@@ -188,8 +199,9 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
 
   await check("configuration par défaut (profils / stockage)", async () => {
     const c = intra.intraNormalizeConfig({});
-    assert.deepStrictEqual([c.soc, c.mode, c.folder, c.name, c.regex, c.verify, c.delay, c.maxAgeDays, c.base, c.flower],
-      ["19", "find", "DPE", "{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf", intra.INTRA_DEFAULT_REGEX, false, 400, 7, "https://intralia.oralia.local", "https://www.oralia.flowerdocs.cloud"]);
+    assert.deepStrictEqual([c.soc, c.mode, c.folder, c.name, c.regex, c.verify, c.delay, c.maxAgeDays, c.base, c.flower, c.analyze, c.ocr],
+      ["19", "find", "DPE", "{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf", intra.INTRA_DEFAULT_REGEX, false, 400, 7, "https://intralia.oralia.local", "https://www.oralia.flowerdocs.cloud", true, "auto"]);
+    assert.deepStrictEqual([intra.intraNormalizeConfig({ analyze: false, ocr: "never" }).analyze, intra.intraNormalizeConfig({ ocr: "x" }).ocr], [false, "auto"]);
     assert.deepStrictEqual(c.fields, ["libdpe1", "DPE1", "libges1", "GES1", "DATEDIAG"]);
     const d = intra.intraNormalizeConfig({ mode: "download", folder: "", fields: ["REFERENCE", "inconnu"], soc: "100", base: "https://x.local/", delay: "0" });
     assert.deepStrictEqual([d.mode, d.folder, d.fields, d.soc, d.base, d.delay], ["download", "", ["REFERENCE"], "100", "https://x.local", 0]);
@@ -206,7 +218,8 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
         return { status: r.status, contentType: r.headers.get("content-type") || "", disposition: r.headers.get("content-disposition") || "", bytes: new Uint8Array(await r.arrayBuffer()) };
       },
       save: async (bytes, path) => { saved.push({ path, head: Buffer.from(bytes.subarray(0, 5)).toString("latin1") }); return { ok: true, filename: path.split("/").pop() }; },
-      verify: async (bytes) => ({ ok: /PERFORMANCE ENERGETIQUE/.test(pdfText(bytes)), how: "texte", why: "absent" }),
+      verify: async (bytes) => ({ ok: /performance [ée]nerg/i.test(pdfText(bytes)), how: "texte", why: "absent" }),
+      analyze: (bytes) => analyzeReal(bytes),
       stopped: () => false, log: () => {}
     }, over);
   }
@@ -302,6 +315,51 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
     const custom = intra.intraCompileRegex("additif").re; // .doc → enregistré tel quel
     const o = await intra.intraProcessRow(adapter(), params("COUR SAINT-HUBERT", "130", { re: custom }));
     assert.deepStrictEqual([o.status, o.file], ["OK", "COUR SAINT-HUBERT_lot130_2015-01-01.doc"]);
+  });
+
+  const anv = (res) => intra.intraAnalysisValues(res, ds);
+  await check("analyse du PDF (moteur Analyse DPE) : fournisseur → n° FU, n° ADEME, dates, conso, GES", async () => {
+    saved.length = 0;
+    const res = await intra.intraProcessRow(adapter(), params("PARC FLEURI LE CONCERTO 1", "732", { analyze: true }));
+    assert.strictEqual(res.status, "OK");
+    const v = anv(res);
+    assert.deepStrictEqual(Object.keys(v), [...ds.DS_COLS, intra.INTRA_SUPPLIER_COL]);
+    assert.deepStrictEqual(
+      ["DPE analyse", "PDF analysé", "N° FU", "Fournisseur DPE", "N° ADEME", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES"].map((c) => v[c]),
+      ["OK", "PARC FLEURI LE CONCERTO 1_lot732_2013-07-17.pdf", "0528825", "EXPERT IMMOBILIER", "1259V1000732X", "05/06/2012", "04/06/2022", "105", "C", "25", "D"]);
+    assert.strictEqual(saved.length, 1, "enregistré puis analysé");
+    // DPE de 2007 : pas de n° ADEME, cabinet absent de la liste → à vérifier, nom du cabinet conservé.
+    const b = anv(await intra.intraProcessRow(adapter(), params("RESIDENCE BEAUSEJOUR", "543", { analyze: true })));
+    assert.deepStrictEqual([b["DPE analyse"], b["N° FU"], b["Fournisseur DPE"], b["N° ADEME"]], ["À VÉRIFIER", "", "DIAGNOSTICS DU NORD", "non trouvé"]);
+    assert.ok(/fournisseur absent de la liste : « DIAGNOSTICS DU NORD »/.test(b["Remarques DPE"]), b["Remarques DPE"]);
+    const d = anv(await intra.intraProcessRow(adapter(), params("COUR SAINT-HUBERT", "130", { analyze: true })));
+    assert.deepStrictEqual([d["N° FU"], d["Fournisseur DPE"], d["N° ADEME"]], ["0394076x", "DIAG 75", "1159V1000130B"]);
+  });
+
+  await check("repérage seul + analyse : PDF lu en mémoire, jamais enregistré", async () => {
+    saved.length = 0;
+    const n0 = srv.stats.flower.length;
+    const res = await intra.intraProcessRow(adapter(), params("RESIDENCE CHATEAUBRIAND", "278", { download: false, analyze: true }));
+    const v = anv(res);
+    assert.deepStrictEqual([res.status, res.file, v["PDF analysé"], v["N° FU"], v["N° ADEME"]], ["OK", "", "MARTIN_DPE.pdf", "0448957", "1559V1000278C"]);
+    assert.strictEqual(saved.length, 0);
+    assert.strictEqual(srv.stats.flower.length, n0 + 1, "un seul GET FlowerDocs");
+  });
+
+  await check("analyse : un échec ne change pas DPE_Statut ; « Pas de PDF » sans DPE", async () => {
+    const boom = await intra.intraProcessRow(adapter({ analyze: async () => { throw new Error("PDF illisible"); } }), params("PARC FLEURI LE CONCERTO 1", "732", { analyze: true }));
+    const v = anv(boom);
+    assert.deepStrictEqual([boom.status, v["DPE analyse"], v["Remarques DPE"], v["Fournisseur DPE"]], ["OK", "ÉCHEC", "PDF illisible", ""]);
+    const notPdf = await intra.intraProcessRow(adapter(), params("COUR SAINT-HUBERT", "130", { analyze: true, re: intra.intraCompileRegex("additif").re }));
+    assert.deepStrictEqual([notPdf.status, anv(notPdf)["DPE analyse"]], ["OK", "ÉCHEC"], "fichier .doc : enregistré, analyse impossible");
+    const none = await intra.intraProcessRow(adapter(), params("OPERA", "9", { analyze: true }));
+    assert.strictEqual(anv(none)["DPE analyse"], "Pas de PDF");
+    assert.strictEqual(anv(await intra.intraProcessRow(adapter(), params("LES ACACIAS", "3", { analyze: true })))["DPE analyse"], "Pas de PDF");
+    srv.setFlowerLogged(false);
+    try {
+      const fl = await intra.intraProcessRow(adapter(), params("PARC FLEURI LE CONCERTO 1", "732", { download: false, analyze: true }));
+      assert.deepStrictEqual([fl.status, anv(fl)["DPE analyse"]], [S.FLOWERDOCS_NON_CONNECTE, ""], "repérage + analyse : FlowerDocs déconnecté = arrêt");
+    } finally { srv.setFlowerLogged(true); }
   });
 
   await check("performance : 36 000 lignes parsées par regex", async () => {

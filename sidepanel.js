@@ -4069,6 +4069,8 @@ function getIntraConfig() {
     name: $("intraName").value,
     verify: $("intraVerify").checked,
     toolbox: $("intraToolbox").checked,
+    analyze: $("intraAnalyze").checked,
+    ocr: $("intraOcr").value,
     fields: Array.from(document.querySelectorAll(".intra-field:checked")).map((i) => i.dataset.k),
     base: $("intraBase").value,
     flower: $("intraFlower").value,
@@ -4091,6 +4093,9 @@ function applyIntraConfig(raw) {
   $("intraName").value = c.name;
   $("intraVerify").checked = c.verify;
   $("intraToolbox").checked = c.toolbox;
+  $("intraAnalyze").checked = c.analyze;
+  $("intraOcr").value = c.ocr;
+  intraRenderSupCount();
   intraRenderFields(c.fields);
   $("intraBase").value = c.base;
   $("intraFlower").value = c.flower;
@@ -4332,6 +4337,41 @@ async function intraAddToToolbox(name, bytes) {
   tbRenderDocs();
 }
 
+function intraRenderSupCount(parsed) {
+  const el = $("intraSupCount");
+  if (!el) return;
+  const p = parsed || dsParseSuppliers($("dsSuppliers").value);
+  el.textContent = `${p.entries.length} fournisseur${p.entries.length > 1 ? "s" : ""}`;
+  $("intraOcr").disabled = !$("intraAnalyze").checked;
+}
+
+// Analyse du PDF retenu, comme le type « Analyse DPE » (dpe-scan.js) :
+// texte pdf.js, OCR local si besoin, fournisseur → n° FU par la liste.
+async function intraAnalyzePdf(bytes, cfg, suppliers) {
+  if (!window.pdfjsLib) throw new Error("pdf.js non chargé (lib/pdf.min.js manquant)");
+  const r = await dsReadPdf(pdfjsLib, bytes.slice()); // copie : pdf.js détache le buffer
+  const io = { stopped: () => stopRequested, ocr: (i, zone) => dsOcrPage({ pdf: r.doc }, i, zone) };
+  try { return await dsAnalyzeDoc(r.pages, io, { ocr: cfg.ocr, suppliers }); }
+  finally { try { r.doc.destroy(); } catch (_) { /* ignoré */ } }
+}
+
+// Colonnes « Analyse DPE » écrites par ce type (+ « Fournisseur DPE » après « N° FU »).
+function intraAnalysisCols() {
+  const cols = DS_COLS.slice();
+  cols.splice(cols.indexOf("N° FU") + 1, 0, INTRA_SUPPLIER_COL);
+  return cols;
+}
+
+// Résumé de l'analyse pour le journal / le test.
+function intraAnalysisText(res, v) {
+  const a = res.analysis;
+  if (!a) return "";
+  if (a.error) return `analyse : ÉCHEC — ${a.error}`;
+  return `analyse ${v["DPE analyse"]} : ${v[INTRA_SUPPLIER_COL] || "fournisseur ?"} (${v["N° FU"] ? "FU " + v["N° FU"] : "FU ?"}), ` +
+    `ADEME ${v["N° ADEME"] || "?"}, établi le ${v["Établi le"] || "?"} → ${v["Valable jusqu'au"] || "?"}, ` +
+    `${v["Énergie primaire (kWh/m²/an)"] || "?"} kWh/m² ${v["Classe énergie"] || ""}, ${v["GES (kg CO2/m²/an)"] || "?"} kg CO2/m² ${v["Classe GES"] || ""}`;
+}
+
 function intraParams(cfg, row, idx, re) {
   const folder = intraFolder(cfg.folder);
   return {
@@ -4339,19 +4379,20 @@ function intraParams(cfg, row, idx, re) {
     nom: getCellByIndex(row, colIndexByName(cfg.nomCol)).trim(),
     lot: getCellByIndex(row, colIndexByName(cfg.lotCol)).trim(),
     base: cfg.base, flower: cfg.flower,
-    download: cfg.mode === "download", verify: cfg.verify,
+    download: cfg.mode === "download", verify: cfg.verify, analyze: cfg.analyze,
     socLabel: intraSocLabel(cfg.soc),
     name: (c, ext, res) => (folder ? folder + "/" : "") +
       intraFileName(cfg.name, intraTemplateVars(c, res), (s) => resolveRowTemplate(s, row), ext)
   };
 }
 
-function intraAdapter(cfg, tabId) {
+function intraAdapter(cfg, tabId, suppliers) {
   return {
     intra: (c) => intraExec(tabId, c),
     fetchFile: (url) => intraFetchFile(url, cfg.flower),
     save: (bytes, path, mime) => intraSaveBytes(bytes, path, mime),
     verify: (bytes) => intraVerifyDpe(bytes),
+    analyze: (bytes) => intraAnalyzePdf(bytes, cfg, suppliers || []),
     stopped: () => stopRequested,
     log: (t, c) => logLine(t, c)
   };
@@ -4373,11 +4414,12 @@ function intraEstimateText() {
     keys.add(intraNormName(nom) + "|" + intraNormLot(lot));
   }
   if (!n) return "";
-  const per = 700 + cfg.delay + (cfg.mode === "download" ? 1500 : 0) + (cfg.verify ? 2500 : 0);
+  const per = 700 + cfg.delay + (cfg.mode === "download" || cfg.analyze ? 1500 : 0) + (cfg.verify ? 2500 : 0) + (cfg.analyze ? 2000 : 0);
   const loaded = intraIdxMem && intraIdxMem.soc === cfg.soc && intraIdxMem.base === cfg.base && !intraIdxStale(intraIdxMem, cfg);
   const idxMs = loaded ? 0 : cfg.soc === INTRA_ALL_SOC ? 100000 : 15000;
   return `Estimation : ${n} lot${n > 1 ? "s" : ""} (${keys.size} différent${keys.size > 1 ? "s" : ""}) → ~${formatDuration(keys.size * per + idxMs)}` +
-    (idxMs ? " (index compris, s'il n'est pas en cache)" : "") + ".";
+    (idxMs ? " (index compris, s'il n'est pas en cache)" : "") +
+    (cfg.analyze ? ", +20 à 60 s par DPE scanné (OCR)" : "") + ".";
 }
 
 async function runIntraExtraction() {
@@ -4402,9 +4444,13 @@ async function runIntraExtraction() {
   $("stopBtn").disabled = false;
   $("log").innerHTML = "";
   runLog = [];
-  lastRunOutputs = [{ col: "DPE_Statut" }, { col: "Intralia_ID_Immeuble" }, { col: "DPE_Fichier" }, { col: "DPE_Date_GED" }, { col: "DPE_Fichier_Local" }];
+  lastRunOutputs = [{ col: "DPE_Statut" }, { col: "Intralia_ID_Immeuble" }, { col: "DPE_Fichier" }, { col: "DPE_Date_GED" }, { col: "DPE_Fichier_Local" }]
+    .concat(cfg.analyze ? [{ col: "N° FU" }, { col: "N° ADEME" }] : []);
   const total = Math.max(0, endIdx - startIdx + 1);
   let done = 0, nOk = 0, nDl = 0, viaSeen = false;
+  const anCounts = { OK: 0, "À VÉRIFIER": 0, "ÉCHEC": 0 };
+  const sup = cfg.analyze ? dsParseSuppliers($("dsSuppliers").value) : null;
+  if (cfg.analyze) dsUnknownSuppliers.clear();
   const runStart = Date.now();
   runDurationMs = 0;
   setProgress(0, total);
@@ -4426,7 +4472,10 @@ async function runIntraExtraction() {
     updateDoneMarkers();
   };
   const socTxt = `${intraSocLabel(cfg.soc)} (${cfg.soc})`;
-  logLine(`DPE Intralia — ${download ? "repérage + téléchargement" : "repérage seul"}${cfg.verify ? " + vérification du contenu" : ""}, cabinet ${socTxt}, ${total} ligne(s).`, "");
+  logLine(`DPE Intralia — ${download ? "repérage + téléchargement" : "repérage seul"}${cfg.verify ? " + vérification du contenu" : ""}` +
+    `${cfg.analyze ? ` + analyse du PDF (${{ auto: "OCR auto", always: "OCR de chaque page DPE", never: "sans OCR" }[cfg.ocr]}, ${sup.entries.length} fournisseur(s) dans la liste)` : ""}` +
+    `, cabinet ${socTxt}, ${total} ligne(s).`, "");
+  if (sup && sup.warnings.length) logLine("Liste fournisseurs : ⚠ " + sup.warnings.join(" ; "), "skip");
 
   // 1. Index des immeubles (une seule fois par traitement).
   logLine(`Index ${socTxt} : chargement…${cfg.soc === INTRA_ALL_SOC ? " (tous les cabinets : ~2 min si pas en cache)" : ""}`, "");
@@ -4448,12 +4497,12 @@ async function runIntraExtraction() {
 
   // 2. Colonnes de sortie (créées si absentes).
   const createdCols = {};
-  const outCols = INTRA_COLS.concat(cfg.fields.map((k) => INTRA_FIELDS.find((f) => f.k === k).col));
+  const outCols = INTRA_COLS.concat(cfg.fields.map((k) => INTRA_FIELDS.find((f) => f.k === k).col), cfg.analyze ? intraAnalysisCols() : []);
   const colIdx = {};
   outCols.forEach((c) => { colIdx[c] = resolveOutputTarget(c, createdCols); });
   if (Object.keys(createdCols).length) renderColumns();
 
-  const ad = intraAdapter(cfg, tabId);
+  const ad = intraAdapter(cfg, tabId, sup ? sup.entries : []);
   const cache = new Map(); // même nom + lot → traité une seule fois
   const LOOKUP_ONLY = [INTRA_STATUS.AMBIGU, INTRA_STATUS.LOT_INTROUVABLE, INTRA_STATUS.IMMEUBLE_INTROUVABLE];
 
@@ -4485,10 +4534,18 @@ async function runIntraExtraction() {
       delete res.bytes; // libère la mémoire
     }
     const vals = intraRowValues(res, cfg.fields);
+    if (cfg.analyze) Object.assign(vals, intraAnalysisValues(res, { DS_COLS, dsRecordValues }));
     outCols.forEach((c) => setCellByIndex(row, colIdx[c], vals[c] ?? ""));
+    const an = cfg.analyze && res.analysis ? res.analysis : null;
+    const anStatus = an ? vals["DPE analyse"] : "";
+    if (an && !cached) {
+      anCounts[anStatus] = (anCounts[anStatus] || 0) + 1;
+      if (!an.error && !an.supplier && an.societe) dsUnknownSuppliers.add(an.societe);
+    }
     if (!cached) (res.info || []).forEach((w) => logLine(`Ligne ${rowNum} : ${/ vérifié \(/.test(w) ? "✓" : "⚠"} ${w}`, / vérifié \(/.test(w) ? "" : "skip"));
     if (res.via && !viaSeen) { viaSeen = true; logLine(`FlowerDocs : fichiers lus depuis ${res.via}.`, ""); }
-    const recap = [vals.DPE_Statut, vals.Intralia_ID_Immeuble, vals.DPE_Fichier, vals.DPE_Date_GED, vals.DPE_Fichier_Local];
+    const recap = [vals.DPE_Statut, vals.Intralia_ID_Immeuble, vals.DPE_Fichier, vals.DPE_Date_GED, vals.DPE_Fichier_Local]
+      .concat(cfg.analyze ? [vals["N° FU"] || "", vals["N° ADEME"] || ""] : []);
     const again = cached ? " [déjà traité plus haut]" : "";
     if (res.status === INTRA_STATUS.OK) {
       nOk++;
@@ -4496,7 +4553,11 @@ async function runIntraExtraction() {
       const c = res.chosen;
       logLine(`Ligne ${rowNum} (${search}) : OK — ${res.cabinet} imm ${res.imm} → « ${c.name} » du ${c.date || "?"}` +
         `${res.file ? " → " + res.file : ""} (${res.candidates.length} DPE / ${res.nDocs} doc. GED)${again}`, "ok");
-      runLog.push({ row: rowNum, search, values: recap, status: "ok" });
+      if (an) {
+        const bad = anStatus !== "OK";
+        logLine(`Ligne ${rowNum} : ${intraAnalysisText(res, vals)}${bad && !an.error && vals["Remarques DPE"] ? " — " + vals["Remarques DPE"] : ""}`, bad ? (an.error ? "err" : "skip") : "ok");
+      }
+      runLog.push({ row: rowNum, search, values: recap, status: "ok", check: !!an && anStatus !== "OK" });
     } else if (res.status === INTRA_STATUS.AUCUN_DPE_GED) {
       logLine(`Ligne ${rowNum} (${search}) : AUCUN_DPE_GED — ${res.detail}${again}`, "skip");
       runLog.push({ row: rowNum, search, values: recap, status: "skip", label: "Aucun DPE GED" });
@@ -4524,7 +4585,12 @@ async function runIntraExtraction() {
   }
 
   finish(`Terminé en ${formatDuration(Date.now() - runStart)} — ${nOk} DPE repéré(s)` +
-    (download ? `, ${nDl} téléchargé(s) dans Téléchargements/${intraFolder(cfg.folder) || ""}` : "") + ".", "ok");
+    (download ? `, ${nDl} téléchargé(s) dans Téléchargements/${intraFolder(cfg.folder) || ""}` : "") +
+    (cfg.analyze ? ` ; analyse des PDF : ${anCounts.OK || 0} OK, ${anCounts["À VÉRIFIER"] || 0} à vérifier, ${anCounts["ÉCHEC"] || 0} échec(s)` : "") + ".", "ok");
+  if (cfg.analyze && dsUnknownSuppliers.size) {
+    logLine(`Fournisseurs absents de la liste (n° FU vide) : ${[...dsUnknownSuppliers].join(", ")} — ajoute-les avec leur n° FU dans « Analyse DPE » → Fournisseurs → n° FU (bouton « Ajouter les fournisseurs inconnus »).`, "skip");
+    $("dsSupAddUnknown").hidden = false;
+  }
 }
 
 // Interface
@@ -4535,6 +4601,7 @@ $("intraSoc").addEventListener("change", () => {
 });
 ["intraNomCol", "intraLotCol"].forEach((id) => $(id).addEventListener("change", () => { intraColsTouched = true; updateExtractEstimate(); }));
 ["intraDelay", "intraVerify", "intraMaxAge"].forEach((id) => $(id).addEventListener("change", updateExtractEstimate));
+$("intraAnalyze").addEventListener("change", () => { intraRenderSupCount(); updateExtractEstimate(); });
 ["intraBase", "intraMaxAge"].forEach((id) => $(id).addEventListener("change", () => intraShowIdxInfo()));
 $("intraMode").addEventListener("change", () => {
   if ($("intraMode").value === "download") requestDownloadsPermission();
@@ -4624,13 +4691,17 @@ $("intraTestBtn").addEventListener("click", async () => {
     p.download = false; // le test ne télécharge ni n'écrit rien
     if (!p.nom || !p.lot) return fail(`Ligne ${startIdx + 1} : nom d'immeuble ou n° de lot vide.`);
     out.textContent = `Ligne ${startIdx + 1} (${p.nom} / lot ${p.lot})…`;
-    const res = await intraProcessRow(intraAdapter(cfg, tabId), p);
+    const res = await intraProcessRow(intraAdapter(cfg, tabId, cfg.analyze ? dsParseSuppliers($("dsSuppliers").value).entries : []), p);
     const c = res.chosen;
     let txt = res.status === INTRA_STATUS.OK
       ? `✓ Ligne ${startIdx + 1} : ${res.cabinet} imm ${res.imm} → « ${c.name} » du ${c.date || "?"} (${res.candidates.length} DPE / ${res.nDocs} document(s) GED) → ${p.name(c, intraExtOf(c.name) || ".pdf", res)}`
       : `${[INTRA_STATUS.ERREUR, INTRA_STATUS.INTRALIA_NON_CONNECTE, INTRA_STATUS.FLOWERDOCS_NON_CONNECTE].includes(res.status) ? "✗" : "⚠"} Ligne ${startIdx + 1} : ${res.status} — ${res.detail}`;
     const f = res.fields;
     if (f) txt += ` — DPE saisi dans Intralia : ${f.libdpe1 || "–"} ${f.DPE1 || ""} / GES ${f.libges1 || "–"} ${f.GES1 || ""}${f.DATEDIAG ? ", du " + f.DATEDIAG : ""}`;
+    if (res.analysis) {
+      const v = intraAnalysisValues(res, { DS_COLS, dsRecordValues });
+      txt += " — " + intraAnalysisText(res, v) + (v["DPE analyse"] !== "OK" && !res.analysis.error && v["Remarques DPE"] ? ` (${v["Remarques DPE"]})` : "");
+    }
     if (res.lotUrl) txt += " — " + res.lotUrl;
     if ((res.info || []).length) txt += " — " + res.info.join(" ; ");
     out.className = "hint imx-test-result " + (res.status === INTRA_STATUS.OK ? "ok" : "err");
@@ -4730,6 +4801,7 @@ function dsRenderSupInfo() {
   const w = [...p.warnings];
   if (p.empty.length) w.push(`${p.empty.length} nom(s) sans numéro : ${p.empty.join(", ")}`);
   $("dsSupWarn").textContent = w.length ? "⚠ " + w.join(" — ") : "";
+  intraRenderSupCount(p);
   return p;
 }
 function dsSaveSuppliers() {
