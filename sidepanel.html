@@ -580,12 +580,12 @@
         <p class="hint" id="intraAnalyzeHint">Données du DPE (établi le, énergie primaire, GES, classes, coûts) : celles <strong>saisies dans Intralia</strong> ; « Valable jusqu'au » calculé comme SIGEO. Lus dans le PDF (texte / OCR) : <strong>fournisseur → N° FU</strong> (liste « Fournisseurs → n° FU » de l'Analyse DPE, <span id="intraSupCount"></span>) et <strong>N° ADEME</strong>. En repérage seul, le PDF est lu sans être enregistré.</p>
         <label class="checkbox-row" title="IM retrouvé par l'adresse Intralia (ou lu dans une colonne), id interne du lot, URL de la fiche DPE."><input type="checkbox" id="intraSigeo" checked /> SIGEO : IM, id interne du lot et URL de la fiche DPE</label>
         <div class="field-row">
-          <label for="intraImCol" title="Vide (auto) : IM cherché dans la recherche d'immeubles SIGEO avec l'adresse de l'immeuble lue dans Intralia, départagé par le lot. Sinon : colonne contenant l'IM (IM_format, IM0393534 ou 393534).">IM SIGEO :</label>
+          <label for="intraImCol" title="Vide (auto) : IM cherché dans la recherche d'immeubles SIGEO avec l'adresse de l'immeuble lue dans Intralia, départagé par le lot. Sinon : colonne contenant l'IM (IM_format, IM0393534 ou 393534) — une case vide est cherchée comme en auto.">IM SIGEO :</label>
           <select id="intraImCol" data-colselect="auto"></select>
           <label for="intraIdCol" title="Colonne où l'id interne du lot est déjà connu (ex. id_server) : réutilisé s'il est rempli, sinon cherché et écrit dedans. « aucune » : colonne « ID interne SIGEO ».">id interne :</label>
           <select id="intraIdCol" data-colselect="optional"></select>
         </div>
-        <p class="hint">IM « auto » : recherche d'immeubles SIGEO par l'adresse Intralia (par adresse, puis par nom), réglages de « Recherche IM SIGEO » ; plusieurs IM à la même adresse → celui qui contient le lot. Id interne : recherche « IM + LT » de « Recherche d'id interne de lot ». Fiche : <code>…/diag_manage/{IM}/{id interne}/0</code>.</p>
+        <p class="hint">IM « auto » : recherche d'immeubles SIGEO avec l'adresse Intralia (ou le nom de l'immeuble s'il est une adresse), puis le nom ; réglages de « Recherche IM SIGEO » ; plusieurs IM → celui qui contient le lot. Immeuble introuvable : ajoute une colonne « IM » au fichier (cases vides = recherche auto) et relance. Id interne : recherche « IM + LT » de « Recherche d'id interne de lot ». Fiche : <code>…/diag_manage/{IM}/{id interne}/0</code>.</p>
         <div class="field-row">
           <label for="intraOut">Colonnes écrites :</label>
           <select id="intraOut">

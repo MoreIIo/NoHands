@@ -77,6 +77,15 @@ function intraFicheUrl(tpl, im, id) {
   return String(tpl || INTRA_FICHE_DEFAULT).trim().replace(/\{IM\}/gi, String(im)).replace(/\{ID\}/gi, String(id));
 }
 
+// Adresse de l'index Intralia (« voie CP ville », voie parfois vide) →
+// { street, cp, ville } ; le CP est le dernier nombre à 5 chiffres.
+function intraSplitAdr(adr) {
+  const s = String(adr ?? "").replace(/\s+/g, " ").trim();
+  const m = s.match(/^(.*)\b(\d{5})\b(.*)$/);
+  if (!m) return { street: s, cp: "", ville: "" };
+  return { street: m[1].trim(), cp: m[2], ville: m[3].trim() };
+}
+
 // Type de lot Intralia (« Appartement », « Commerce »…) → type de local SIGEO.
 function intraTypeLocal(t) {
   const f = intraFold(t);
@@ -851,7 +860,7 @@ if (typeof module !== "undefined" && module.exports) {
     INTRA_DEFAULT_BASE, INTRA_DEFAULT_FLOWER, INTRA_DEFAULT_SOC, INTRA_ALL_SOC, INTRA_DEFAULT_CABINETS,
     INTRA_DEFAULT_REGEX, INTRA_DEFAULT_NAME, INTRA_DEFAULT_FOLDER, INTRA_DEFAULT_DELAY, INTRA_DEFAULT_MAX_AGE_DAYS,
     INTRA_STATUS, INTRA_COLS, INTRA_FIELDS, INTRA_SUPPLIER_COL, INTRA_SAISIE_COLS, INTRA_ID_COL, INTRA_IM_COL, INTRA_FICHE_DEFAULT,
-    intraFicheUrl, intraTypeLocal,
+    intraFicheUrl, intraTypeLocal, intraSplitAdr,
     intraNormName, intraNormLot, intraFold, intraIndexUrl, intraFormUrl, intraLotUrl, intraFlowerViewUrl, intraFlowerDownloadUrl,
     intraBuildIndex, intraSimilarity, intraCloseNames, intraLookup, intraCompileRegex, intraIsDpeName, intraSelectDpe,
     intraSanitize, intraFolder, intraExtOf, intraFileName, intraClassifyFile, intraNormalizeConfig, intraRowValues, intraTemplateVars, intraSaisieValues, intraSaisieCols,

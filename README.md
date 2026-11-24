@@ -606,21 +606,31 @@ enregistrement** : page HTML / 401 / 403 → `FLOWERDOCS_NON_CONNECTE` et arrêt
 de la boucle (une page de connexion n'est jamais enregistrée en .pdf).
 Enregistrement par `chrome.downloads` (doublon renommé) dans
 `Téléchargements/DPE/` sous le nom `{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf`
-(modifiable : `{Colonne}`, `{DPE_Date_GED}`, `{DPE_Fichier}`, `{DPE_UUID}`,
+(`{Immeuble}` et `{lots}` = les colonnes choisies, quel que soit leur nom
+dans le fichier ; modifiable : `{Colonne}`, `{DPE_Date_GED}`, `{DPE_Fichier}`, `{DPE_UUID}`,
 `{Intralia_ID_Immeuble}`, `{Intralia_Cabinet}`… ; caractères interdits par
 Windows → `_` ; extension = celle du fichier reçu). Pour les étapes
 `pdfcheck` / `pdfwrite` du scénario : cocher **ajouter les PDF téléchargés
 à la Toolbox**, puis retrouver le PDF par `{DPE_Fichier_Local}`.
 
 **Étape 4 — SIGEO : IM, id interne, URL de la fiche** (v2.20.0) :
-- **IM** : colonne IM *auto* (défaut) → recherche d'immeubles SIGEO (moteur
-  et réglages de *Recherche IM SIGEO*) avec l'**adresse Intralia** de
-  l'immeuble : d'abord « par adresse » (voie + CP), puis par le nom de
-  l'immeuble, puis par la voie dans « Nom » ; correspondance sur la colonne
-  Adresse de SIGEO (n°, BIS/TER, voie, CP). Plusieurs IM à la même adresse →
-  le lot est cherché dans chacun : un seul le contient → retenu ; plusieurs →
-  `AMBIGU` ; aucun → introuvable (adresses proches dans la remarque). Une
-  colonne IM peut aussi être choisie (ex. `IM_format`).
+- **IM** (v2.20.1) : colonne IM *auto* (défaut) → recherche d'immeubles
+  SIGEO (moteur et réglages de *Recherche IM SIGEO*). Adresses cherchées :
+  l'**adresse Intralia** de l'immeuble et, quand elle n'a que le CP et la
+  ville, le **nom de l'immeuble s'il a la forme d'une adresse**
+  (« 9 RUE CHARLES BRIFAUT »). Pour chacune : mode *auto* (valeur complète
+  dans « Nom », puis la voie seule), puis « par adresse » (voie + CP) ;
+  correspondance sur la colonne Adresse de SIGEO (n°, BIS/TER, voie avec
+  abréviations BD/AV…, CP). En dernier, le nom de l'immeuble (fichier et
+  Intralia) dans « Nom » : Nom E.I. identique et même CP. Plusieurs IM → le
+  lot est cherché dans chacun : un seul le contient → retenu ; plusieurs →
+  `AMBIGU`. Introuvable → la remarque liste **chaque recherche faite et son
+  nombre de résultats** (+ adresses proches). Le journal indique l'onglet de
+  recherche d'immeubles utilisé.
+  Une colonne IM peut aussi être donnée (`IM`, `IM SIGEO`, `IM_format`…,
+  devinée) : remplie → utilisée telle quelle ; vide → recherche auto. Pour
+  les immeubles introuvables, il suffit d'ajouter l'IM à la main dans cette
+  colonne et de relancer.
 - **Id interne du lot** : IM + n° de lot, avec les réglages et le cache de
   *Recherche d'id interne de lot* ; réutilisé s'il est déjà dans la colonne
   « id interne » (ex. `id_server`).

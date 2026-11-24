@@ -204,6 +204,9 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
       ["19", "download", "DPE", "{Immeuble}_lot{lots}_{DPE_Date_GED}.pdf", intra.INTRA_DEFAULT_REGEX, false, 400, 7, "https://intralia.oralia.local", "https://www.oralia.flowerdocs.cloud", true, "auto"]);
     assert.deepStrictEqual([c.v, c.sigeo, c.out, c.imCol], [2, true, "saisie", ""], "tout en un par défaut (IM auto)");
     // Migration : une config d'avant (v1) passe en tout en un ; une config v2 garde ses choix.
+    assert.deepStrictEqual(intra.intraSplitAdr("95 RUE DE MAZY 21160 MARSANNAY LA COTE"), { street: "95 RUE DE MAZY", cp: "21160", ville: "MARSANNAY LA COTE" });
+    assert.deepStrictEqual(intra.intraSplitAdr(" 21000  DIJON"), { street: "", cp: "21000", ville: "DIJON" });
+    assert.deepStrictEqual(intra.intraSplitAdr("12 RUE X"), { street: "12 RUE X", cp: "", ville: "" });
     const m1 = intra.intraNormalizeConfig({ v: 1, mode: "find", analyze: false, out: "all" });
     assert.deepStrictEqual([m1.mode, m1.analyze, m1.out], ["download", true, "saisie"]);
     const m2 = intra.intraNormalizeConfig({ v: 2, mode: "find", analyze: false, out: "all", sigeo: false });

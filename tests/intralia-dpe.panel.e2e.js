@@ -399,8 +399,15 @@ const ROWS = [
     'add("IM0393001", "CONCERTO 1", "12 RUE DES MUSICIENS 59000 LILLE");',
     'add("IM0393005", "CONCERTO 2", "14 RUE DES MUSICIENS 59000 LILLE");',
     'add("IM0393002", "ST HUBERT GERANCE", "5 COUR SAINT HUBERT 59000 LILLE");',
-    'add("IM0393022", "ST HUBERT SYNDIC", "5 COUR SAINT HUBERT 59000 LILLE");', "// Autres voies"].join("\n"));
-  Object.assign(lotMock.DB, { 393022: [{ lt: 7, id: 90, type: "Cave" }] }); // même adresse, pas le lot 130
+    'add("IM0393022", "ST HUBERT SYNDIC", "5 COUR SAINT HUBERT 59000 LILLE");',
+    // Cas Dijon : adresse Intralia vide (le nom est l'adresse), BD abrégé, nom seul.
+    'add("IM0393030", "BRIFAUT 9", "9 RUE CHARLES BRIFAUT 21000 DIJON");',
+    'add("IM0393031", "AMBROISE PARE", "18 BOULEVARD JEANNE D ARC 21000 DIJON");',
+    'add("IM0393032", "LES PINS", "3 RUE DES ROSES 21000 DIJON");',
+    'add("IM0393033", "LES PINS", "5 RUE DES PINS 75011 PARIS");', "// Autres voies"].join("\n"));
+  Object.assign(lotMock.DB, { 393022: [{ lt: 7, id: 90, type: "Cave" }], // même adresse, pas le lot 130
+    393030: [{ lt: 1, id: 3, type: "Appartement" }], 393031: [{ lt: 37, id: 21, type: "Appartement" }],
+    393032: [{ lt: 2, id: 8, type: "Appartement" }], 393033: [{ lt: 2, id: 9, type: "Appartement" }] });
   const sigeo = await new Promise((resolve) => {
     const px = http.createServer((req, res) => {
       if (req.url.startsWith("/imsearch")) { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(imHtml); return; }
@@ -430,9 +437,40 @@ const ROWS = [
   const g7 = (r, n) => out.rows[r - 1][H7.indexOf(n)];
   assert.deepStrictEqual([g7(2, "IM SIGEO"), g7(2, "ID interne SIGEO"), g7(2, "URL fiche DPE")], ["IM0393001", "38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0"]);
   assert.deepStrictEqual([g7(3, "IM SIGEO"), g7(3, "ID interne SIGEO"), g7(3, "URL fiche DPE")], ["IM0393002", "12", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393002/12/0"]);
-  assert.ok(/Ligne 3 : SIGEO IM0393002 lot id 12 .*IM par l'adresse \(2 candidats, départagés par le lot\)/.test(out.log), out.log);
+  assert.ok(/Ligne 3 : SIGEO IM0393002 lot id 12 .*IM par l'adresse « 5 COUR SAINT-HUBERT » \(2 candidats, départagés par le lot\)/.test(out.log), out.log);
+  assert.ok(/SIGEO : recherche d'immeubles — onglet http:\/\/127\.0\.0\.1:\d+\/imsearch/.test(out.log), out.log);
+  // Nom du PDF : {Immeuble} / {lots} = colonnes choisies (ici « immeuble » / « lots », en minuscules).
+  assert.strictEqual(await panel.evaluate(() => intraParams(getIntraConfig(), state.rows[1], 0, null).name({ name: "dpe.pdf", date: "2013-07-17" }, ".pdf", {})),
+    "DPE/Intralia/PARC FLEURI LE CONCERTO 1_lot732_2013-07-17.pdf");
   assert.deepStrictEqual([g7(4, "IM SIGEO"), g7(4, "URL fiche DPE")], ["", ""]);
-  assert.ok(/fiche SIGEO introuvable : IM introuvable pour « 9 BOULEVARD DE LA LIBERTÉ 59800 LILLE »/.test(g7(4, "Remarques DPE")), g7(4, "Remarques DPE"));
+  assert.ok(/^fiche SIGEO introuvable : IM introuvable \(adresse Intralia « 9 BOULEVARD DE LA LIBERTÉ 59800 LILLE »\) — recherches SIGEO : Nom « 9 BOULEVARD DE LA LIBERTÉ » : 0 résultat\(s\) ; Nom « LIBERTE » : 0 résultat\(s\) ; par adresse « LIBERTE » \+ CP 59800 : 0 résultat\(s\) ; Nom « RESIDENCE CHATEAUBRIAND » : 0 résultat\(s\)\. Ajoute une colonne « IM » au fichier pour le donner à la main/.test(g7(4, "Remarques DPE")), g7(4, "Remarques DPE"));
+  // Recherches directes (cas réels de Dijon) : adresse Intralia sans voie → nom = adresse ;
+  // « BD » abrégé ; nom seul (Nom E.I. identique, même CP) ; introuvable avec le détail.
+  const dij = await panel.evaluate(async () => {
+    const ctx = intraSigeoCtx(getIntraConfig());
+    ctx.stopped = () => false;
+    const go = (nom, lot, res) => intraSigeoLookup(ctx, [nom, lot], lot, res);
+    return [
+      await go("9 RUE CHARLES BRIFAUT", "1", { adr: "21000 DIJON", nomIntralia: "9 RUE CHARLES BRIFAUT" }),
+      await go("AMBROISE PARE", "37", { adr: "18 BD JEANNE D ARC 21000 DIJON", nomIntralia: "AMBROISE PARE" }),
+      await go("LES PINS", "2", { adr: "21000 DIJON", nomIntralia: "LES PINS" }),
+      await go("95 RUE DE MAZY", "1", { adr: "95 RUE DE MAZY 21160 MARSANNAY LA COTE", nomIntralia: "95 RUE DE MAZY" }),
+      // Colonne IM ajoutée à la main : vide → recherche auto ; remplie → utilisée telle quelle.
+      await intraSigeoLookup(Object.assign({}, ctx, { imIdx: 2 }), ["9 RUE CHARLES BRIFAUT", "1", ""], "1", { adr: "21000 DIJON", nomIntralia: "" }),
+      await intraSigeoLookup(Object.assign({}, ctx, { imIdx: 2 }), ["95 RUE DE MAZY", "37", "393031"], "37", { adr: "95 RUE DE MAZY 21160 MARSANNAY LA COTE" })
+    ];
+  });
+  console.log(JSON.stringify(dij, null, 1));
+  assert.deepStrictEqual(dij.slice(0, 3).map((r) => [r.status, r.im, r.id, r.via]), [
+    ["OK", "393030", "3", "IM par l'adresse « 9 RUE CHARLES BRIFAUT »"],
+    ["OK", "393031", "21", "IM par l'adresse « 18 BD JEANNE D ARC »"],
+    ["OK", "393032", "8", "IM par le nom « LES PINS »"]]);
+  assert.deepStrictEqual(dij.slice(4).map((r) => [r.status, r.im, r.id, r.via]), [
+    ["OK", "393030", "3", "IM par l'adresse « 9 RUE CHARLES BRIFAUT »"], ["OK", "393031", "21", "IM de la colonne"]]);
+  assert.strictEqual(dij[3].status, "INTROUVABLE");
+  assert.strictEqual(dij[3].text, "IM introuvable (adresse Intralia « 95 RUE DE MAZY 21160 MARSANNAY LA COTE ») — recherches SIGEO : " +
+    "Nom « 95 RUE DE MAZY » : 0 résultat(s) ; Nom « MAZY » : 0 résultat(s) ; par adresse « MAZY » + CP 21160 : 0 résultat(s). " +
+    "Ajoute une colonne « IM » au fichier pour le donner à la main");
   // Recherche d'immeubles absente de l'onglet (et pas d'URL réglée) : arrêt avec un message clair.
   await stab.goto(sigeo.origin + "/page.aspx/fr/sig_imm/lot_browse/syn");
   out = await run();
