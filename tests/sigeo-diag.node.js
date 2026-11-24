@@ -99,7 +99,7 @@ check("type, oui/non, lettres, ADEME", () => {
   // N° non communiqué : pas d'erreur, rien à saisir
   for (const x of ["NC", "nc", "N.C.", "non communiqué", "Non trouvé", "[NON EMIS ADEME]", "non émis", "99999", "-", "aucun"]) {
     const r = D.diagAdeme(x);
-    assert.ok(r.nc && r.value === "" && r.plausible, "NC : " + x);
+    assert.ok(r.nc && r.value === "NC" && r.plausible, "NC : " + x);
   }
   assert.ok(!D.diagAdeme("2021N1001671X").nc);
 });
@@ -122,12 +122,14 @@ check("données de la ligne : N° ADEME « NC »", () => {
   const raw = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { text: v }]));
   const r = D.diagNormalizeData(raw({ code_fournisseur: "448957", date_etabli: "30/04/2025", numero_ademe: "NC", conso_ep: "107", emission_ges: "5" }), Date.UTC(2026, 10, 23));
   assert.deepStrictEqual(r.errors, [], "plus d'ADEME_INVALIDE pour NC");
-  assert.deepStrictEqual([r.v.ademe, r.v.ademeNc], ["", true]);
-  assert.ok(r.warnings.includes("N° ADEME non communiqué (« NC ») : non saisi"), r.warnings.join(" | "));
+  assert.deepStrictEqual([r.v.ademe, r.v.ademeNc], ["NC", true], "« NC » saisi dans le champ N° ADEME");
+  assert.ok(r.warnings.includes("N° ADEME non communiqué (« NC ») : « NC » saisi"), r.warnings.join(" | "));
+  assert.strictEqual(D.diagJournalKey("L1", r.v), "L1#30/04/2025|107|5", "« NC » n'identifie pas le DPE dans l'historique");
   assert.ok(!r.warnings.some((w) => /N° ADEME vide/.test(w)));
   const p = D.diagPlan(snap({ f: { ademe: { mode: "input", input: { present: true, visible: true, value: "", id: "x" }, labelText: "" } } }),
-    Object.assign({}, REALV, { ademe: "", ademeNc: true, dateEtabli: "30/04/2025" }));
-  assert.ok(!p.specs.some((x) => x.key === "ademe") && !p.warnings.some((w) => /ADEME/.test(w)));
+    Object.assign({}, REALV, { ademe: "NC", ademeNc: true, dateEtabli: "30/04/2025" }));
+  const a = p.specs.find((x) => x.key === "ademe");
+  assert.deepStrictEqual([a.want, a.ok, !!a.act], ["NC", false, true], "« NC » à saisir");
 });
 
 check("données de la ligne : obligatoires, colonnes absentes, avertissements", () => {

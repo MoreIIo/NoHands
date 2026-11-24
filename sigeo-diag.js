@@ -303,12 +303,13 @@ function diagLetter(input) {
 const DIAG_ADEME_FMT = /^\d{4}[A-Z]\d{7}[A-Z]$/;
 const diagAdemeKey = (s) => diagNorm(s).toUpperCase().replace(/\s+/g, "");
 // N° ADEME « non communiqué » : NC, non communiqué, non trouvé, [NON EMIS
-// ADEME], aucun, néant, -, 99999… → pas de N° à saisir (ni d'erreur).
+// ADEME], aucun, néant, -, 99999… → « NC » est saisi dans le champ N° ADEME
+// (v2.17.7), sans erreur de format ; aucun N° ne sert à retrouver le PDF.
 const DIAG_ADEME_NC = /^(n\.?\s*c\.?|non\s*communique|non\s*trouve|non\s*emis(\s*(a|l')?\s*ademe)?|non\s*enregistre|aucun|neant|sans|inconnu|-+|9{4,}|0{4,})$/;
 function diagAdeme(input) {
   const raw = diagNorm(input);
   const f = diagFold(raw).replace(/^[\[(«"\s]+|[\])»"\s.]+$/g, "");
-  if (raw && DIAG_ADEME_NC.test(f)) return { ok: true, value: "", plausible: true, nc: true, raw };
+  if (raw && DIAG_ADEME_NC.test(f)) return { ok: true, value: "NC", plausible: true, nc: true, raw };
   const s = diagAdemeKey(input);
   return { ok: true, value: s, plausible: !s || DIAG_ADEME_FMT.test(s) };
 }
@@ -364,7 +365,7 @@ function diagNormalizeData(raw, now = Date.now()) {
   const a = diagAdeme(txt("numero_ademe"));
   v.ademe = a.value;
   v.ademeNc = !!a.nc;
-  if (a.nc) warnings.push(`N° ADEME non communiqué (« ${a.raw} ») : non saisi`);
+  if (a.nc) warnings.push(`N° ADEME non communiqué (« ${a.raw} ») : « NC » saisi`);
   if (v.ademe && !a.plausible) errors.push(`${DIAG_CODES.ademe} — « ${v.ademe} » : format attendu 4 chiffres, 1 lettre, 7 chiffres, 1 lettre (ex. 2021L2000833E)`);
   if (!v.ademe && !a.nc && v.dateEtabli && diagIsNewDpe(v.dateEtabli)) warnings.push(`N° ADEME vide pour un DPE établi le ${v.dateEtabli}`);
 
@@ -529,7 +530,8 @@ function diagUrlWithId(url, id) {
 
 // Clé du journal : fiche (id de l'URL) + N° ADEME (à défaut date|conso|ges).
 function diagJournalKey(lotId, v) {
-  return `${lotId || "?"}#${v.ademe || [v.dateEtabli, v.conso, v.ges].join("|")}`;
+  const a = v.ademeNc ? "" : v.ademe; // « NC » n'identifie pas un DPE
+  return `${lotId || "?"}#${a || [v.dateEtabli, v.conso, v.ges].join("|")}`;
 }
 
 // #msgbody : <li class="infomsg">Enregistrement réussi !</li> = succès ;
@@ -1380,14 +1382,16 @@ async function diagProcess(ad, p) {
     }
     return c;
   };
+  // N° servant à retrouver / contrôler le PDF : aucun pour « NC ».
+  const fileAdeme = v.ademeNc ? "" : v.ademe;
   const resolveFile = async () => {
-    const r = await ad.resolveFile({ name: v.fichier, ademe: v.ademe });
+    const r = await ad.resolveFile({ name: v.fichier, ademe: fileAdeme });
     if (!r || r.error) return (r && r.error) || "aucune source de fichier";
     bytes = await r.bytes();
     if (!diagIsPdf(bytes)) return `« ${r.file.name} » n'est pas un PDF (en-tête %PDF absent)`;
     if (bytes.length > DIAG_DEFAULTS.maxPdfBytes) return `« ${r.file.name} » trop volumineux (${diagFmtSize(bytes.length)})`;
     fileRef = r;
-    fileChk = await checkFile(v.ademe);
+    fileChk = await checkFile(fileAdeme);
     if (fileChk.status === "other") {
       fileRef = null;
       return `« ${r.file.name} » : le ${fileChk.where} contient un autre N° ADEME (${fileChk.others.join(", ")}) que la ligne (${v.ademe})`;
@@ -1626,6 +1630,12 @@ async function diagProcess(ad, p) {
       if (isNew) await ad.journalSet(key, { phase: "filling", row: p.rowLabel || "", lotId: s.lotId, t: ad.now(), refus: m.errors.join(" | ") });
       return E(`SIGEO a refusé l'enregistrement${n > 1 ? " n°" + n : ""} : ${m.errors.join(" | ")}`, "REFUS");
     }
+    // Page rechargée mais toujours en création (id 0, « Veuillez enregistrer… ») :
+    // le diagnostic n'a PAS été créé → l'historique ne bloque pas la relance.
+    if (isNew && !s.saved) {
+      await ad.journalSet(key, { phase: "filling", row: p.rowLabel || "", lotId: s.lotId, t: ad.now(), refus: "non créé" });
+      return E(`SIGEO n'a pas créé le diagnostic (page rechargée toujours en création${m.infos.length ? " — " + m.infos.join(" | ") : ""}) — vérifie les champs obligatoires`, "REFUS");
+    }
     if (!m.success) return E(`pas de message « Enregistrement réussi ! » après Enregistrer n°${n} — vérifie dans SIGEO`);
     if (!s.attach.present || s.needSave) return E(`enregistré (n°${n}), mais le bloc « Joindre un document » n'apparaît pas`);
     const id = s.idDiag && s.idDiag !== "0" ? s.idDiag : "";
@@ -1789,8 +1799,8 @@ async function diagProcess(ad, p) {
     if (e) return fail(`fichier DPE ${e} — diagnostic enregistré, PDF non joint`, "FICHIER");
   }
   const name = fileRef.file.name;
-  const ref = ademeOk || v.ademe;
-  const chk = ref === v.ademe && fileChk ? fileChk : await checkFile(ref);
+  const ref = v.ademeNc ? "" : (ademeOk || v.ademe);
+  const chk = ref === fileAdeme && fileChk ? fileChk : await checkFile(ref);
   if (chk.status === "other") return fail(`le ${chk.where} de ${name} contient un autre N° ADEME (${chk.others.join(", ")}) que la fiche (${ref}) — upload annulé`, "FICHIER");
   const chkTxt = {
     name: "N° ADEME présent dans le nom du fichier",
@@ -1803,7 +1813,7 @@ async function diagProcess(ad, p) {
   // toujours demandée si le N° ADEME du PDF n'a pas pu être vérifié.
   if (p.confirmUpload || chk.status === "unknown") {
     const ok = await ad.confirm({
-      row: p.rowLabel || "", lot: v.lot || s.lotId, fiche: res.idDiag || s.idDiag || "", ademe: ref,
+      row: p.rowLabel || "", lot: v.lot || s.lotId, fiche: res.idDiag || s.idDiag || "", ademe: ref || (v.ademeNc ? "NC" : ""),
       ademeSrc: ademeOk ? "confirmé par SIGEO" : (ref ? "données de la ligne" : ""),
       file: name, path: fileRef.file.path || name, size: diagFmtSize(bytes.length), via: fileRef.via,
       check: chkTxt, risky: chk.status === "unknown"

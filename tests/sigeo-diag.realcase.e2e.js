@@ -82,7 +82,9 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
     /* L14 */ row(Object.assign({}, NEW, { lot: "590013" })),
     /* L15 */ row(Object.assign({}, NEW, { lot: "590014" })),
     /* L16 */ row(Object.assign({}, OLD, { lot: "590015", numero_ademe: "NC", fichier_dpe: "DPE_2021N1001671X.pdf" })),
-    /* L17 */ row(Object.assign({}, NEW, { lot: "590016", code_fournisseur: "FU 0448957" }))
+    /* L17 */ row(Object.assign({}, NEW, { lot: "590016", code_fournisseur: "FU 0448957" })),
+    /* L18 */ row(Object.assign({}, NEW, { lot: "590017", numero_ademe: "NC", fichier_dpe: "DPE_2222E0000001A.pdf" })),
+    /* L19 */ row(Object.assign({}, NEW, { lot: "590018" }))
   ]]);
 
   await panel.evaluate((u) => {
@@ -295,12 +297,13 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
   run = await runActive(panel, 15, async () => { throw new Error("aucune confirmation attendue"); });
   console.log("--- 15. ADEME NC, jonction automatique ---\n" + run.log);
   await setOpt(".scn-diag-confirm", true);
-  assert.deepStrictEqual(delta(s0, stats()), { creates: 1, updates: 0, uploads: 1, saves: 1 }, "1 enregistrement, pas d'Enregistrer n°2, PDF joint");
+  // DPE d'avant 07/2021 : « NC » saisi après le 1er enregistrement
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 1, updates: 1, uploads: 1, saves: 2 }, "NC saisi (Enregistrer n°2), PDF joint");
   d = lotDiags("590015")[0];
-  assert.deepStrictEqual([d.ademe, d.docs.length, d.docs[0].name], ["", 1, "DPE_2021N1001671X.pdf"]);
+  assert.deepStrictEqual([d.ademe, d.docs.length, d.docs[0].name], ["NC", 1, "DPE_2021N1001671X.pdf"]);
   c = await cell(15, "Saisie DPE");
-  assert.ok(/^OK — diagnostic \d+ — PDF joint \(DPE_2021N1001671X\.pdf\) ⚠ N° ADEME non communiqué \(« NC »\) : non saisi/.test(c), c);
-  assert.ok(!/ADEME_INVALIDE/.test(c) && !/après 1er enregistrement/.test(run.log));
+  assert.ok(/^OK — diagnostic \d+, ADEME NC — PDF joint \(DPE_2021N1001671X\.pdf\) ⚠ N° ADEME non communiqué \(« NC »\) : « NC » saisi/.test(c), c);
+  assert.ok(!/ADEME_INVALIDE/.test(c) && /N° ADEME : attendu « NC » · avant « » · après « NC »/.test(run.log), run.log);
 
   // ===== 16. Fournisseur « FU 0448957 » : saisi 0448957, relu 448957 ; libellé vide = écart réel ;
   //            reprise de la fiche existante directement à l'upload =====
@@ -329,6 +332,31 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
   assert.deepStrictEqual(delta(s0, stats()), { creates: 0, updates: 0, uploads: 1, saves: 0 }, "directement à l'upload");
   assert.strictEqual(lotDiags("590016").length, 1);
   assert.ok(/^OK — diagnostic \d+, ADEME 2222E0000001A — PDF joint/.test(await cell(16, "Saisie DPE")), await cell(16, "Saisie DPE"));
+
+  // ===== 17. DPE ≥ 07/2021 noté « NC » : « NC » saisi avant l'enregistrement, 1 seul enregistrement =====
+  await setOpt(".scn-diag-confirm", false);
+  s0 = stats();
+  run = await runActive(panel, 17);
+  console.log("--- 17. NC sur un DPE récent ---\n" + run.log);
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 1, updates: 0, uploads: 1, saves: 1 });
+  assert.strictEqual(lotDiags("590017")[0].ademe, "NC");
+  assert.ok(/N° ADEME : attendu « NC » · avant « » · après « NC »/.test(run.log) && /N° ADEME relu après enregistrement : NC/.test(run.log), run.log);
+
+  // ===== 18. Création non faite par SIGEO (page revenue en création, sans message) : relance non bloquée =====
+  await cfg("silentRefuse=1");
+  run = await runActive(panel, 18);
+  console.log("--- 18a. création refusée sans message ---\n" + run.log);
+  await cfg("silentRefuse=0");
+  c = await cell(18, "Saisie DPE");
+  assert.ok(/^ERREUR — SIGEO n'a pas créé le diagnostic \(page rechargée toujours en création\)/.test(c), c);
+  assert.strictEqual(lotDiags("590018").length, 0);
+  s0 = stats();
+  run = await runActive(panel, 18);
+  await setOpt(".scn-diag-confirm", true);
+  assert.ok(!/un enregistrement de ce DPE a été lancé sans confirmation/.test(await cell(18, "Saisie DPE")), "pas de faux doublon");
+  assert.ok(/^OK — /.test(await cell(18, "Saisie DPE")), await cell(18, "Saisie DPE"));
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 1, updates: 0, uploads: 1, saves: 1 });
+  assert.strictEqual(lotDiags("590018").length, 1);
 
   assert.strictEqual(srv.stats.enterSaves, 0, "jamais de touche Entrée");
   assert.strictEqual(srv.stats.saveCloses, 0, "jamais « Enreg. et fermer »");

@@ -236,7 +236,7 @@ async function start(cfg = {}) {
   const store = new Map(); // id → données enregistrées
   const flash = new Map();
   const stats = { saves: 0, creates: 0, updates: 0, uploads: 0, enterSaves: 0, saveCloses: 0, posts: 0, refused: 0 };
-  const config = Object.assign({ redirect: false, delayMs: 0, fouPostback: true, dateSynthetic: false, ademeNever: false, refuseUpdate: false, uploadHidden: 0, fouLabelBlank: false }, cfg);
+  const config = Object.assign({ redirect: false, delayMs: 0, fouPostback: true, dateSynthetic: false, ademeNever: false, refuseUpdate: false, uploadHidden: 0, fouLabelBlank: false, silentRefuse: false }, cfg);
   let nextId = 1147729;
 
   const server = http.createServer((req, res) => {
@@ -293,8 +293,15 @@ async function start(cfg = {}) {
         if (!SUPPLIERS[fouKey(d.fou)]) errs.push(`Le fournisseur ${d.fou || "(vide)"} n'existe pas.`);
         if (!parseDate(d.dateReal)) errs.push("La date de réalisation est invalide.");
         if (num(d.conso) === null || num(d.ges) === null) errs.push("Consommation / émission invalides.");
-        if (!saved && isNew2021(d.dateReal) && !/^\d{4}[A-Z]\d{7}[A-Z]$/.test(d.ademe)) errs.push("Le N° ADEME est obligatoire pour un DPE établi depuis le 01/07/2021.");
+        if (!saved && isNew2021(d.dateReal) && !/^(\d{4}[A-Z]\d{7}[A-Z]|NC)$/.test(d.ademe)) errs.push("Le N° ADEME est obligatoire pour un DPE établi depuis le 01/07/2021.");
         if (saved && config.refuseUpdate) errs.push("Mise à jour refusée (test).");
+        // cfg.silentRefuse : création refusée sans message (validateur côté page) :
+        // la page revient en création, rien n'est créé.
+        if (!saved && config.silentRefuse) {
+          stats.refused++;
+          send(render(url, d, { saved: false, dateKnown, msgs: [], cfg: config }));
+          return;
+        }
         if (errs.length) {
           stats.refused++;
           msgs = errs.map((t) => ({ cls: "errormsg", text: t }));

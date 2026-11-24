@@ -322,7 +322,7 @@ deux modes :
    joint automatiquement, ligne active comme boucle ; confirmation toujours
    demandée si le N° ADEME du PDF n'a pas pu être vérifié ; coché par
    défaut). N° ADEME « NC », « non communiqué », « non trouvé »,
-   « [NON EMIS ADEME] », « 99999 »… : aucun N° saisi, simple avertissement
+   « [NON EMIS ADEME] », « 99999 »… : « NC » saisi dans le champ N° ADEME, avertissement
    (le PDF est alors retenu par son nom). Upload : Description « DPE » puis
    fichier posé dans le champ (`DataTransfer`, octets transmis en base64), le
    `change` déclenche l'envoi ; vérifié par le compteur « N Résultat(s) »
@@ -734,7 +734,8 @@ par le journal et par la colonne résultat ; depuis 2.17.1 : PDF visible
 seulement après un nouvel « Enregistrer », PDF jamais visible puis relances
 sans nouvel upload).
 
-**Version** : 2.17.6 — **Saisir un DPE** : fournisseur — préfixe « FU » et espaces retirés avant la saisie, validation par perte du focus (jamais Entrée) ; contrôle sans zéros de tête (SIGEO stocke 0448957 comme 448957 : info au journal, pas d'écart) ET libellé `#body:x:proxyFou:x:lbl:x:lbl` non vide, sinon écart « Fournisseur non reconnu par SIGEO » ; reprise d'une fiche existante aussi par un lien `…/diag_manage/{imm}/{n}/{id}` ou « diagnostic {id} » dans la colonne résultat (champs vérifiés, puis upload direct).
+**Version** : 2.17.7 — **Saisir un DPE** : N° ADEME « NC » (ou non communiqué / non trouvé / 99999…) → « NC » est saisi dans le champ N° ADEME (après le 1er enregistrement pour un DPE d'avant 07/2021) ; le PDF est retrouvé par son nom ; une création que SIGEO n'a pas faite (page revenue en création) ne bloque plus la relance par un faux « enregistrement lancé sans confirmation ».
+2.17.6 — **Saisir un DPE** : fournisseur — préfixe « FU » et espaces retirés avant la saisie, validation par perte du focus (jamais Entrée) ; contrôle sans zéros de tête (SIGEO stocke 0448957 comme 448957 : info au journal, pas d'écart) ET libellé `#body:x:proxyFou:x:lbl:x:lbl` non vide, sinon écart « Fournisseur non reconnu par SIGEO » ; reprise d'une fiche existante aussi par un lien `…/diag_manage/{imm}/{n}/{id}` ou « diagnostic {id} » dans la colonne résultat (champs vérifiés, puis upload direct).
 2.17.5 — **Analyse DPE** : colonne `Prix indexés au` retirée (inutile à la saisie) ; dans l'étape de saisie, la date d'indexation des prix devient facultative.
 2.17.4 — **Saisir un DPE** : N° ADEME « NC » / non communiqué / non trouvé / 99999 accepté (rien de saisi, avertissement) ; option « confirmer avant de joindre le PDF » valable aussi sur la ligne active (décochée → PDF joint automatiquement). **Analyse DPE** : N° ADEME absent → « NC » (évaluation thermique / non émis ADEME) ou « non trouvé ».
 2.17.3 — **DPE SIGEO** : si aucun DPE n'est trouvé en gérance (ou si la page est introuvable), la fiche lot **syndic** est vérifiée (`…/page.aspx/fr/sig_imm/lot_manage/syn/{IM_format}/{lot}`, champ « Repli syndic », vide = désactivé) ; nouvelle colonne `DPE source` (gérance / syndic / gérance + syndic), variable `{source}` dans les textes de statut ; la page Documents est suivie depuis une fiche lot qui contient d'autres tableaux.
