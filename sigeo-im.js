@@ -436,7 +436,8 @@ function imPageOp(cfg) {
     nom: { tags: "text", label: /^NOM\b(?!.*PRENOM)/, id: /(^|[_:$])(TXT)?(NOM|NAME|LIBELLE|LABEL)([_:$]|$)/ }, // SIGEO : #body_x_txtLabel_x_Label
     site: { tags: "select", label: /^SITE\b/, id: /(^|[_:$])(SEL|DDL|LST|CBO|CMB)?SITES?([_:$]|$)/ },
     adresse: { tags: "text", label: /^(ADRESSE|VOIE)\b/, id: /(^|[_:$])(TXT)?(ADRESSE|ADR|VOIE|RUE)([_:$]|$)/ },
-    cp: { tags: "text", label: /^(CODE\s*POSTAL|C\.?\s*P\.?)$|^CODE\s*POSTAL\b/, id: /(^|[_:$])(TXT)?(CP|CODEPOSTAL|CODE_POSTAL|ZIP)([_:$]|$)/ }
+    cp: { tags: "text", label: /^(CODE\s*POSTAL|C\.?\s*P\.?)$|^CODE\s*POSTAL\b/, id: /(^|[_:$])(TXT)?(CP|CODEPOSTAL|CODE_POSTAL|ZIP)([_:$]|$)/ },
+    ville: { tags: "text", label: /^(VILLE|COMMUNE)\b/, id: /(^|[_:$])(TXT)?(VILLE|CITY|COMMUNE)([_:$]|$)/ }
   };
   function textInputs() {
     return Array.from(document.querySelectorAll("input")).filter((i) =>
@@ -637,6 +638,12 @@ function imPageOp(cfg) {
       count: readCount(ce).count,
       next: nx.el ? (nx.enabled ? "actif" : "désactivé") : "",
       toggle: !!toggle,
+      siteInfo: (() => {
+        const st = findField("site", anchor);
+        if (!st || st.tagName !== "SELECT") return null;
+        const o = st.options[st.selectedIndex];
+        return { value: st.value, text: o ? norm(o.textContent) : "" };
+      })(),
       busy: busy(),
       // Champ principal visible, ou masqué derrière la bascule « Par nom /
       // Par adresse » (l'opération prepare cliquera dessus).
@@ -659,13 +666,15 @@ function imPageOp(cfg) {
       }
     }
     if (!main) return { status: "no_field", detail: mainKind };
-    // 2. Site forcé à vide (option « »).
-    if (cfg.siteEmpty) {
+    // 2. Site : valeur imposée (cfg.siteValue), ou forcé à vide (option « »).
+    const wantSite = typeof cfg.siteValue === "string";
+    if (wantSite || cfg.siteEmpty) {
       const site = findField("site", main);
       if (site && site.tagName === "SELECT") {
-        const opt = Array.from(site.options).find((o) => o.value === "") ||
+        const opt = wantSite ? Array.from(site.options).find((o) => o.value === cfg.siteValue)
+          : Array.from(site.options).find((o) => o.value === "") ||
           Array.from(site.options).find((o) => /^(|TOUS|\(TOUS\)|TOUS LES SITES|-+|\*)$/.test(fold(o.textContent)));
-        if (!opt) return { status: "no_site_empty", detail: describe(site) };
+        if (!opt) return { status: wantSite ? "no_site_value" : "no_site_empty", detail: describe(site) };
         if (site.value !== opt.value) {
           site.value = opt.value;
           if (triggersPostback(site)) {
@@ -683,13 +692,17 @@ function imPageOp(cfg) {
     const filled = [];
     setVal(main, cfg.term);
     filled.push(`${mainKind}=${cfg.term}`);
+    // Les critères d'une autre recherche restés dans le formulaire (Nom tapé
+    // pour la ligne précédente, Ville…) se combineraient avec celui-ci.
     if (cfg.mode === "adresse") {
       const cp = findField("cp", main);
       if (cp) { setVal(cp, cfg.cp || ""); filled.push(`cp=${cfg.cp || ""}`); }
-      const nom = sel.nom ? resolve(sel.nom) : null;
-      if (nom && nom !== main) setVal(nom, "");
+      for (const k of ["nom", "ville"]) {
+        const f = findField(k, main);
+        if (f && f !== main && f !== cp && f.value) { setVal(f, ""); filled.push(`${k} vidé`); }
+      }
     } else {
-      for (const k of ["adresse", "cp"]) {
+      for (const k of ["adresse", "cp", "ville"]) {
         const f = findField(k, main);
         if (f && f !== main && f.value) { setVal(f, ""); filled.push(`${k} vidé`); }
       }
@@ -870,7 +883,7 @@ async function imSearchAllPages(ad, p) {
     token = imNewToken();
     let r;
     try {
-      r = await ad.exec(frameId, { op: "prepare", token, mode: p.mode, term: p.term, cp: p.cp || "", siteEmpty: p.siteEmpty !== false, sel: p.sel, noToggle });
+      r = await ad.exec(frameId, { op: "prepare", token, mode: p.mode, term: p.term, cp: p.cp || "", siteEmpty: p.siteEmpty !== false, siteValue: p.siteValue, sel: p.sel, noToggle });
     } catch (e) {
       await ad.sleep(500);
       continue;
@@ -881,6 +894,7 @@ async function imSearchAllPages(ad, p) {
     if (r.status === "no_field") return { ok: false, error: `champ « ${r.detail === "nom" ? "Nom" : "Adresse"} » introuvable — désigne-le avec 🎯 (sélecteurs avancés)` };
     if (r.status === "no_submit") return { ok: false, error: "bouton « Rechercher » introuvable — désigne-le avec 🎯 (sélecteurs avancés)" };
     if (r.status === "no_site_empty") return { ok: false, error: `liste « Site » ${r.detail} : aucune option vide` };
+    if (r.status === "no_site_value") return { ok: false, error: `liste « Site » ${r.detail} : option « ${p.siteValue} » introuvable` };
     if (r.status === "toggled") { noToggle = true; await ad.sleep(300); continue; } // bascule côté client
     if (r.status === "site_postback" || r.status === "toggle_postback") {
       if (r.status === "toggle_postback") noToggle = true;
@@ -944,7 +958,8 @@ const imSearchCache = new Map();
 function imClearCache() { imSearchCache.clear(); }
 
 async function imCachedSearch(ad, p) {
-  const key = [p.mode, imFold(p.term), p.mode === "adresse" ? (p.cp || "") : "", p.siteEmpty !== false ? "site=" : "site*"].join("|");
+  const key = [p.mode, imFold(p.term), p.mode === "adresse" ? (p.cp || "") : "",
+    typeof p.siteValue === "string" ? "site=" + p.siteValue : p.siteEmpty !== false ? "site=" : "site*"].join("|");
   if (imSearchCache.has(key)) {
     const res = await imSearchCache.get(key);
     return { ...res, cached: true };
@@ -1001,7 +1016,7 @@ async function imLookupAddress(ad, cfg) {
   for (const stage of stages) {
     for (const [m, term] of stage) {
       const r = await imCachedSearch(ad, {
-        mode: m, term, cp: src.cp, siteEmpty: cfg.siteEmpty, sel: cfg.sel || {}, url: cfg.url,
+        mode: m, term, cp: src.cp, siteEmpty: cfg.siteEmpty, siteValue: cfg.siteValue, sel: cfg.sel || {}, url: cfg.url,
         timeoutMs: cfg.timeoutMs, maxPages: cfg.maxPages
       });
       if (!r.ok) {

@@ -412,9 +412,14 @@ Pour chaque ligne :
 6. **Cache** : une voie déjà cherchée n'est pas relancée ; le cache est vidé
    à chaque démarrage. L'estimation affiche le nombre de voies différentes.
 
+Sur la vraie page, les blocs « Par désignation » (Nom, N° Siret), « Par
+adresse » (Adresse, Code postal, Ville) et « Par mandat » (Site…) sont dans
+**un seul formulaire** : tous les critères remplis se combinent. Chaque
+recherche vide donc les critères de l'autre mode (v2.20.2 : Nom vidé pour
+une recherche par adresse, Ville vidée dans les deux cas).
 Les champs du formulaire (Nom — `#body_x_txtLabel_x_Label` —, Site,
-Adresse, Code postal), le bouton « Rechercher », la bascule « Par adresse »
-et le tableau sont détectés automatiquement ; sinon, désigne-les avec 🎯
+Adresse, Code postal, Ville), le bouton « Rechercher », la bascule « Par
+adresse » (s'il y en a une) et le tableau sont détectés automatiquement ; sinon, désigne-les avec 🎯
 dans **Sélecteurs avancés**. **Tester sur la ligne de départ** lance la
 recherche sans rien écrire et affiche ce qui a été trouvé sur la page.
 
@@ -627,10 +632,16 @@ Windows → `_` ; extension = celle du fichier reçu). Pour les étapes
   `AMBIGU`. Introuvable → la remarque liste **chaque recherche faite et son
   nombre de résultats** (+ adresses proches). Le journal indique l'onglet de
   recherche d'immeubles utilisé.
+  **Site** (v2.20.2) : celui affiché sur la page de recherche quand
+  l'extraction démarre (ex. « 390 - ORALIA SICOV - OPTIM ») ; si rien n'est
+  trouvé, tout est refait avec le Site vide (tous les sites, désactivable
+  par « Site à vide » de *Recherche IM SIGEO*). Le Site de la page est remis
+  pour la ligne suivante.
   Une colonne IM peut aussi être donnée (`IM`, `IM SIGEO`, `IM_format`…,
-  devinée) : remplie → utilisée telle quelle ; vide → recherche auto. Pour
-  les immeubles introuvables, il suffit d'ajouter l'IM à la main dans cette
-  colonne et de relancer.
+  devinée) : remplie → utilisée telle quelle ; vide → recherche auto (la
+  recherche d'immeubles est alors nécessaire, comme sans colonne), et l'IM
+  trouvé y est écrit. Pour les immeubles introuvables, il suffit d'ajouter
+  l'IM à la main dans cette colonne et de relancer.
 - **Id interne du lot** : IM + n° de lot, avec les réglages et le cache de
   *Recherche d'id interne de lot* ; réutilisé s'il est déjà dans la colonne
   « id interne » (ex. `id_server`).

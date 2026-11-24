@@ -404,13 +404,24 @@ const ROWS = [
     'add("IM0393030", "BRIFAUT 9", "9 RUE CHARLES BRIFAUT 21000 DIJON");',
     'add("IM0393031", "AMBROISE PARE", "18 BOULEVARD JEANNE D ARC 21000 DIJON");',
     'add("IM0393032", "LES PINS", "3 RUE DES ROSES 21000 DIJON");',
-    'add("IM0393033", "LES PINS", "5 RUE DES PINS 75011 PARIS");', "// Autres voies"].join("\n"));
+    'add("IM0393033", "LES PINS", "5 RUE DES PINS 75011 PARIS");', "// Autres voies"].join("\n"))
+    .replace('<option value="01" selected>', '<option value="01">'); // Site vide affiché : une seule passe
+  // Page de recherche d'immeubles à la mise en page réelle (critères combinés, Site 390).
+  const imReal = fs.readFileSync(path.join(__dirname, "fixtures/sigeo-im-real.html"), "utf8").replace("// DONNEES", [
+    'add("IM0393887", "71 RUE DE MAZY", "71 RUE DE MAZY 21160 MARSANNAY LA COTE");',
+    'add("IM0393893", "95 RUE DE MAZY", "95 RUE DE MAZY 21160 MARSANNAY LA COTE");',
+    'add("IM0393031", "AMBROISE PARE", "18 BOULEVARD JEANNE D ARC 21000 DIJON");',
+    'add("IM0393034", "MOYENNE 4", "4 RUE MOYENNE 18000 BOURGES");',
+    'add("IM0393001", "CONCERTO 1", "12 RUE DES MUSICIENS 59000 LILLE");'].join("\n"));
+  Object.assign(lotMock.DB, { 393893: [{ lt: 1, id: 4, type: "Appartement" }, { lt: 2, id: 5, type: "Appartement" }],
+    393887: [{ lt: 3, id: 6, type: "Appartement" }], 393034: [{ lt: 5, id: 2, type: "Appartement" }] });
   Object.assign(lotMock.DB, { 393022: [{ lt: 7, id: 90, type: "Cave" }], // même adresse, pas le lot 130
     393030: [{ lt: 1, id: 3, type: "Appartement" }], 393031: [{ lt: 37, id: 21, type: "Appartement" }],
     393032: [{ lt: 2, id: 8, type: "Appartement" }], 393033: [{ lt: 2, id: 9, type: "Appartement" }] });
   const sigeo = await new Promise((resolve) => {
     const px = http.createServer((req, res) => {
       if (req.url.startsWith("/imsearch")) { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(imHtml); return; }
+      if (req.url.startsWith("/imreal")) { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(imReal); return; }
       const up = http.request(lsrv.origin + req.url, { method: req.method, headers: Object.assign({}, req.headers, { host: new URL(lsrv.origin).host }) }, (r) => {
         const h = Object.assign({}, r.headers);
         if (h.location) h.location = h.location.replace(lsrv.origin, "");
@@ -471,11 +482,58 @@ const ROWS = [
   assert.strictEqual(dij[3].text, "IM introuvable (adresse Intralia « 95 RUE DE MAZY 21160 MARSANNAY LA COTE ») — recherches SIGEO : " +
     "Nom « 95 RUE DE MAZY » : 0 résultat(s) ; Nom « MAZY » : 0 résultat(s) ; par adresse « MAZY » + CP 21160 : 0 résultat(s). " +
     "Ajoute une colonne « IM » au fichier pour le donner à la main");
+
+  // 8. Mise en page réelle (capture du 24/11) : blocs Par désignation / Par
+  // adresse / Par mandat dans un seul formulaire (critères combinés), Site
+  // « 390 - ORALIA SICOV - OPTIM » affiché. Colonne « IM SIGEO » présente mais
+  // vide (fichier relancé) : la recherche d'immeubles doit quand même se faire.
+  await stab.goto(sigeo.origin + "/imreal");
+  const real = await panel.evaluate(async () => {
+    const ctx = Object.assign(intraSigeoCtx(getIntraConfig()), { imIdx: 2, nomIdx: 0 });
+    ctx.stopped = () => false;
+    const go = (nom, lot, adr) => intraSigeoLookup(ctx, [nom, lot, ""], lot, { adr, nomIntralia: nom });
+    const out = [];
+    out.push(await go("95 RUE DE MAZY", "1", "95 RUE DE MAZY 21160 MARSANNAY LA COTE"));
+    out.push(await go("AMBROISE PARE", "37", "18 BD JEANNE D ARC 21000 DIJON"));
+    out.push(await go("MOYENNE", "5", "4 RUE MOYENNE 18000 BOURGES"));
+    const searchesBefore = (await chrome.scripting.executeScript({ target: { tabId: ctx.tabId }, world: "MAIN", func: () => window.__searches.length }))[0].result;
+    out.push(await go("71 RUE DE MAZY", "3", "71 RUE DE MAZY 21160 MARSANNAY LA COTE"));
+    const searches = (await chrome.scripting.executeScript({ target: { tabId: ctx.tabId }, world: "MAIN", func: () => window.__searches }))[0].result;
+    return { out, page: ctx.imPage, searches, searchesBefore };
+  });
+  console.log(JSON.stringify(real, null, 1));
+  assert.ok(/onglet .*\/imreal — Site « 390 - ORALIA SICOV - OPTIM », puis tous les sites si rien n'est trouvé$/.test(real.page), real.page);
+  assert.deepStrictEqual(real.out.map((r) => [r.status, r.im, r.id, r.via]), [
+    ["OK", "393893", "4", "IM par l'adresse « 95 RUE DE MAZY »"],
+    ["OK", "393031", "21", "IM par l'adresse « 18 BD JEANNE D ARC »"],
+    ["OK", "393034", "2", "IM par l'adresse « 4 RUE MOYENNE » (tous sites)"],
+    ["OK", "393887", "6", "IM par l'adresse « 71 RUE DE MAZY »"]]);
+  // Recherche « par adresse » : le Nom de la recherche précédente est vidé (sinon ET → 0 résultat).
+  const byAdr = real.searches.filter((c) => c.adr);
+  assert.ok(byAdr.length && byAdr.every((c) => c.nom === "" && c.ville === ""), JSON.stringify(byAdr));
+  assert.ok(real.searches.filter((c) => c.nom).every((c) => c.adr === "" && c.cp === ""), "Nom seul");
+  // Le Site de la page (390) est remis après une recherche « tous sites ».
+  assert.deepStrictEqual(real.searches.slice(real.searchesBefore).map((c) => [c.nom, c.site]), [["71 RUE DE MAZY", "390"]]);
+  assert.ok(real.searches.some((c) => c.site === ""), "repli tous sites");
   // Recherche d'immeubles absente de l'onglet (et pas d'URL réglée) : arrêt avec un message clair.
   await stab.goto(sigeo.origin + "/page.aspx/fr/sig_imm/lot_browse/syn");
   out = await run();
   assert.ok(/SIGEO : ouvre la recherche d'immeubles SIGEO .* Relance à partir de la ligne 2\./.test(out.log), out.log);
   assert.ok(!/Ligne 3 /.test(out.log), "boucle arrêtée");
+  // Fichier relancé (colonnes « IM SIGEO » / « ID interne SIGEO » vides) : IM et id écrits dedans.
+  await stab.goto(sigeo.origin + "/imreal");
+  await panel.evaluate(() => {
+    state.rows = [["immeuble", "lots", "IM SIGEO", "ID interne SIGEO"], ["PARC FLEURI LE CONCERTO 1", "732", "", ""]]; renderColumns();
+    applyIntraConfig(Object.assign(getIntraConfig(), { nomCol: "", lotCol: "", imCol: "", idCol: "" }));
+  });
+  assert.deepStrictEqual(await panel.evaluate(() => { const c = getIntraConfig(); return [c.imCol, c.idCol]; }), ["IM SIGEO", "ID interne SIGEO"]);
+  out = await run();
+  const H8 = out.rows[0];
+  assert.deepStrictEqual([H8.length, new Set(H8).size], [H8.length, H8.length], "pas de colonne en double");
+  const g8 = (n) => out.rows[1][H8.indexOf(n)];
+  assert.deepStrictEqual([g8("IM SIGEO"), g8("ID interne SIGEO"), g8("URL fiche DPE")],
+    ["IM0393001", "38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0"], out.log);
+  assert.ok(/SIGEO : recherche d'immeubles — onglet .*\/imreal — Site « 390 - ORALIA SICOV - OPTIM »/.test(out.log), out.log);
   sigeo.px.close();
 
   assert.deepStrictEqual(srv.stats.posts, [], "lecture seule : aucun POST vers Intralia");

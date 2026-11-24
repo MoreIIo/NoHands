@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>SIGEO (simulation) — Immeubles, mise en page réelle</title>
+<!--
+  Recherche d'immeubles SIGEO telle qu'elle apparaît sur la vraie page
+  (capture du 24/11/2026) :
+    - blocs « Par désignation » (Nom, N° Siret), « Par adresse » (Adresse,
+      Code postal, Ville), « Par mandat » (Site, Filtre, Type) dans UN SEUL
+      formulaire, sans bascule : TOUS les critères remplis se combinent (ET) ;
+    - Site affiché par défaut : « 390 - ORALIA SICOV - OPTIM » ;
+    - résultats : colonne d'icônes sans titre, N° E.I. (icône + IM), Nom E.I.,
+      Adresse, puis une ligne « N Résultat(s) » dans le tableau ;
+    - postback partiel (Sys.WebForms.PageRequestManager + overlay).
+  Données : lignes add(im, nom, adresse) insérées par le test à la place du
+  marqueur DONNEES. window.__searches : critères de chaque recherche.
+-->
+<style>
+  body { font: 13px Arial, sans-serif; }
+  fieldset { display: inline-block; vertical-align: top; }
+  #progessUpdatePanel { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.2); }
+</style>
+</head>
+<body>
+<form id="aspnetForm" method="get" action="" onsubmit="return false">
+  <fieldset><legend>Par désignation</legend>
+    <table>
+      <tr><td>Nom</td><td><input type="text" id="body_x_txtLabel_x_Label" name="body:x:txtLabel:x:Label"></td></tr>
+      <tr><td>N° Siret</td><td><input type="text" id="body_x_txtSiret_x_Siret" name="body:x:txtSiret:x:Siret"></td></tr>
+    </table>
+  </fieldset>
+  <fieldset><legend>Par adresse</legend>
+    <table>
+      <tr><td>Adresse</td><td><input type="text" id="body_x_txtAdresse_x_Adresse" name="body:x:txtAdresse:x:Adresse"></td></tr>
+      <tr><td>Code postal</td><td><input type="text" id="body_x_txtCodePostal_x_CodePostal" size="5"> Ville <input type="text" id="body_x_txtVille_x_Ville"></td></tr>
+    </table>
+  </fieldset>
+  <fieldset><legend>Par mandat</legend>
+    <table>
+      <tr><td>Site</td><td><select id="body_x_selSite_x_Site" name="body:x:selSite:x:Site"
+          onchange="javascript:setTimeout('__doPostBack(\'ddlSite\',\'\')', 0)">
+        <option value=""></option>
+        <option value="390" selected>390 - ORALIA SICOV - OPTIM</option>
+        <option value="01">01 - PARIS</option>
+      </select></td></tr>
+      <tr><td>Filtre</td><td><select id="body_x_selFiltre"><option>Tous</option></select></td></tr>
+      <tr><td>Type</td><td><select id="body_x_selType"><option>Tous</option></select></td></tr>
+    </table>
+  </fieldset>
+  <div><input type="submit" id="body_x_cmdSearch" name="body:x:cmdSearch" value="Rechercher" onclick="return doSearch(event)"></div>
+  <div id="body_x_upResult"></div>
+</form>
+<div id="progessUpdatePanel"><div>Chargement en cours...</div></div>
+
+<script>
+const DATA = [];
+function add(im, nom, adresse) { DATA.push({ im, nom, adresse }); }
+// DONNEES
+
+let inAsync = false;
+window.Sys = { WebForms: { PageRequestManager: { getInstance: () => ({ get_isInAsyncPostBack: () => inAsync }) } } };
+window.__log = [];
+window.__searches = [];
+const fold = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase().trim();
+const val = (id) => document.getElementById(id).value;
+function readCriteria() {
+  return {
+    nom: val("body_x_txtLabel_x_Label"), adr: val("body_x_txtAdresse_x_Adresse"),
+    cp: val("body_x_txtCodePostal_x_CodePostal"), ville: val("body_x_txtVille_x_Ville"),
+    site: val("body_x_selSite_x_Site")
+  };
+}
+// Tous les critères remplis se combinent (ET), comme sur la vraie page.
+function filter(c) {
+  if (!c.nom && !c.adr && !c.cp && !c.ville) return [];
+  return DATA.filter((d) => {
+    const a = " " + d.adresse + " ";
+    if (c.site === "390" && !/ (21|59)\d{3} /.test(a)) return false;
+    if (c.site === "01" && !/ 75\d{3} /.test(a)) return false;
+    if (c.nom && !fold(d.nom).includes(fold(c.nom))) return false;
+    if (c.adr && !fold(d.adresse).includes(fold(c.adr))) return false;
+    if (c.cp && !a.includes(" " + c.cp + " ")) return false;
+    if (c.ville && !fold(d.adresse).includes(fold(c.ville))) return false;
+    return true;
+  });
+}
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+function render(c) {
+  const rows = filter(c);
+  const body = rows.map((d) => `<tr><td><a href="#">&#x2715;</a></td><td><a href="#">&#x270E;</a><b>${d.im}</b></td>` +
+    `<td>${esc(d.nom)}</td><td><a href="#">${esc(d.adresse)}</a></td></tr>`).join("");
+  document.getElementById("body_x_upResult").innerHTML = `
+    <table id="body_x_tabResult_x_grid" border="1">
+      <tr><th></th><th>N° E.I.</th><th>Nom E.I.</th><th>Adresse</th></tr>
+      ${body}
+      <tr><td colspan="4"><b>${rows.length} Résultat(s)</b></td></tr>
+    </table>`;
+}
+function asyncPostback(fn) {
+  inAsync = true;
+  document.getElementById("progessUpdatePanel").style.display = "block";
+  setTimeout(() => {
+    fn();
+    inAsync = false;
+    document.getElementById("progessUpdatePanel").style.display = "none";
+  }, 250 + Math.floor(Math.random() * 300));
+}
+window.__doPostBack = function (target, arg) {
+  window.__log.push(target + ":" + arg);
+  asyncPostback(() => { /* changement de Site : rien ne change à l'écran */ });
+};
+function doSearch(ev) {
+  ev.preventDefault();
+  const c = readCriteria();
+  window.__searches.push(c);
+  asyncPostback(() => render(c));
+  return false;
+}
+</script>
+</body>
+</html>

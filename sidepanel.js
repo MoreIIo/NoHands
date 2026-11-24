@@ -4400,38 +4400,52 @@ function intraSigeoCtx(cfg) {
   };
 }
 
-// Onglet SIGEO (connecté) partagé par les deux recherches. IM « auto » : il
-// faut la recherche d'immeubles — onglet où elle est ouverte (son URL sert à
-// y revenir), sinon l'URL réglée dans « Recherche IM SIGEO ».
-async function intraSigeoSetup(ctx) {
-  if (ctx.tabId != null) return {};
-  const lotUrl = ctx.lc.url || LOT_DEFAULT_URL;
-  const origin = intraOriginOf(lotUrl);
-  let tabs = [];
-  try { tabs = ((await chrome.tabs.query({})) || []).filter((t) => intraOriginOf(t.url || "") === origin); } catch (_) { /* ignoré */ }
-  if (ctx.imIdx < 0) {
+// Onglet SIGEO (connecté) partagé par les deux recherches. Dès qu'un IM est
+// à chercher (colonne IM absente OU case vide), il faut la recherche
+// d'immeubles : onglet où elle est ouverte (son URL sert à y revenir, son
+// « Site » est gardé), sinon l'URL réglée dans « Recherche IM SIGEO ».
+async function intraSigeoTabs(ctx) {
+  const origin = intraOriginOf(ctx.lc.url || LOT_DEFAULT_URL);
+  try { return ((await chrome.tabs.query({})) || []).filter((t) => intraOriginOf(t.url || "") === origin); }
+  catch (_) { return []; }
+}
+async function intraSigeoSetup(ctx, needIm) {
+  if (needIm && !ctx.imUrl) {
+    const tabs = await intraSigeoTabs(ctx);
+    // Recherche d'immeubles = champ Nom + « Rechercher » ET sélecteur « Site »
+    // ou bascule « Par nom / Par adresse » (la page lot_browse a aussi un Nom).
+    const isIm = (r) => r && r.ok && (r.fields && r.fields.site || r.toggle) && !/lot_browse|diag_manage/i.test(r.url || "");
     for (const t of tabs) {
       let hits = [];
       try { hits = await imChromeAdapter(t.id, 5000).execAll({ op: "probe", mode: "nom", sel: ctx.ic.sel || {} }); } catch (_) { /* onglet occupé */ }
-      // Recherche d'immeubles = champ Nom + « Rechercher » ET sélecteur « Site »
-      // ou bascule « Par nom / Par adresse » (la page lot_browse a aussi un Nom).
-      const isIm = (r) => r && r.ok && (r.fields && r.fields.site || r.toggle) && !/lot_browse|diag_manage/i.test(r.url || "");
-      if (hits.some((h) => isIm(h.result))) { ctx.tabId = t.id; ctx.imUrl = ctx.ic.url || t.url; ctx.imPage = t.title ? `onglet « ${t.title} » (${t.url})` : `onglet ${t.url}`; break; }
+      const h = hits.find((x) => isIm(x.result));
+      if (h) {
+        ctx.tabId = t.id; ctx.imUrl = ctx.ic.url || t.url; ctx.imSite = h.result.siteInfo || null;
+        ctx.imPage = (t.title ? `onglet « ${t.title} » (${t.url})` : `onglet ${t.url}`) +
+          (ctx.imSite && ctx.imSite.value ? ` — Site « ${ctx.imSite.text} »${ctx.ic.siteEmpty !== false ? ", puis tous les sites si rien n'est trouvé" : ""}` : "");
+        break;
+      }
     }
-    if (ctx.tabId == null) {
+    if (!ctx.imUrl) {
       if (!ctx.ic.url) {
         return { error: "ouvre la recherche d'immeubles SIGEO (page avec « Nom », « Site », « Rechercher ») dans un onglet connecté, ou renseigne son URL dans « Recherche IM SIGEO », puis relance" };
       }
       ctx.imUrl = ctx.ic.url;
       ctx.imPage = `URL réglée ${ctx.ic.url}`;
-      ctx.tabId = tabs.length ? tabs[0].id : await intraFindTab(ctx.ic.url, true, ctx.ic.url);
+      if (ctx.tabId == null) ctx.tabId = tabs.length ? tabs[0].id : await intraFindTab(ctx.ic.url, true, ctx.ic.url);
     }
-  } else {
+  }
+  if (ctx.tabId == null) {
+    const tabs = await intraSigeoTabs(ctx);
+    const lotUrl = ctx.lc.url || LOT_DEFAULT_URL;
     ctx.tabId = tabs.length ? tabs[0].id : await intraFindTab(lotUrl, true, lotUrl);
   }
   if (ctx.tabId == null) return { error: "aucun onglet SIGEO (ouvre SIGEO et connecte-toi)" };
-  ctx.ad = lotChromeAdapter(ctx.tabId, Math.max(2000, ctx.lc.timeout));
-  ctx.imAd = imChromeAdapter(ctx.tabId, Math.max(2000, ctx.ic.timeout));
+  if (ctx.adTab !== ctx.tabId) {
+    ctx.adTab = ctx.tabId;
+    ctx.ad = lotChromeAdapter(ctx.tabId, Math.max(2000, ctx.lc.timeout));
+    ctx.imAd = imChromeAdapter(ctx.tabId, Math.max(2000, ctx.ic.timeout));
+  }
   return {};
 }
 
@@ -4456,52 +4470,59 @@ async function intraImSearch(ctx, res, rowNom) {
   const addAdr = (a) => { if (a && !addrs.some((x) => imNameKey(x) === imNameKey(a))) addrs.push(a); };
   addAdr(sp.street && imParseSource(sp.street).voieSig.length ? sp.street : "");
   names.forEach((n) => { const ps = imParseSource(n); if (ps.nums.length && ps.type && ps.voieSig.length) addAdr(n); });
-  const common = { siteEmpty: ctx.ic.siteEmpty, sel: ctx.ic.sel || {}, url: ctx.imUrl,
-    timeoutMs: Math.max(2000, ctx.ic.timeout), maxPages: ctx.ic.maxPages };
+  // Site : d'abord celui affiché sur la page de recherche (ex. « 390 - ORALIA
+  // SICOV - OPTIM »), puis — rien trouvé — tous les sites (Site vide).
+  const passes = ctx.imSite && ctx.imSite.value
+    ? [{ site: { siteValue: ctx.imSite.value }, tag: "" }].concat(ctx.ic.siteEmpty !== false ? [{ site: { siteEmpty: true }, tag: " (tous sites)" }] : [])
+    : [{ site: { siteEmpty: ctx.ic.siteEmpty }, tag: "" }];
   const diag = [], seen = new Set();
   const note = (txt, key) => { key = key || txt; if (!seen.has(key)) { seen.add(key); diag.push(txt); } };
-  const label = (m, term) => `${m === "adresse" ? "par adresse" : "Nom"} « ${term} »${m === "adresse" && sp.cp ? " + CP " + sp.cp : ""}`;
   const isAuth = (e) => /AUTH_REQUIRED/.test(e || "");
   let closest = [], closestN = -1;
   const done = (ims, via) => ({ ims, via, diag, closest });
 
-  // 1-2. Adresses : « auto » puis « par adresse ».
-  for (const mode of ["auto", "adresse"]) {
-    for (const a of addrs) {
+  for (const pass of passes) {
+    const common = Object.assign({ sel: ctx.ic.sel || {}, url: ctx.imUrl,
+      timeoutMs: Math.max(2000, ctx.ic.timeout), maxPages: ctx.ic.maxPages }, pass.site);
+    const label = (m, term) => `${m === "adresse" ? "par adresse" : "Nom"} « ${term} »${m === "adresse" && sp.cp ? " + CP " + sp.cp : ""}${pass.tag}`;
+    // 1-2. Adresses : « auto » puis « par adresse ».
+    for (const mode of ["auto", "adresse"]) {
+      for (const a of addrs) {
+        if (ctx.stopped && ctx.stopped()) return done([], "");
+        let r;
+        try { r = await imLookupAddress(ctx.imAd, Object.assign({}, common, { adresse: a, cp: sp.cp, ville: "", mode })); }
+        catch (e) { r = { status: "ERREUR", ims: [], error: e.message || String(e) }; }
+        (r.searches || []).forEach((x) => note(`${label(x.mode, x.term)} : ${x.rows} résultat(s)`, x.mode + "|" + imNameKey(x.term) + pass.tag));
+        if (r.status === "ERREUR") {
+          if (isAuth(r.error)) return { auth: true };
+          note(r.error + pass.tag);
+          continue;
+        }
+        if (r.ims && r.ims.length) return done(r.ims, `IM par l'adresse « ${a} »${pass.tag}`);
+        if ((r.rowsRead || 0) > closestN && r.closest && r.closest.length) { closest = r.closest; closestN = r.rowsRead || 0; }
+      }
+    }
+    // 3. Nom de l'immeuble dans « Nom » : Nom E.I. identique (et même CP).
+    for (const n of names) {
       if (ctx.stopped && ctx.stopped()) return done([], "");
       let r;
-      try { r = await imLookupAddress(ctx.imAd, Object.assign({}, common, { adresse: a, cp: sp.cp, ville: "", mode })); }
-      catch (e) { r = { status: "ERREUR", ims: [], error: e.message || String(e) }; }
-      (r.searches || []).forEach((x) => note(`${label(x.mode, x.term)} : ${x.rows} résultat(s)`, x.mode + "|" + imNameKey(x.term)));
-      if (r.status === "ERREUR") {
+      try { r = await imCachedSearch(ctx.imAd, Object.assign({}, common, { mode: "nom", term: n, cp: "" })); }
+      catch (e) { r = { ok: false, error: e.message || String(e) }; }
+      if (!r.ok) {
         if (isAuth(r.error)) return { auth: true };
-        note(r.error);
+        note(`Nom « ${n} »${pass.tag} : ${r.error}`, "nom|" + imNameKey(n) + pass.tag);
         continue;
       }
-      if (r.ims && r.ims.length) return done(r.ims, `IM par l'adresse « ${a} »`);
-      if ((r.rowsRead || 0) > closestN && r.closest && r.closest.length) { closest = r.closest; closestN = r.rowsRead || 0; }
+      note(`Nom « ${n} »${pass.tag} : ${r.rows.length} résultat(s)`, "nom|" + imNameKey(n) + pass.tag);
+      const hit = r.rows.filter((row) => {
+        if (imNameKey(row.nom) !== imNameKey(n)) return false;
+        const t = imParseTarget(row.adresse);
+        return !sp.cp || !t.cp || t.cp === sp.cp;
+      });
+      const ims = [...new Set(hit.map((row) => row.im))];
+      if (ims.length) return done(ims, `IM par le nom « ${n} »${pass.tag}`);
+      if (r.rows.length > closestN && !addrs.length) { closest = r.rows.slice(0, 3); closestN = r.rows.length; }
     }
-  }
-  // 3. Nom de l'immeuble dans « Nom » : Nom E.I. identique (et même CP).
-  for (const n of names) {
-    if (ctx.stopped && ctx.stopped()) break;
-    let r;
-    try { r = await imCachedSearch(ctx.imAd, Object.assign({}, common, { mode: "nom", term: n, cp: "" })); }
-    catch (e) { r = { ok: false, error: e.message || String(e) }; }
-    if (!r.ok) {
-      if (isAuth(r.error)) return { auth: true };
-      note(`Nom « ${n} » : ${r.error}`, "nom|" + imNameKey(n));
-      continue;
-    }
-    note(`Nom « ${n} » : ${r.rows.length} résultat(s)`, "nom|" + imNameKey(n));
-    const hit = r.rows.filter((row) => {
-      if (imNameKey(row.nom) !== imNameKey(n)) return false;
-      const t = imParseTarget(row.adresse);
-      return !sp.cp || !t.cp || t.cp === sp.cp;
-    });
-    const ims = [...new Set(hit.map((row) => row.im))];
-    if (ims.length) return done(ims, `IM par le nom « ${n} »`);
-    if (r.rows.length > closestN && !addrs.length) { closest = r.rows.slice(0, 3); closestN = r.rows.length; }
   }
   return done([], "");
 }
@@ -4520,7 +4541,7 @@ async function intraSigeoLookup(ctx, row, lot, res) {
   }
   const known = ctx.knownIdx >= 0 ? getCellByIndex(row, ctx.knownIdx).trim() : "";
   if (known && ims.length === 1) return { status: "OK", im: ims[0], id: known, known: true, url: intraFicheUrl(ctx.fiche, ims[0], known) };
-  const st = await intraSigeoSetup(ctx);
+  const st = await intraSigeoSetup(ctx, !ims.length);
   if (st.error) return { status: "ERREUR", text: st.error, setup: true };
   if (!ims.length) {
     const rowNom = ctx.nomIdx >= 0 ? getCellByIndex(row, ctx.nomIdx).trim() : "";
@@ -4748,6 +4769,8 @@ async function runIntraExtraction() {
     vals[INTRA_ID_COL] = sg && sg.id ? sg.id : "";
     vals[INTRA_IM_COL] = sg && sg.im ? "IM" + String(sg.im).padStart(7, "0") : "";
     if (sg && sg.id && sig.knownIdx >= 0 && !sg.known) setCellByIndex(row, sig.knownIdx, sg.id);
+    // IM trouvé par la recherche alors que la colonne IM était vide : écrit dedans.
+    if (sg && sg.im && sig.imIdx >= 0 && !getCellByIndex(row, sig.imIdx).trim()) setCellByIndex(row, sig.imIdx, vals[INTRA_IM_COL]);
     if (sg && sg.url) nFiche++;
     outCols.forEach((c) => setCellByIndex(row, colIdx[c], vals[c] ?? ""));
     const an = cfg.analyze && res.analysis ? res.analysis : null;
