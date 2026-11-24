@@ -217,8 +217,9 @@ deux modes :
    (affichage).
    Le bouton « Colonnes de l'Analyse DPE » reprend celles écrites par
    l'extraction *Analyse DPE* (`{N° FU}`, `{Établi le}`, `{Classe énergie}`,
-   `{DPE fichier}`…) ; « Modèle DPE » les choisit tout seul si le fichier
-   chargé les contient.
+   `{DPE fichier}`…) ; « Fichier DPE Intralia » celles du fichier prêt de
+   l'extraction *DPE Intralia* (+ URL `{URL fiche DPE}`). « Modèle DPE »
+   choisit tout seul le bon préréglage d'après les colonnes du fichier chargé.
    Dates : la valeur brute du classeur est lue (n° de série Excel → jj/mm/aaaa,
    SheetJS affichant sinon `m/d/yy`). Nombres : virgule, **au plus 2
    décimales**, sans espace ni unité ni « € » ; s'ils dépassent le `maxlength`
@@ -598,6 +599,30 @@ Enregistrement par `chrome.downloads` (doublon renommé) dans
 Windows → `_` ; extension = celle du fichier reçu). Pour les étapes
 `pdfcheck` / `pdfwrite` du scénario : cocher **ajouter les PDF téléchargés
 à la Toolbox**, puis retrouver le PDF par `{DPE_Fichier_Local}`.
+
+**Chaîne complète → fichier prêt pour la saisie SIGEO** (v2.19.0). Pour chaque
+ligne, dans l'ordre : Intralia (lot, DPE saisi, DPE de la GED) → FlowerDocs
+(PDF téléchargé, fournisseur / n° ADEME lus dans le PDF) → **SIGEO : id
+interne du lot** (IM + n° de lot, avec les réglages et le cache de « Recherche
+d'id interne de lot », dans un onglet SIGEO connecté ; réutilisé s'il est déjà
+dans la colonne « id interne », ex. `id_server`) → **URL de la fiche DPE**
+`http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/{IM}/{id interne}/0`
+(modèle modifiable dans « Réglages avancés »). Colonnes : « IM SIGEO »
+(devinée : `IM_format`) et « id interne » (devinée : `id_server`, sinon
+colonne `ID interne SIGEO` créée) ; IM « aucune » = pas d'étape SIGEO. Session
+SIGEO expirée → arrêt avec la ligne de reprise.
+Le fichier final (mode par défaut « fichier prêt pour la saisie SIGEO ») ne
+contient que : `DPE analyse`, `URL fiche DPE`, `Type de local` (type du lot
+Intralia : appartement / maison… → habitation, commerce / bureau / local… →
+hors habitation, autre → à vérifier), `PDF analysé`, `N° FU`,
+`Fournisseur DPE`, `Établi le`, `Valable jusqu'au`, `N° ADEME`, énergie
+primaire, classe énergie, GES, classe GES, coûts min/max, `Date d'indexation
+des prix` (DPE ≥ 01/07/2021 : 01/01/année de référence Intralia, sinon le
+PDF), `Remarques DPE` (+ `ID interne SIGEO`). Ensuite : onglet Saisie →
+**Modèle DPE** reconnaît ce fichier et règle l'étape « SIGEO : saisir un DPE »
+toute seule (préréglage « Fichier DPE Intralia » : colonnes + URL
+`{URL fiche DPE}` reprise telle quelle) ; il reste à choisir le dossier
+`Téléchargements\DPE` et à lancer le scénario (en simulation d'abord).
 
 **Colonnes pour la saisie SIGEO** (v2.18.2) : mêmes noms que l'Analyse DPE,
 lus par l'étape « SIGEO : saisir un DPE » (préréglage « Colonnes de l'Analyse

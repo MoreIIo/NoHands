@@ -11,6 +11,7 @@ const path = require("path");
 const assert = require("assert");
 const { chromium } = require("playwright");
 const mock = require("./fixtures/intralia-mock.js");
+const lotMock = require("./fixtures/sigeo-lot-server.js");
 
 const ROOT = path.resolve(__dirname, "..");
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".gz": "application/gzip", ".wasm": "application/wasm" };
@@ -44,17 +45,18 @@ const CHROME_STUB = `
     } },
     runtime: { getURL: (p) => new URL(p, location.href).href, getManifest: () => ({ version: "0.0.0" }),
                sendMessage: async () => ({}), lastError: null, onMessage: { addListener() {} } },
+    // Onglet 1 : Intralia ; onglet 2 : SIGEO (recherche d'id interne de lot).
     tabs: {
-      get: async (id) => { if (id !== 1) throw new Error("No tab with id: " + id); return { id: 1, url: await window.__tabUrl(), status: "complete" }; },
-      query: async () => [{ id: 1, url: await window.__tabUrl(), active: true }],
+      get: async (id) => { if (id !== 1 && id !== 2) throw new Error("No tab with id: " + id); return { id, url: await window.__tabUrl(id), status: "complete" }; },
+      query: async () => [{ id: 1, url: await window.__tabUrl(1), active: true }, { id: 2, url: await window.__tabUrl(2), active: false }],
       create: async () => { throw new Error("création d'onglet non prévue dans ce test"); },
       sendMessage: async () => ({}), duplicate: async () => ({}),
-      update: (id, o, cb) => { window.__navigate(o.url).then(() => { if (cb) cb({ id }); updated.forEach((l) => l(id, { status: "complete" })); }); },
+      update: (id, o, cb) => { window.__navigate(id, o.url).then(() => { if (cb) cb({ id }); updated.forEach((l) => l(id, { status: "complete" })); }); },
       onUpdated: { addListener(l) { updated.add(l); }, removeListener(l) { updated.delete(l); } }, onRemoved: { addListener() {} }
     },
     scripting: { executeScript: async ({ target, func, args }) => {
-      if (target.tabId !== 1) throw new Error("onglet inconnu");
-      return [{ frameId: 0, result: await window.__runInTab(func.toString(), args || []) }];
+      if (target.tabId !== 1 && target.tabId !== 2) throw new Error("onglet inconnu");
+      return [{ frameId: 0, result: await window.__runInTab(target.tabId, func.toString(), args || []) }];
     } },
     downloads: {
       download: async ({ url, filename, conflictAction, saveAs }) => {
@@ -96,17 +98,34 @@ const ROWS = [
 (async () => {
   const { srv: web, origin } = await serve();
   const srv = await mock.start();
+  // Faux SIGEO « lot_browse » : lots des lignes du test (IM_format → LT → id interne).
+  Object.assign(lotMock.DB, {
+    393001: [{ lt: 732, id: 38, type: "Appartement" }],
+    393002: [{ lt: 130, id: 12, type: "Appartement" }],
+    393003: [{ lt: 543, id: 5, type: "Appartement" }],
+    393010: [{ lt: 12, id: 3, type: "Appartement" }, { lt: 120, id: 4, type: "Cave" }]
+  }); // 393004 (ligne 5) absent → introuvable
+  const lsrv = await lotMock.start();
   const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome", headless: true });
   const ctx = await browser.newContext();
   const tab = await ctx.newPage();
   await tab.goto(srv.intraOrigin + "/");
+  const stab = await ctx.newPage();
+  await stab.goto(lsrv.origin + "/__login");
+  await stab.goto(lsrv.url);
+  const tabs = { 1: tab, 2: stab };
   const saved = [];
   const panel = await ctx.newPage();
   const errors = [];
   panel.on("pageerror", (e) => { errors.push(e.message); console.log("[panel] " + e.message); });
-  await panel.exposeFunction("__tabUrl", () => tab.url());
-  await panel.exposeFunction("__navigate", async (u) => { await tab.goto(u); });
-  await panel.exposeFunction("__runInTab", async (src, args) => tab.evaluate(([s, a]) => (new Function("return (" + s + ")"))()(...a), [src, args]));
+  await panel.exposeFunction("__tabUrl", (id) => tabs[id].url());
+  await panel.exposeFunction("__navigate", async (id, u) => { await tabs[id].goto(u); });
+  await panel.exposeFunction("__runInTab", async (id, src, args) => {
+    for (let i = 0; ; i++) {
+      try { return await tabs[id].evaluate(([s, a]) => (new Function("return (" + s + ")"))()(...a), [src, args]); }
+      catch (e) { if (i >= 5 || !/context was destroyed|navigat/i.test(e.message)) throw e; await new Promise((r) => setTimeout(r, 200)); }
+    }
+  });
   await panel.exposeFunction("__saveDl", (o) => {
     const buf = Buffer.from(o.b64, "base64");
     let name = o.filename, k = 0;
@@ -143,6 +162,8 @@ const ROWS = [
   await panel.fill("#intraBase", srv.intraOrigin);
   await panel.fill("#intraFlower", srv.flowerOrigin);
   await panel.fill("#intraDelay", "0");
+  await panel.evaluate((u) => { $("lotUrl").value = u; }, lsrv.url); // réglage de « Recherche d'id interne de lot »
+  assert.deepStrictEqual(await panel.evaluate(() => [getIntraConfig().imCol, getIntraConfig().idCol]), ["IM_format", ""], "IM SIGEO deviné (IM_format)");
   await panel.evaluate(() => updateExtractEstimate());
   const est = await panel.textContent("#extractEstimate");
   assert.ok(/12 lots \(11 différents\)/.test(est), est);
@@ -181,7 +202,7 @@ const ROWS = [
   const col = (n) => { const i = H.indexOf(n); assert.ok(i >= 4, "colonne " + n); return i; };
   const C = Object.fromEntries(["Intralia_Cabinet", "Intralia_ID_Immeuble", "Intralia_URL_Lot", "DPE_Statut", "DPE_Detail", "DPE_Fichier", "DPE_Date_GED", "DPE_UUID",
     "DPE_Lien_FlowerDocs", "DPE_Fichier_Local", "Intralia_DPE_Classe", "Intralia_DPE_kWh_m2", "Intralia_GES_Classe", "Intralia_GES_kgCO2_m2", "Intralia_Date_Diag"].map((n) => [n, col(n)]));
-  assert.strictEqual(H.length, 4 + 15 + 14, "« toutes » : 10 colonnes fixes + 5 champs cochés + 14 colonnes de saisie");
+  assert.strictEqual(H.length, 4 + 15 + 1 + 17, "« toutes » : 10 colonnes fixes + 5 champs cochés + ID interne SIGEO + 17 colonnes du fichier prêt");
   const gs = (r, n) => out.rows[r - 1][H.indexOf(n)];
   assert.deepStrictEqual(["DPE analyse", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "N° FU"].map((n) => gs(2, n)),
     ["À VÉRIFIER", "05/06/2012", "04/06/2022", "105", "C", ""], "sans analyse du PDF : données Intralia, fournisseur à saisir");
@@ -230,8 +251,17 @@ const ROWS = [
   const H2 = out.rows[0];
   const ac = ["DPE analyse", "PDF analysé", "N° FU", "Fournisseur DPE", "N° ADEME", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "Remarques DPE"];
   const ga = (r) => ac.map((n) => { const i = H2.indexOf(n); assert.ok(i >= 0, "colonne " + n); return out.rows[r - 1][i]; });
-  assert.deepStrictEqual(H2.slice(4), ["DPE analyse", "PDF analysé", "N° FU", "Fournisseur DPE", "Établi le", "Valable jusqu'au", "N° ADEME", "Énergie primaire (kWh/m²/an)",
-    "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "Coût min (€/an)", "Coût max (€/an)", "Remarques DPE"], "uniquement les colonnes de saisie");
+  assert.deepStrictEqual(H2.slice(4), ["ID interne SIGEO", "DPE analyse", "URL fiche DPE", "Type de local", "PDF analysé", "N° FU", "Fournisseur DPE", "Établi le", "Valable jusqu'au",
+    "N° ADEME", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "Coût min (€/an)", "Coût max (€/an)",
+    "Date d'indexation des prix", "Remarques DPE"], "uniquement le fichier prêt pour la saisie");
+  const gx = (r, n) => out.rows[r - 1][H2.indexOf(n)];
+  assert.deepStrictEqual([gx(2, "ID interne SIGEO"), gx(2, "URL fiche DPE"), gx(2, "Type de local")],
+    ["38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0", "habitation"]);
+  assert.deepStrictEqual([gx(3, "ID interne SIGEO"), gx(4, "ID interne SIGEO"), gx(12, "ID interne SIGEO"), gx(6, "ID interne SIGEO")], ["12", "5", "38", ""]);
+  assert.deepStrictEqual([gx(5, "DPE analyse"), gx(5, "URL fiche DPE")], ["À VÉRIFIER", ""]);
+  assert.strictEqual(gx(5, "Remarques DPE"), "fiche SIGEO introuvable : Introuvable (IM 393004 / LT 278)");
+  assert.ok(/Ligne 2 : SIGEO lot id 38 .*→ http:\/\/sigeo\.evoriel\.net\/popup\.aspx\/fr\/sig_imm\/diag_manage\/393001\/38\/0/.test(out.log), out.log);
+  assert.ok(/Ligne 12 : SIGEO lot id 38 .*\[cache\]/.test(out.log), out.log);
   assert.strictEqual(H2.indexOf("Fournisseur DPE"), H2.indexOf("N° FU") + 1);
   assert.deepStrictEqual(ga(2).slice(0, 11), ["OK", "PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf", "0528825", "EXPERT IMMOBILIER", "1259V1000732X", "05/06/2012", "04/06/2022", "105", "C", "25", "D"]);
   assert.deepStrictEqual(ga(3).slice(0, 5), ["À VÉRIFIER", "Cour Saint-Hubert_lot130_2011-08-24.pdf", "0394076x", "DIAG 75", "1159V1000130B"]);
@@ -240,12 +270,27 @@ const ROWS = [
   assert.strictEqual(ga(5)[7], "180,5", "énergie primaire d'Intralia (le PDF dit 180)");
   assert.strictEqual(ga(6)[11], "AUCUN_DPE_GED — 0 document(s) GED, aucun DPE");
   assert.deepStrictEqual(ga(5).slice(2, 5), ["0448957", "ACADE", "1559V1000278C"]);
+  // Onglet Saisie → « Modèle DPE » : étape réglée toute seule sur le fichier prêt.
+  const step = await panel.evaluate(() => {
+    document.getElementById("scenarioSteps").innerHTML = "";
+    $("addDpeTemplateBtn").click();
+    const st = getScenarioSteps().find((x) => x.type === "sigeoDpe");
+    const row = 1;
+    const norm = diagNormalizeData(diagRowData(st, row));
+    return { url: st.diagUrl, cols: st.diagCols, nav: buildNavUrl(st.diagUrl, state.rows[row]).url, errors: norm.errors, v: norm.v };
+  });
+  assert.strictEqual(step.url, "{URL fiche DPE}");
+  assert.strictEqual(step.nav, "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0", "URL reprise telle quelle (pas encodée)");
+  assert.deepStrictEqual(Object.assign({}, step.cols, { lot: "" }), Object.assign({}, await panel.evaluate(() => DIAG_PRESETS.intralia), { lot: "" }));
+  assert.strictEqual(step.cols.lot, "{lots}");
+  assert.deepStrictEqual(step.errors, [], "ligne 2 prête pour la saisie");
+  assert.deepStrictEqual([step.v.type, step.v.fou, step.v.dateEtabli, step.v.conso, step.v.ges, step.v.fichier], ["11", "0528825", "05/06/2012", "105", "25", "PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf"]);
   assert.deepStrictEqual([ga(6)[0], ga(8)[0], ga(9)[0]], ["Pas de PDF", "Pas de PDF", "Pas de PDF"]);
   assert.deepStrictEqual(ga(12), ga(2), "ligne déjà traitée : même analyse");
   assert.deepStrictEqual([ga(13)[0], ga(13)[5], ga(13)[11]], ["À VÉRIFIER", "02/02/2016", "analyse du PDF impossible (aucun texte exploitable (document vide ou scanné sans OCR)) : fournisseur et n° ADEME à saisir"]);
   assert.ok(/Ligne 2 : saisie OK : EXPERT IMMOBILIER \(FU 0528825\), ADEME 1259V1000732X/.test(out.log), out.log);
   assert.ok(/Ligne 4 : saisie À VÉRIFIER : DIAGNOSTICS DU NORD \(FU \?\), ADEME non trouvé.*fournisseur absent de la liste/.test(out.log), out.log);
-  assert.ok(/prêts pour la saisie : 2 OK, 3 à vérifier\./.test(out.log), out.log);
+  assert.ok(/prêts pour la saisie : 1 OK, 4 à vérifier ; 5 URL de fiche SIGEO\./.test(out.log), out.log);
   assert.ok(/Fournisseurs absents de la liste \(n° FU vide\) : DIAGNOSTICS DU NORD/.test(out.log), out.log);
   assert.strictEqual(await panel.evaluate(() => $("dsSupAddUnknown").hidden), false);
   const pre = await panel.evaluate(() => DIAG_PRESETS.analyse);
@@ -313,6 +358,22 @@ const ROWS = [
   assert.deepStrictEqual(cached, [true, 14, ["intraliaCabinets", "intraliaIdx:19"]]);
   assert.strictEqual(srv.stats.index.length, 2);
 
+  // id interne déjà connu (ex. colonne id_server) : réutilisé, pas de recherche SIGEO.
+  const posts0 = lsrv.stats.post;
+  const known = await panel.evaluate(async () => intraSigeoLookup({ imIdx: 0, knownIdx: 1, fiche: "", lc: getLotConfig(), run: {}, ad: null }, ["IM0393999", "77"], "5"));
+  assert.deepStrictEqual(known, { status: "OK", id: "77", known: true, url: "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393999/77/0" });
+  assert.strictEqual(lsrv.stats.post, posts0);
+  // Session SIGEO expirée : arrêt avec la ligne de reprise.
+  await ctx.clearCookies();
+  await panel.uncheck("#intraAnalyze");
+  await panel.selectOption("#intraMode", "find");
+  await panel.fill("#startRow", "2");
+  await panel.fill("#endRow", "4");
+  out = await run();
+  assert.ok(/SIGEO : session expirée\. Reconnecte-toi dans l'onglet SIGEO puis relance à partir de la ligne 2\./.test(out.log), out.log);
+  assert.ok(!/Ligne 3 /.test(out.log), "boucle arrêtée");
+  await stab.goto(lsrv.origin + "/__login");
+
   // 6. Profil : configuration sauvegardée / restaurée.
   const prof = await panel.evaluate(() => {
     $("intraMode").value = "download"; $("intraFolder").value = "DPE/Intralia"; $("intraSoc").value = "31";
@@ -331,4 +392,6 @@ const ROWS = [
   await browser.close();
   await srv.close();
   web.close();
+  lsrv.server.close();
+  process.exit(0);
 })().catch((e) => { console.error(e); process.exit(1); });

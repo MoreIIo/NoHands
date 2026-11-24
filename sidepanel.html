@@ -575,13 +575,20 @@
       </div>
       <p class="hint" id="intraAnalyzeHint">Données du DPE (établi le, énergie primaire, GES, classes, coûts) : celles <strong>saisies dans Intralia</strong> ; « Valable jusqu'au » calculé comme SIGEO. Lus dans le PDF (texte / OCR) : <strong>fournisseur → N° FU</strong> (liste « Fournisseurs → n° FU » de l'Analyse DPE, <span id="intraSupCount"></span>) et <strong>N° ADEME</strong>. En repérage seul, le PDF est lu sans être enregistré.</p>
       <div class="field-row">
+        <label for="intraImCol" title="N° d'immeuble SIGEO (IM_format, IM0393534 ou 393534)">IM SIGEO :</label>
+        <select id="intraImCol" data-colselect="optional"></select>
+        <label for="intraIdCol" title="Colonne où l'id interne du lot est déjà connu (ex. id_server) : réutilisé s'il est rempli, sinon cherché et écrit dedans. « aucune » : colonne « ID interne SIGEO ».">id interne :</label>
+        <select id="intraIdCol" data-colselect="optional"></select>
+      </div>
+      <p class="hint">Pour chaque DPE trouvé, l'<strong>id interne du lot SIGEO</strong> est cherché (IM + n° de lot, réglages de « Recherche d'id interne de lot ») sauf s'il est déjà connu, puis l'<strong>URL de la fiche DPE</strong> est écrite (<code>…/diag_manage/{IM}/{id interne}/0</code>). Il faut être connecté à SIGEO. IM « aucune » = pas de recherche SIGEO.</p>
+      <div class="field-row">
         <label for="intraOut">Colonnes écrites :</label>
         <select id="intraOut">
-          <option value="saisie">utiles à la saisie SIGEO seulement</option>
+          <option value="saisie">fichier prêt pour la saisie SIGEO</option>
           <option value="all">toutes (détail Intralia, liens, UUID…)</option>
         </select>
       </div>
-      <p class="hint">Saisie : <code>DPE analyse</code> (OK / À VÉRIFIER / Pas de PDF / ÉCHEC), <code>PDF analysé</code>, <code>N° FU</code>, <code>Fournisseur DPE</code>, <code>Établi le</code>, <code>Valable jusqu'au</code>, <code>N° ADEME</code>, énergie primaire, classe énergie, GES, classe GES, coûts min/max, <code>Remarques DPE</code> — les noms lus par l'étape « SIGEO : saisir un DPE » (préréglage « Colonnes de l'Analyse DPE »).</p>
+      <p class="hint">Fichier prêt : <code>DPE analyse</code> (OK / À VÉRIFIER / Pas de PDF / ÉCHEC), <code>URL fiche DPE</code>, <code>Type de local</code>, <code>PDF analysé</code>, <code>N° FU</code>, <code>Fournisseur DPE</code>, <code>Établi le</code>, <code>Valable jusqu'au</code>, <code>N° ADEME</code>, énergie primaire, classe énergie, GES, classe GES, coûts min/max, <code>Date d'indexation des prix</code>, <code>Remarques DPE</code> (+ <code>ID interne SIGEO</code>). Ensuite : onglet Saisie → <strong>Modèle DPE</strong> règle l'étape tout seul sur ces colonnes ; choisis le dossier <code>Téléchargements\DPE</code>.</p>
       <details class="imx-adv" id="intraFieldsBox">
         <summary>DPE déjà saisi dans Intralia → colonnes (<span id="intraFieldsCount"></span>)</summary>
         <p class="hint">Valeurs lues dans le formulaire DPE de la page du lot (jamais enregistré). <code>DATEDIAG</code> est la date du DPE ; <code>DPE_Date_GED</code> la date de dépôt du fichier dans la GED.</p>
@@ -602,6 +609,10 @@
         <div class="field-row">
           <label class="imx-sel-label" for="intraFlower">URL FlowerDocs :</label>
           <input type="text" id="intraFlower" placeholder="https://www.oralia.flowerdocs.cloud" style="flex:1;min-width:160px" />
+        </div>
+        <div class="field-row">
+          <label class="imx-sel-label" for="intraFiche">URL fiche DPE :</label>
+          <input type="text" id="intraFiche" spellcheck="false" style="flex:1;min-width:160px" title="{IM} = n° d'immeuble, {ID} = id interne du lot" />
         </div>
         <div class="field-row">
           <label for="intraDelay">pause entre lots (ms) :</label>

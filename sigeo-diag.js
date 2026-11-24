@@ -129,8 +129,18 @@ const DIAG_PRESETS = Object.freeze({
     emission_ges: "{GES (kg CO2/m²/an)}", lettre_ep_forcee: "{Classe énergie}", lettre_ges_forcee: "{Classe GES}",
     altitude_800m: "", nouvelles_valeurs: "", cout_min: "{Coût min (€/an)}", cout_max: "{Coût max (€/an)}",
     date_prix: "", resultat: "", commentaire: "", fichier_dpe: "{PDF analysé}", lot: "{lot}"
+  }),
+  // Fichier final de l'extraction « DPE Intralia » (v2.19.0) ; URL de la fiche :
+  // colonne « URL fiche DPE » (DIAG_INTRALIA_URL).
+  intralia: Object.freeze({
+    type_local: "{Type de local}", code_fournisseur: "{N° FU}", date_etabli: "{Établi le}",
+    date_validite: "{Valable jusqu'au}", date_debut_validite: "", numero_ademe: "{N° ADEME}", conso_ep: "{Énergie primaire (kWh/m²/an)}",
+    emission_ges: "{GES (kg CO2/m²/an)}", lettre_ep_forcee: "{Classe énergie}", lettre_ges_forcee: "{Classe GES}",
+    altitude_800m: "", nouvelles_valeurs: "", cout_min: "{Coût min (€/an)}", cout_max: "{Coût max (€/an)}",
+    date_prix: "{Date d'indexation des prix}", resultat: "", commentaire: "", fichier_dpe: "{PDF analysé}", lot: ""
   })
 });
+const DIAG_INTRALIA_URL = "{URL fiche DPE}";
 
 const DIAG_DEFAULTS = Object.freeze({
   desc: "DPE", resultCol: "Saisie DPE", timeoutMs: 15000, uploadTimeoutMs: 60000, maxPdfBytes: 40 * 1024 * 1024,
@@ -1909,6 +1919,7 @@ function diagStepHtml(step, esc) {
         <div class="scn-row">
           <button class="btn sm scn-diag-preset" data-preset="default" type="button">Noms par défaut</button>
           <button class="btn sm scn-diag-preset" data-preset="analyse" type="button" title="Colonnes écrites par l'extraction « Analyse DPE »">Colonnes de l'Analyse DPE</button>
+          <button class="btn sm scn-diag-preset" data-preset="intralia" type="button" title="Fichier final de l'extraction « DPE Intralia » (colonnes + URL de la fiche)">Fichier DPE Intralia</button>
         </div>
       </details>
       <div class="scn-row scn-only-diag">
@@ -1980,7 +1991,7 @@ function diagStepRead(el) {
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
-    DIAG_IDS, DIAG_FIELDS, DIAG_PRESETS, DIAG_DEFAULTS,
+    DIAG_IDS, DIAG_FIELDS, DIAG_PRESETS, DIAG_DEFAULTS, DIAG_INTRALIA_URL,
     diagNorm, diagFold, diagDate, diagDateEq, diagSerialToDate, diagExpectedValidity, diagIsNewDpe, ademeSaisissableAvantEnreg,
     diagParseNum, diagNum, diagNumEq, diagBool, diagLetter, diagAdeme, diagAdemeKey, diagType, diagNormalizeData,
     diagSame, diagShow, diagQ, diagFouKey, DIAG_CODES, DIAG_PHASE_A,

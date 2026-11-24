@@ -324,7 +324,8 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
     const res = await intra.intraProcessRow(adapter(), params("PARC FLEURI LE CONCERTO 1", "732", { analyze: true }));
     assert.strictEqual(res.status, "OK");
     const v = anv(res);
-    assert.deepStrictEqual(Object.keys(v), [...ds.DS_COLS, intra.INTRA_SUPPLIER_COL]);
+    assert.deepStrictEqual(Object.keys(v), intra.INTRA_SAISIE_COLS);
+    assert.strictEqual(v["Type de local"], "habitation", "lot « Appartement »");
     assert.deepStrictEqual(
       ["DPE analyse", "PDF analysé", "N° FU", "Fournisseur DPE", "N° ADEME", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES"].map((c) => v[c]),
       ["OK", "PARC FLEURI LE CONCERTO 1_lot732_2013-07-17.pdf", "0528825", "EXPERT IMMOBILIER", "1259V1000732X", "05/06/2012", "04/06/2022", "105", "C", "25", "D"]);
@@ -366,11 +367,12 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
       params("PARC FLEURI LE CONCERTO 1", "732", { analyze: true })));
     assert.ok(/PDF établi le 02\/01\/2013 ≠ Intralia 05\/06\/2012/.test(d["Remarques DPE"]), d["Remarques DPE"]);
     assert.ok(!/ADEME|OCR/.test(d["Remarques DPE"]), "DPE ancien : pas de remarque ADEME / OCR des valeurs (prises dans Intralia)");
-    const n = intra.intraSaisieValues({ status: "OK", chosen: { name: "x.pdf" }, file: "x.pdf", fields: { DATEDIAG: "2023-04-17", DPE1: "221", libdpe1: "D", GES1: "6", libges1: "B", MTDIAGMIN: "479", MTDIAGMAX: "649" },
+    const n = intra.intraSaisieValues({ status: "OK", chosen: { name: "x.pdf" }, file: "x.pdf", lotType: "Appartement",
+      fields: { DATEDIAG: "2023-04-17", DPE1: "221", libdpe1: "D", GES1: "6", libges1: "B", MTDIAGMIN: "479", MTDIAGMAX: "649", ANNEREFDIAG: "2021" },
       analysis: Object.assign(ds.dsNewRecord(), { ademe: "2321E1261645S", remarques: ["n° ADEME lu par OCR : à contrôler"], supplier: { entry: { name: "ACADE", code: "448957" } } }) },
     { DS_COLS: ds.DS_COLS, dsRecordValues: ds.dsRecordValues, validity: diag.diagExpectedValidity });
-    assert.deepStrictEqual([n["Établi le"], n["Valable jusqu'au"], n["Coût min (€/an)"], n["Coût max (€/an)"], n["N° ADEME"], n["DPE analyse"], n["Remarques DPE"]],
-      ["17/04/2023", "16/04/2033", "479", "649", "2321E1261645S", "À VÉRIFIER", "n° ADEME lu par OCR : à contrôler"]);
+    assert.deepStrictEqual([n["Établi le"], n["Valable jusqu'au"], n["Coût min (€/an)"], n["Coût max (€/an)"], n["Date d'indexation des prix"], n["N° ADEME"], n["DPE analyse"], n["Remarques DPE"]],
+      ["17/04/2023", "16/04/2033", "479", "649", "01/01/2021", "2321E1261645S", "À VÉRIFIER", "n° ADEME lu par OCR : à contrôler"]);
     // Sans DPE / erreurs.
     const none = anv(await intra.intraProcessRow(adapter(), params("OPERA", "9", { analyze: true })));
     assert.deepStrictEqual([none["DPE analyse"], none["Remarques DPE"]], ["Pas de PDF", "AUCUN_DPE_GED — 0 document(s) GED, aucun DPE"]);
@@ -380,7 +382,26 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
       const fl = await intra.intraProcessRow(adapter(), params("PARC FLEURI LE CONCERTO 1", "732", { download: false, analyze: true }));
       assert.deepStrictEqual([fl.status, anv(fl)["DPE analyse"]], [S.FLOWERDOCS_NON_CONNECTE, "ÉCHEC"], "repérage + analyse : FlowerDocs déconnecté = arrêt");
     } finally { srv.setFlowerLogged(true); }
-    assert.deepStrictEqual(intra.intraSaisieCols(ds.DS_COLS).slice(0, 4), ["DPE analyse", "PDF analysé", "N° FU", "Fournisseur DPE"]);
+    assert.deepStrictEqual(intra.intraSaisieCols().slice(0, 6), ["DPE analyse", "URL fiche DPE", "Type de local", "PDF analysé", "N° FU", "Fournisseur DPE"]);
+    // Colonnes du fichier final = celles du préréglage « Fichier DPE Intralia » de l'étape de saisie.
+    Object.values(diag.DIAG_PRESETS.intralia).filter(Boolean).forEach((t) => {
+      const c = t.replace(/^\{|\}$/g, "");
+      assert.ok(intra.INTRA_SAISIE_COLS.includes(c), "colonne lue par l'étape de saisie absente du fichier : " + c);
+    });
+    assert.strictEqual(diag.DIAG_INTRALIA_URL, "{URL fiche DPE}");
+    // Type de local, URL de la fiche, fiche SIGEO introuvable.
+    assert.deepStrictEqual(["Appartement T3", "Maison", "Commerce", "Local commercial", "Bureaux", "Garage", "Cave", ""].map((t) => intra.intraTypeLocal(t).value),
+      ["habitation", "habitation", "hors habitation", "hors habitation", "hors habitation", "", "", ""]);
+    assert.strictEqual(intra.intraFicheUrl("", "393513", "5"), "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393513/5/0");
+    const base = { status: "OK", chosen: { name: "x.pdf" }, fields: { DATEDIAG: "05/06/2012", DPE1: "105", libdpe1: "C", GES1: "25", libges1: "D" },
+      analysis: Object.assign(ds.dsNewRecord(), { supplier: { entry: { name: "ACADE", code: "0448957" } } }) };
+    const dsx = { DS_COLS: ds.DS_COLS, dsRecordValues: ds.dsRecordValues, validity: diag.diagExpectedValidity };
+    const ok = intra.intraSaisieValues(Object.assign({}, base, { lotType: "Appartement", sigeo: { status: "OK", id: "38", url: intra.intraFicheUrl("", "393534", "38") } }), dsx);
+    assert.deepStrictEqual([ok["DPE analyse"], ok["URL fiche DPE"], ok["Type de local"], ok["Date d'indexation des prix"], ok["Remarques DPE"]],
+      ["OK", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393534/38/0", "habitation", "", ""], "DPE ancien : ni coûts ni date d'indexation");
+    const ko = intra.intraSaisieValues(Object.assign({}, base, { lotType: "Garage", sigeo: { status: "INTROUVABLE", text: "Introuvable (IM 393534 / LT 732)" } }), dsx);
+    assert.deepStrictEqual([ko["DPE analyse"], ko["URL fiche DPE"], ko["Type de local"]], ["À VÉRIFIER", "", ""]);
+    assert.strictEqual(ko["Remarques DPE"], "type de lot « Garage » : type de local à vérifier (habitation par défaut) ; fiche SIGEO introuvable : Introuvable (IM 393534 / LT 732)");
     // Coûts lus par le libellé « Montant théorique des dépenses énergétiques » (Entre / et).
     const html = `<form name="form1"><table><tr><td><b>Montant théorique des dépenses énergétiques :</b></td>
       <td>Entre :<br><input type="text" name="MtDepMin" value="247"><br>et :<br><input type="text" name="MtDepMax" value="335"></td></tr>
@@ -388,11 +409,11 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
     const pl = await runOp(tab, { op: "parseLot", html });
     assert.deepStrictEqual([pl.fields.MTDIAGMIN, pl.fields.MTDIAGMAX, pl.fields.DATEDIAG, pl.fields.DPE1], ["247", "335", "17/04/2023", "0"], "libellé + nom en minuscules");
     const pdfRec = Object.assign(ds.dsNewRecord(), { epM2: 221, coutMin: 479, coutMax: 649, etabli: { y: 2023, m: 4, d: 17 }, supplier: { entry: { name: "ACADE", code: "448957" } }, ademe: "2321E1261645S" });
-    const z = intra.intraSaisieValues({ status: "OK", chosen: { name: "x.pdf" }, fields: pl.fields, analysis: pdfRec },
+    const z = intra.intraSaisieValues({ status: "OK", chosen: { name: "x.pdf" }, lotType: "Appartement", fields: pl.fields, analysis: pdfRec },
       { DS_COLS: ds.DS_COLS, dsRecordValues: ds.dsRecordValues, validity: diag.diagExpectedValidity });
     assert.deepStrictEqual([z["Coût min (€/an)"], z["Coût max (€/an)"], z["Énergie primaire (kWh/m²/an)"]], ["247", "335", "221"], "coûts d'Intralia ; 0 dans Intralia → valeur du scan");
     assert.ok(/énergie primaire vide dans Intralia : valeur du PDF/.test(z["Remarques DPE"]), z["Remarques DPE"]);
-    const z2 = intra.intraSaisieValues({ status: "OK", chosen: { name: "x.pdf" }, fields: { DATEDIAG: "17/04/2023", DPE1: "221", libdpe1: "D", GES1: "6", libges1: "B", MTDIAGMIN: "0", MTDIAGMAX: "0,00" }, analysis: pdfRec },
+    const z2 = intra.intraSaisieValues({ status: "OK", chosen: { name: "x.pdf" }, lotType: "Appartement", fields: { DATEDIAG: "17/04/2023", DPE1: "221", libdpe1: "D", GES1: "6", libges1: "B", MTDIAGMIN: "0", MTDIAGMAX: "0,00" }, analysis: pdfRec },
       { DS_COLS: ds.DS_COLS, dsRecordValues: ds.dsRecordValues, validity: diag.diagExpectedValidity });
     assert.deepStrictEqual([z2["Coût min (€/an)"], z2["Coût max (€/an)"]], ["479", "649"], "coûts à 0 dans Intralia → scan");
     assert.strictEqual(intra.intraNormalizeConfig({}).out, "saisie");

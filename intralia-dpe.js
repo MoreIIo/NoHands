@@ -59,6 +59,32 @@ const INTRA_STATUS = Object.freeze({
 // saisir un DPE ») + le nom du fournisseur.
 const INTRA_SUPPLIER_COL = "Fournisseur DPE";
 
+// Fichier final « prêt pour la saisie SIGEO » (v2.19.0) : colonnes lues telles
+// quelles par l'étape « SIGEO : saisir un DPE » (préréglage DIAG_PRESETS.intralia
+// de sigeo-diag.js, choisi tout seul par « Modèle DPE »).
+const INTRA_SAISIE_COLS = Object.freeze([
+  "DPE analyse", "URL fiche DPE", "Type de local", "PDF analysé", "N° FU", INTRA_SUPPLIER_COL,
+  "Établi le", "Valable jusqu'au", "N° ADEME", "Énergie primaire (kWh/m²/an)", "Classe énergie",
+  "GES (kg CO2/m²/an)", "Classe GES", "Coût min (€/an)", "Coût max (€/an)", "Date d'indexation des prix",
+  "Remarques DPE"
+]);
+const INTRA_ID_COL = "ID interne SIGEO";
+// Popup « Diagnostic » SIGEO d'un lot : {IM} = n° d'immeuble, {ID} = id interne du lot.
+const INTRA_FICHE_DEFAULT = "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/{IM}/{ID}/0";
+
+function intraFicheUrl(tpl, im, id) {
+  return String(tpl || INTRA_FICHE_DEFAULT).trim().replace(/\{IM\}/gi, String(im)).replace(/\{ID\}/gi, String(id));
+}
+
+// Type de lot Intralia (« Appartement », « Commerce »…) → type de local SIGEO.
+function intraTypeLocal(t) {
+  const f = intraFold(t);
+  if (!f) return { value: "", known: false };
+  if (/appart|maison|studio|logement|habitation|duplex|triplex|pavillon|chambre|villa|loft|(^|\W)[tf]\d/.test(f)) return { value: "habitation", known: true };
+  if (/commerc|bureau|local|activit|entrepot|boutique|professionnel|tertiaire|atelier|hotel|restaurant|magasin/.test(f)) return { value: "hors habitation", known: true };
+  return { value: "", known: false };
+}
+
 // Colonnes toujours écrites (créées si absentes).
 const INTRA_COLS = Object.freeze([
   "Intralia_Cabinet", "Intralia_ID_Immeuble", "Intralia_URL_Lot",
@@ -312,6 +338,9 @@ function intraNormalizeConfig(c = {}) {
     verify: !!c.verify,
     toolbox: !!c.toolbox,
     analyze: c.analyze !== false,
+    imCol: String(c.imCol ?? ""),
+    idCol: String(c.idCol ?? ""),
+    fiche: String(c.fiche ?? "").trim() || INTRA_FICHE_DEFAULT,
     out: c.out === "all" ? "all" : "saisie",
     ocr: ["auto", "always", "never"].includes(c.ocr) ? c.ocr : "auto",
     fields,
@@ -354,8 +383,7 @@ function intraRowValues(res, fieldKeys) {
 // ds = { DS_COLS, dsRecordValues, validity(date) }. Aucun DPE → « Pas de PDF ».
 function intraSaisieValues(res, ds) {
   const v = {};
-  ds.DS_COLS.forEach((c) => { v[c] = ""; });
-  v[INTRA_SUPPLIER_COL] = "";
+  INTRA_SAISIE_COLS.forEach((c) => { v[c] = ""; });
   const S = INTRA_STATUS;
   const why = `${res.status || ""}${res.detail ? " — " + res.detail : ""}`;
   if ([S.AUCUN_DPE_GED, S.LOT_INTROUVABLE, S.IMMEUBLE_INTROUVABLE, S.AMBIGU].includes(res.status)) {
@@ -402,6 +430,24 @@ function intraSaisieValues(res, ds) {
   if (isNew) {
     v["Coût min (€/an)"] = pick("Coût min (€/an)", num(f.MTDIAGMIN), "coût min");
     v["Coût max (€/an)"] = pick("Coût max (€/an)", num(f.MTDIAGMAX), "coût max");
+    // Date d'indexation des prix : année de référence d'Intralia, sinon le PDF.
+    const yr = String(f.ANNEREFDIAG ?? "").trim();
+    const pr = a && !a.error && a.prixRef;
+    if (/^(19|20)\d{2}$/.test(yr)) v["Date d'indexation des prix"] = `01/01/${yr}`;
+    else if (pr) {
+      v["Date d'indexation des prix"] = `${String(pr.d).padStart(2, "0")}/${String(pr.m).padStart(2, "0")}/${pr.y}`;
+      rem.push("année de référence vide dans Intralia : date d'indexation du PDF");
+    } else rem.push("date d'indexation des prix non renseignée");
+  }
+  // Type de local (type du lot dans l'index Intralia).
+  const tl = intraTypeLocal(res.lotType);
+  v["Type de local"] = tl.value;
+  if (!tl.known) rem.push(res.lotType ? `type de lot « ${res.lotType} » : type de local à vérifier (habitation par défaut)` : "type de lot inconnu : type de local à vérifier");
+  // Fiche SIGEO (id interne du lot) : res.sigeo = { status, url, text }.
+  const sg = res.sigeo;
+  if (sg) {
+    if (sg.url) v["URL fiche DPE"] = sg.url;
+    else rem.push(`fiche SIGEO introuvable : ${sg.text || sg.status}`);
   }
   if (!a) rem.push("PDF non analysé : fournisseur et n° ADEME à saisir");
   else if (a.error) rem.push(`analyse du PDF impossible (${a.error}) : fournisseur et n° ADEME à saisir`);
@@ -422,12 +468,9 @@ function intraSaisieValues(res, ds) {
   return v;
 }
 
-// Colonnes écrites en mode « utiles à la saisie » (ordre de l'Analyse DPE,
-// Fournisseur DPE après N° FU).
-function intraSaisieCols(dsCols) {
-  const cols = dsCols.slice();
-  cols.splice(cols.indexOf("N° FU") + 1, 0, INTRA_SUPPLIER_COL);
-  return cols;
+// Colonnes écrites en mode « utiles à la saisie ».
+function intraSaisieCols() {
+  return INTRA_SAISIE_COLS.slice();
 }
 
 // Variables du modèle de nom de fichier pour le DPE retenu c.
@@ -716,7 +759,7 @@ async function intraProcessRow(ad, p) {
   }
 
   const m = look.matches[0];
-  Object.assign(res, { cabinet: m.cabinet, soc: m.soc, imm: m.imm, lotUrl: intraLotUrl(p.base, m.soc, m.imm, m.idLot || m.lot) });
+  Object.assign(res, { cabinet: m.cabinet, soc: m.soc, imm: m.imm, lotType: m.type || "", lotUrl: intraLotUrl(p.base, m.soc, m.imm, m.idLot || m.lot) });
   if (ad.stopped()) return done(S.ERREUR, "arrêté", { error: "arrêté" });
 
   let page;
@@ -802,7 +845,8 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     INTRA_DEFAULT_BASE, INTRA_DEFAULT_FLOWER, INTRA_DEFAULT_SOC, INTRA_ALL_SOC, INTRA_DEFAULT_CABINETS,
     INTRA_DEFAULT_REGEX, INTRA_DEFAULT_NAME, INTRA_DEFAULT_FOLDER, INTRA_DEFAULT_DELAY, INTRA_DEFAULT_MAX_AGE_DAYS,
-    INTRA_STATUS, INTRA_COLS, INTRA_FIELDS, INTRA_SUPPLIER_COL,
+    INTRA_STATUS, INTRA_COLS, INTRA_FIELDS, INTRA_SUPPLIER_COL, INTRA_SAISIE_COLS, INTRA_ID_COL, INTRA_FICHE_DEFAULT,
+    intraFicheUrl, intraTypeLocal,
     intraNormName, intraNormLot, intraFold, intraIndexUrl, intraFormUrl, intraLotUrl, intraFlowerViewUrl, intraFlowerDownloadUrl,
     intraBuildIndex, intraSimilarity, intraCloseNames, intraLookup, intraCompileRegex, intraIsDpeName, intraSelectDpe,
     intraSanitize, intraFolder, intraExtOf, intraFileName, intraClassifyFile, intraNormalizeConfig, intraRowValues, intraTemplateVars, intraSaisieValues, intraSaisieCols,

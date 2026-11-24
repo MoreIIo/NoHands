@@ -2578,12 +2578,15 @@ $("navEnabled").addEventListener("change", () => {
 function buildNavUrl(template, row) {
   const missing = [];
   const values = [];
-  const url = String(template || "").replace(/\{([^{}]+)\}/g, (_, name) => {
+  // Modèle réduit à une colonne qui contient déjà une URL complète
+  // (ex. « {URL fiche DPE} ») : valeur reprise telle quelle, pas encodée.
+  const whole = /^\s*\{[^{}]+\}\s*$/.test(String(template || ""));
+  const url = String(template || "").trim().replace(/\{([^{}]+)\}/g, (_, name) => {
     const idx = colIndexByName(name.trim());
     if (idx < 0) { missing.push(name.trim()); return ""; }
     const v = getCellByIndex(row, idx).trim();
     values.push(v);
-    return encodeURIComponent(v);
+    return whole && /^https?:\/\//i.test(v) ? v : encodeURIComponent(v);
   });
   return { url, missing, values };
 }
@@ -4055,7 +4058,9 @@ function intraGuessCols() {
     find(/immeuble/i, /^(n°|num|id|code)|\bIM\b|format|interne|intralia/i);
   const lot = find(/^lots?$/i) || find(/^(n°|num[eé]ro)\s*(de\s*)?lots?$/i) ||
     find(/\blots?\b/i, /\bIM\b|format|\bid\b|interne|url|r[ée]sultat|nb|intralia/i);
-  return { nom, lot };
+  const im = find(/^IM[ _-]?format$/i) || find(/^(n°\s*)?IM$/i) || find(/^code\s*(IM|immeuble)$/i);
+  const id = find(/^id[ _-]?server$/i) || find(/^id[ _-]?interne( sigeo)?$/i) || find(/^id[ _-]?lot$/i);
+  return { nom, lot, im, id };
 }
 
 function getIntraConfig() {
@@ -4072,6 +4077,9 @@ function getIntraConfig() {
     analyze: $("intraAnalyze").checked,
     ocr: $("intraOcr").value,
     out: $("intraOut").value,
+    imCol: $("intraImCol").value,
+    idCol: $("intraIdCol").value,
+    fiche: $("intraFiche").value,
     fields: Array.from(document.querySelectorAll(".intra-field:checked")).map((i) => i.dataset.k),
     base: $("intraBase").value,
     flower: $("intraFlower").value,
@@ -4087,6 +4095,9 @@ function applyIntraConfig(raw) {
   const g = intraGuessCols();
   fillColumnSelect($("intraNomCol"), c.nomCol || g.nom);
   fillColumnSelect($("intraLotCol"), c.lotCol || g.lot);
+  fillColumnSelect($("intraImCol"), c.imCol || g.im, colSelectExtras("optional"));
+  fillColumnSelect($("intraIdCol"), c.idCol || g.id, colSelectExtras("optional"));
+  $("intraFiche").value = c.fiche;
   intraRenderSoc(c.soc);
   $("intraRegex").value = c.regex;
   $("intraMode").value = c.mode;
@@ -4136,7 +4147,7 @@ function intraOriginOf(u) { try { return new URL(u).origin; } catch (_) { return
 
 // Onglet ouvert sur l'origine `base` (onglet cible d'abord) ; sinon, si
 // open, un onglet Intralia est ouvert en arrière-plan (diag.php, GET).
-async function intraFindTab(base, open) {
+async function intraFindTab(base, open, openUrl) {
   const origin = intraOriginOf(base);
   if (!origin) return null;
   const on = (u) => intraOriginOf(u || "") === origin;
@@ -4152,8 +4163,9 @@ async function intraFindTab(base, open) {
   } catch (_) { /* ignoré */ }
   if (!open || !chrome.tabs.create) return null;
   try {
-    logLine(`Aucun onglet ${origin} : ouverture de ${intraFormUrl(base)} en arrière-plan.`, "");
-    const t = await chrome.tabs.create({ url: intraFormUrl(base), active: false });
+    const target = openUrl || intraFormUrl(base);
+    logLine(`Aucun onglet ${origin} : ouverture de ${target} en arrière-plan.`, "");
+    const t = await chrome.tabs.create({ url: target, active: false });
     for (let i = 0; i < 120; i++) {
       await sleep(250);
       const x = await chrome.tabs.get(t.id);
@@ -4370,6 +4382,32 @@ function intraAnalysisText(res, v) {
     `${v["Énergie primaire (kWh/m²/an)"] || "?"} kWh/m² ${v["Classe énergie"] || ""}, ${v["GES (kg CO2/m²/an)"] || "?"} kg CO2/m² ${v["Classe GES"] || ""}`;
 }
 
+// Id interne du lot SIGEO (IM + n° de lot) → URL de la fiche DPE. Réutilise la
+// recherche de l'extraction « Recherche d'id interne de lot » (lotLookup, ses
+// réglages, son cache) dans un onglet SIGEO. ctx = { imIdx, knownIdx, fiche, lc, run, ad }.
+async function intraSigeoLookup(ctx, row, lot) {
+  const imRaw = getCellByIndex(row, ctx.imIdx).trim();
+  const im = lotNormIm(imRaw);
+  if (!im) return { status: "IM_VIDE", text: imRaw ? `IM invalide « ${imRaw} »` : "IM vide dans la ligne" };
+  const known = ctx.knownIdx >= 0 ? getCellByIndex(row, ctx.knownIdx).trim() : "";
+  if (known) return { status: "OK", id: known, known: true, url: intraFicheUrl(ctx.fiche, im.num, known) };
+  if (!ctx.ad) {
+    const tabId = await intraFindTab(ctx.lc.url || LOT_DEFAULT_URL, true, ctx.lc.url || LOT_DEFAULT_URL);
+    if (tabId == null) return { status: "ERREUR", text: "aucun onglet SIGEO (ouvre SIGEO et connecte-toi)" };
+    ctx.ad = lotChromeAdapter(tabId, Math.max(2000, ctx.lc.timeout));
+  }
+  let r;
+  try {
+    r = await lotLookup(ctx.ad, { im: imRaw, lt: lot, url: ctx.lc.url, statut: ctx.lc.statut, sel: ctx.lc.sel,
+      timeoutMs: Math.max(2000, ctx.lc.timeout), method: ctx.lc.method }, ctx.run);
+  } catch (e) { r = { status: "ERREUR", matches: [], error: e.message || String(e) }; }
+  if (r.status === "OK") {
+    const m = r.matches[0];
+    return { status: "OK", id: m.id, label: m.label, url: intraFicheUrl(ctx.fiche, im.num, m.id), cached: !!r.cached };
+  }
+  return { status: r.status, auth: r.status === "AUTH", text: `${lotStatusText(r)} (IM ${im.num} / LT ${lotNormLt(lot) || lot})` };
+}
+
 function intraParams(cfg, row, idx, re) {
   const folder = intraFolder(cfg.folder);
   return {
@@ -4412,7 +4450,8 @@ function intraEstimateText() {
     keys.add(intraNormName(nom) + "|" + intraNormLot(lot));
   }
   if (!n) return "";
-  const per = 700 + cfg.delay + (cfg.mode === "download" || cfg.analyze ? 1500 : 0) + (cfg.verify ? 2500 : 0) + (cfg.analyze ? 2000 : 0);
+  const per = 700 + cfg.delay + (cfg.mode === "download" || cfg.analyze ? 1500 : 0) + (cfg.verify ? 2500 : 0) + (cfg.analyze ? 2000 : 0) +
+    (colIndexByName(cfg.imCol) >= 0 ? 1500 : 0);
   const loaded = intraIdxMem && intraIdxMem.soc === cfg.soc && intraIdxMem.base === cfg.base && !intraIdxStale(intraIdxMem, cfg);
   const idxMs = loaded ? 0 : cfg.soc === INTRA_ALL_SOC ? 100000 : 15000;
   return `Estimation : ${n} lot${n > 1 ? "s" : ""} (${keys.size} différent${keys.size > 1 ? "s" : ""}) → ~${formatDuration(keys.size * per + idxMs)}` +
@@ -4442,10 +4481,11 @@ async function runIntraExtraction() {
   $("stopBtn").disabled = false;
   $("log").innerHTML = "";
   runLog = [];
-  lastRunOutputs = [{ col: "DPE_Statut" }, { col: "PDF analysé" }, { col: "N° FU" }, { col: "N° ADEME" }, { col: "Établi le" }, { col: "DPE analyse" }];
+  lastRunOutputs = [{ col: "DPE_Statut" }, { col: "DPE analyse" }, { col: "N° FU" }, { col: "N° ADEME" }, { col: "ID interne SIGEO" }, { col: "PDF analysé" }];
   const total = Math.max(0, endIdx - startIdx + 1);
   let done = 0, nOk = 0, nDl = 0, viaSeen = false;
   const anCounts = { OK: 0, "À VÉRIFIER": 0, "ÉCHEC": 0 };
+  let nFiche = 0, sigeoAuth = false;
   const sup = cfg.analyze ? dsParseSuppliers($("dsSuppliers").value) : null;
   if (cfg.analyze) dsUnknownSuppliers.clear();
   const runStart = Date.now();
@@ -4495,9 +4535,19 @@ async function runIntraExtraction() {
   // 2. Colonnes de sortie (créées si absentes).
   const createdCols = {};
   // « utiles à la saisie » : uniquement les colonnes lues par « SIGEO : saisir un DPE ».
+  // SIGEO : id interne du lot → URL de la fiche DPE (si une colonne IM est choisie).
+  const sig = { imIdx: cfg.imCol ? colIndexByName(cfg.imCol) : -1, knownIdx: cfg.idCol ? colIndexByName(cfg.idCol) : -1,
+    fiche: cfg.fiche, lc: getLotConfig(), run: {}, ad: null };
+  const sigeoOn = sig.imIdx >= 0;
+  if (sigeoOn) {
+    lotClearCache();
+    logLine(`SIGEO : id interne du lot par IM (« ${cfg.imCol} ») + n° de lot${sig.knownIdx >= 0 ? `, déjà connu dans « ${cfg.idCol} »` : ""} → URL de la fiche DPE.`, "");
+  }
+  const idCols = sigeoOn && sig.knownIdx < 0 ? [INTRA_ID_COL] : [];
+  // « fichier prêt » : uniquement les colonnes lues par « SIGEO : saisir un DPE ».
   const outCols = cfg.out === "all"
-    ? INTRA_COLS.concat(cfg.fields.map((k) => INTRA_FIELDS.find((f) => f.k === k).col), intraSaisieCols(DS_COLS))
-    : intraSaisieCols(DS_COLS);
+    ? INTRA_COLS.concat(cfg.fields.map((k) => INTRA_FIELDS.find((f) => f.k === k).col), idCols, intraSaisieCols())
+    : idCols.concat(intraSaisieCols());
   const colIdx = {};
   outCols.forEach((c) => { colIdx[c] = resolveOutputTarget(c, createdCols); });
   if (Object.keys(createdCols).length) renderColumns();
@@ -4533,8 +4583,17 @@ async function runIntraExtraction() {
       if (cfg.toolbox && res.bytes && /\.pdf$/i.test(res.file || "")) await intraAddToToolbox(res.file, res.bytes);
       delete res.bytes; // libère la mémoire
     }
+    // SIGEO (par ligne : l'IM peut différer d'une ligne à l'autre).
+    let sg = null;
+    if (sigeoOn && res.status === INTRA_STATUS.OK && !stopRequested) {
+      sg = await intraSigeoLookup(sig, row, p.lot);
+      if (sg.auth) sigeoAuth = true;
+    }
     const vals = intraRowValues(res, cfg.fields);
-    Object.assign(vals, intraSaisieValues(res, intraDs()));
+    Object.assign(vals, intraSaisieValues(Object.assign({}, res, { sigeo: sg }), intraDs()));
+    if (idCols.length) vals[INTRA_ID_COL] = sg && sg.id ? sg.id : "";
+    if (sg && sg.id && sig.knownIdx >= 0 && !sg.known) setCellByIndex(row, sig.knownIdx, sg.id);
+    if (sg && sg.url) nFiche++;
     outCols.forEach((c) => setCellByIndex(row, colIdx[c], vals[c] ?? ""));
     const an = cfg.analyze && res.analysis ? res.analysis : null;
     const anStatus = vals["DPE analyse"];
@@ -4544,7 +4603,11 @@ async function runIntraExtraction() {
     }
     if (!cached) (res.info || []).forEach((w) => logLine(`Ligne ${rowNum} : ${/ vérifié \(/.test(w) ? "✓" : "⚠"} ${w}`, / vérifié \(/.test(w) ? "" : "skip"));
     if (res.via && !viaSeen) { viaSeen = true; logLine(`FlowerDocs : fichiers lus depuis ${res.via}.`, ""); }
-    const recap = [vals.DPE_Statut, vals["PDF analysé"], vals["N° FU"], vals["N° ADEME"], vals["Établi le"], anStatus];
+    const recap = [vals.DPE_Statut, anStatus, vals["N° FU"], vals["N° ADEME"], sg && sg.id ? sg.id : "", vals["PDF analysé"]];
+    if (sg) {
+      logLine(sg.url ? `Ligne ${rowNum} : SIGEO lot id ${sg.id}${sg.known ? " (déjà connu)" : sg.label ? ` · ${sg.label}` : ""}${sg.cached ? " [cache]" : ""} → ${sg.url}`
+        : `Ligne ${rowNum} : SIGEO — ${sg.text || sg.status}`, sg.url ? "" : sg.auth || sg.status === "ERREUR" ? "err" : "skip");
+    }
     const again = cached ? " [déjà traité plus haut]" : "";
     if (res.status === INTRA_STATUS.OK) {
       nOk++;
@@ -4571,6 +4634,11 @@ async function runIntraExtraction() {
       showStatus("Intralia non connecté — extraction arrêtée.", "error");
       break;
     }
+    if (sigeoAuth) {
+      logLine(`SIGEO : session expirée. Reconnecte-toi dans l'onglet SIGEO puis relance à partir de la ligne ${rowNum}.`, "err");
+      showStatus("SIGEO non connecté — extraction arrêtée.", "error");
+      break;
+    }
     if (res.status === INTRA_STATUS.FLOWERDOCS_NON_CONNECTE) {
       logLine(`FlowerDocs : ${res.detail}. Connecte-toi à FlowerDocs (${cfg.flower}/flower-docs-gui/) dans ce navigateur puis relance à partir de la ligne ${rowNum}. Aucun fichier n'a été enregistré pour cette ligne.`, "err");
       showStatus("FlowerDocs non connecté — extraction arrêtée.", "error");
@@ -4583,7 +4651,9 @@ async function runIntraExtraction() {
 
   finish(`Terminé en ${formatDuration(Date.now() - runStart)} — ${nOk} DPE repéré(s)` +
     (download ? `, ${nDl} téléchargé(s) dans Téléchargements/${intraFolder(cfg.folder) || ""}` : "") +
-    ` ; prêts pour la saisie : ${anCounts.OK || 0} OK, ${anCounts["À VÉRIFIER"] || 0} à vérifier` + ".", "ok");
+    ` ; prêts pour la saisie : ${anCounts.OK || 0} OK, ${anCounts["À VÉRIFIER"] || 0} à vérifier` +
+    (sigeoOn ? ` ; ${nFiche} URL de fiche SIGEO` : "") + ".", "ok");
+  if (cfg.out !== "all") logLine("Fichier prêt : vérifie les lignes « À VÉRIFIER », puis onglet Saisie → « Modèle DPE » (réglé tout seul sur ces colonnes) → dossier Téléchargements\\DPE → scénario en simulation, puis pour de vrai.", "");
   if (cfg.analyze && dsUnknownSuppliers.size) {
     logLine(`Fournisseurs absents de la liste (n° FU vide) : ${[...dsUnknownSuppliers].join(", ")} — ajoute-les avec leur n° FU dans « Analyse DPE » → Fournisseurs → n° FU (bouton « Ajouter les fournisseurs inconnus »).`, "skip");
     $("dsSupAddUnknown").hidden = false;
@@ -4596,7 +4666,7 @@ $("intraSoc").addEventListener("change", () => {
   intraShowIdxInfo();
   updateExtractEstimate();
 });
-["intraNomCol", "intraLotCol"].forEach((id) => $(id).addEventListener("change", () => { intraColsTouched = true; updateExtractEstimate(); }));
+["intraNomCol", "intraLotCol", "intraImCol", "intraIdCol"].forEach((id) => $(id).addEventListener("change", () => { intraColsTouched = true; updateExtractEstimate(); }));
 ["intraDelay", "intraVerify", "intraMaxAge"].forEach((id) => $(id).addEventListener("change", updateExtractEstimate));
 $("intraAnalyze").addEventListener("change", () => { intraRenderSupCount(); updateExtractEstimate(); });
 ["intraBase", "intraMaxAge"].forEach((id) => $(id).addEventListener("change", () => intraShowIdxInfo()));
@@ -4613,6 +4683,8 @@ document.querySelectorAll('input[name="extractKind"]').forEach((r) => r.addEvent
     const g = intraGuessCols();
     if (g.nom) fillColumnSelect($("intraNomCol"), g.nom);
     if (g.lot) fillColumnSelect($("intraLotCol"), g.lot);
+    if (g.im && !$("intraImCol").value) fillColumnSelect($("intraImCol"), g.im, colSelectExtras("optional"));
+    if (g.id && !$("intraIdCol").value) fillColumnSelect($("intraIdCol"), g.id, colSelectExtras("optional"));
   }
   intraShowIdxInfo();
   updateExtractEstimate();
@@ -4689,6 +4761,8 @@ $("intraTestBtn").addEventListener("click", async () => {
     if (!p.nom || !p.lot) return fail(`Ligne ${startIdx + 1} : nom d'immeuble ou n° de lot vide.`);
     out.textContent = `Ligne ${startIdx + 1} (${p.nom} / lot ${p.lot})…`;
     const res = await intraProcessRow(intraAdapter(cfg, tabId, cfg.analyze ? dsParseSuppliers($("dsSuppliers").value).entries : []), p);
+    const sctx = { imIdx: cfg.imCol ? colIndexByName(cfg.imCol) : -1, knownIdx: cfg.idCol ? colIndexByName(cfg.idCol) : -1, fiche: cfg.fiche, lc: getLotConfig(), run: {}, ad: null };
+    if (sctx.imIdx >= 0 && res.status === INTRA_STATUS.OK) res.sigeo = await intraSigeoLookup(sctx, row, p.lot);
     const c = res.chosen;
     let txt = res.status === INTRA_STATUS.OK
       ? `✓ Ligne ${startIdx + 1} : ${res.cabinet} imm ${res.imm} → « ${c.name} » du ${c.date || "?"} (${res.candidates.length} DPE / ${res.nDocs} document(s) GED) → ${p.name(c, intraExtOf(c.name) || ".pdf", res)}`
@@ -4699,6 +4773,7 @@ $("intraTestBtn").addEventListener("click", async () => {
       const v = intraSaisieValues(res, intraDs());
       txt += " — " + intraAnalysisText(res, v) + (v["DPE analyse"] !== "OK" && v["Remarques DPE"] ? ` (${v["Remarques DPE"]})` : "");
     }
+    if (res.sigeo) txt += res.sigeo.url ? ` — fiche SIGEO : id ${res.sigeo.id} → ${res.sigeo.url}` : ` — fiche SIGEO : ${res.sigeo.text || res.sigeo.status}`;
     if (res.lotUrl) txt += " — " + res.lotUrl;
     if ((res.info || []).length) txt += " — " + res.info.join(" ; ");
     out.className = "hint imx-test-result " + (res.status === INTRA_STATUS.OK ? "ok" : "err");
@@ -6243,6 +6318,18 @@ $("addSselStepBtn").addEventListener("click", () => {
 // chargé vient de l'extraction « Analyse DPE », ses colonnes sont reprises.
 $("addDpeTemplateBtn").addEventListener("click", () => {
   const names = new Set(getColumns().map((c) => c.name));
+  // Fichier final de l'extraction « DPE Intralia » : colonnes + URL de la fiche.
+  const intralia = names.has("URL fiche DPE") && names.has("N° FU") && names.has("PDF analysé");
+  if (intralia) {
+    const lotCol = getIntraConfig().lotCol;
+    addScenarioStep({ type: "sigeoDpe", diagUrl: DIAG_INTRALIA_URL,
+      diagCols: Object.assign({}, DIAG_PRESETS.intralia, names.has(lotCol) ? { lot: `{${lotCol}}` } : {}) });
+    persistWorkingConfig();
+    updateScenarioEstimate();
+    refreshScenarioWarnings();
+    showStatus("Étape DPE ajoutée et réglée sur le fichier DPE Intralia (colonnes + URL de la fiche). Choisis le dossier Téléchargements\\DPE puis lance le scénario (essaie d'abord en simulation).", "success");
+    return;
+  }
   const analyse = names.has("N° FU") && names.has("Établi le") && !names.has("code_fournisseur");
   addScenarioStep({ type: "sigeoDpe", diagCols: Object.assign({}, analyse ? DIAG_PRESETS.analyse : DIAG_PRESETS.default) });
   persistWorkingConfig();
@@ -7569,6 +7656,12 @@ function wireDiagStepUI(div, step) {
   div.querySelectorAll(".scn-diag-preset").forEach((b) => b.addEventListener("click", () => {
     const preset = DIAG_PRESETS[b.dataset.preset] || DIAG_PRESETS.default;
     div.querySelectorAll(".scn-diag-col").forEach((i) => { i.value = preset[i.dataset.k] ?? ""; });
+    if (b.dataset.preset === "intralia") {
+      const u = q(".scn-diag-url");
+      if (u) u.value = DIAG_INTRALIA_URL;
+      const lotCol = getIntraConfig().lotCol, lotIn = q('.scn-diag-col[data-k="lot"]');
+      if (lotIn && colIndexByName(lotCol) >= 0) lotIn.value = `{${lotCol}}`;
+    }
     persistWorkingConfig();
   }));
   const drop = q(".scn-diag-drop"), unit = q(".scn-diag-unitfile");
