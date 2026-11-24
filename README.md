@@ -175,6 +175,27 @@ deux modes :
    partagent un état global, en particulier les étapes **PDF β** qui
    travaillent sur le document actif de la Toolbox.
 
+10 bis. **Récap de fin de boucle et reprise** (v2.21.0) : à la fin de
+   « Démarrer le scénario » ou « Démarrer sur plusieurs onglets », un
+   encadré **Récap de la boucle** s'affiche sous le journal : nombre de
+   lignes réussies / en erreur / vides / non traitées, temps passé,
+   erreurs regroupées par étape, et tableau des **lots en erreur** (ligne,
+   lot — repris des colonnes *lot / immeuble / mandat / réf / code /
+   adresse*, sinon les deux premières cellules —, étape en échec, raison).
+   Le détail de toutes les lignes est dépliable et **Exporter CSV** sort le
+   tout pour Excel.
+
+   L'avancement est enregistré après **chaque ligne**. Si la boucle s'arrête
+   avant la fin (étape réglée sur « si erreur : stopper », bouton Arrêter,
+   panneau fermé, extension rechargée), le récap le signale et propose
+   **Reprendre à la ligne X** : seules les lignes non traitées sont
+   rejouées, plus la ligne qui a provoqué l'arrêt — les lignes réussies ne
+   sont pas refaites. **Relancer les erreurs** rejoue uniquement les lignes
+   en erreur. Le récap se met à jour au fil des reprises et reste affiché
+   (même après fermeture du panneau) jusqu'au ✕ ou au prochain démarrage.
+   La reprise exige le même fichier (nom + nombre de lignes) que la boucle
+   d'origine.
+
 11. **Étape de scénario « Sélecteur SIGEO »** (bouton **+ Sélecteur SIGEO**) :
    dédiée aux champs SIGEO à autocomplétion (`SelectorControl` +
    `AutoCompletion`), où écrire la valeur ne suffit pas.
@@ -822,6 +843,7 @@ Ouvre `test.html` dans Chrome (fichier local, non publié sur GitHub) : la page
 contient un formulaire complet pour tester la Saisie (avec IBAN découpé) et
 une recherche simulée avec tableau de résultats pour tester l'Extraction.
 Pour la recherche IM, ouvre `tests/fixtures/sigeo-im-mock.html`.
+Récap/reprise de la boucle : `NODE_PATH=$(npm root -g) node tests/scenario-recap.panel.e2e.js`.
 
 ## Limites et vigilance
 

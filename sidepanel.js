@@ -8372,7 +8372,7 @@ async function runScenarioForRow(rowIdx, tabId, steps, prefix = "", opts = {}) {
         scnStopRequested = true;
         scnLog(`${prefix}Scénario stoppé (étape ${i + 1} réglée sur « stopper »).`, "err");
       }
-      return { ok: false };
+      return { ok: false, stepIdx: i, stepLabel: scnStepLabel(step), error: res.error || "erreur inconnue", aborted: !!res.abortRun };
     }
     if (isMandatScenarioStep(step)) opts.ctx.mandatOk = true;
     scnLog(
@@ -8463,58 +8463,6 @@ $("runScenarioBtn").addEventListener("click", async () => {
   scnFinish();
 });
 
-// Exécution en boucle sur une plage de lignes
-$("runScenarioLoopBtn").addEventListener("click", async () => {
-  if (scnRunning) return;
-  const steps = getScenarioSteps();
-  if (!steps.length) { showStatus("Ajoute au moins une étape au scénario.", "error"); return; }
-  if (!state.rows.length) { showStatus("Charge d'abord des données (onglet Données).", "error"); return; }
-  await diagPrepareRun(steps); // accès au dossier des DPE : pendant le geste utilisateur
-  saveCustomFields();
-
-  const startRowInput = parseInt($("scnStartRow").value, 10) || (dataStartIdx() + 1);
-  const endRowInput = $("scnEndRow").value.trim();
-  const startIdx = Math.max(0, startRowInput - 1);
-  const endIdx = Math.min(state.rows.length - 1, endRowInput ? parseInt(endRowInput, 10) - 1 : state.rows.length - 1);
-  if (endIdx < startIdx) { showStatus("Plage de lignes invalide.", "error"); return; }
-  const rowDelayMs = parseInt($("scnRowDelayMs").value, 10) || 0;
-
-  let tabId;
-  try { tabId = await resolveTargetTabId(); }
-  catch (err) { showStatus(err.message, "error"); return; }
-
-  scnBegin();
-  const total = endIdx - startIdx + 1;
-  let done = 0, okCount = 0, errCount = 0, skippedCount = 0;
-  const runStart = Date.now();
-  scnSetProgress(0, total);
-  $("scnEstimate").textContent = "";
-  scnUpdateTiming(0, total, runStart);
-
-  for (let idx = startIdx; idx <= endIdx; idx++) {
-    if (scnStopRequested) { scnLog("Arrêté par l'utilisateur.", "skip"); break; }
-    const row = state.rows[idx] || [];
-    if (!row.some((v) => String(v ?? "").trim() !== "")) {
-      scnLog(`L${idx + 1} : ligne vide, ignorée.`, "skip");
-      skippedCount++; done++; scnSetProgress(done, total); scnUpdateTiming(done, total, runStart);
-      continue;
-    }
-    selectRow(idx); // la ligne active suit la boucle (visible dans l'UI)
-    scnLog(`— Ligne L${idx + 1} —`);
-    const res = await runScenarioForRow(idx, tabId, steps, `L${idx + 1} · `, { batch: true });
-    if (res.stopped) { scnLog("Arrêté par l'utilisateur.", "skip"); break; }
-    if (res.ok) okCount++; else errCount++;
-    done++; scnSetProgress(done, total); scnUpdateTiming(done, total, runStart);
-    if (rowDelayMs > 0 && idx < endIdx && !scnStopRequested) await scnSleep(rowDelayMs);
-  }
-
-  const scnDurationMs = Date.now() - runStart;
-  $("scnProgressTiming").textContent = `Terminé en ${formatDuration(scnDurationMs)}`;
-  scnLog(`Boucle terminée en ${formatDuration(scnDurationMs)} : ${okCount} OK, ${errCount} erreur(s), ${skippedCount} ligne(s) vide(s).`, errCount ? "err" : "ok");
-  scnFinish();
-  updateScenarioEstimate();
-});
-
 /* ---------- Exécution du scénario en parallèle sur plusieurs onglets ----------
    Chaque onglet prend la ligne suivante dans une file commune et déroule
    tout le scénario dessus, indépendamment des autres. Deux précautions
@@ -8573,105 +8521,416 @@ async function acquireWorkerTabs(wanted) {
   return { tabIds, origin, created };
 }
 
-$("runScenarioMultiBtn").addEventListener("click", async () => {
+/* ---------- Suivi de boucle : récap de fin + reprise après interruption ----------
+   Chaque ligne traitée est notée dans `scnRun` (statut, étape en échec,
+   raison) et l'état est sauvegardé dans chrome.storage.local après CHAQUE
+   ligne : une boucle stoppée (étape « si erreur : stopper », bouton Arrêter,
+   panneau fermé, extension rechargée) peut reprendre là où elle s'est
+   arrêtée, sans refaire les lignes déjà réussies. */
+
+let scnRun = null;
+// scnRun = { mode: "loop"|"multi", fileName, sheetName, rowCount, stepCount,
+//   indices: [idx…], res: { idx: { s: "ok"|"err"|"empty", label, step, stepLabel, error, tab, t } },
+//   status: "running"|"done"|"stopped"|"aborted", reason, startedAt, endedAt, activeMs, segStart }
+
+function scnRowLabel(idx) {
+  const row = state.rows[idx] || [];
+  const keyRe = /(lot|immeuble|\bimm\b|mandat|\bmg\b|r[ée]f|code|adresse)/i;
+  const picked = [];
+  try {
+    for (const c of getColumns()) {
+      if (!keyRe.test(c.name)) continue;
+      const v = String(row[c.index] ?? "").trim();
+      if (v && !picked.includes(v)) picked.push(v);
+      if (picked.length >= 2) break;
+    }
+  } catch (_) { /* ignoré */ }
+  if (!picked.length) {
+    for (const v of row) {
+      const s = String(v ?? "").trim();
+      if (s) picked.push(s);
+      if (picked.length >= 2) break;
+    }
+  }
+  const txt = picked.join(" · ");
+  return txt.length > 80 ? txt.slice(0, 79) + "…" : txt;
+}
+
+function scnRunSave() {
+  try {
+    if (scnRun) chrome.storage.local.set({ scnRunState: scnRun });
+    else chrome.storage.local.remove("scnRunState");
+  } catch (_) { /* ignoré */ }
+}
+
+function scnRunMark(idx, rec) {
+  if (!scnRun) return;
+  scnRun.res[idx] = { label: scnRowLabel(idx), ...rec, t: Date.now() };
+  scnRunSave();
+}
+
+// Lignes jamais terminées (ni OK, ni erreur, ni vide).
+function scnRunPending(run) {
+  return run ? run.indices.filter((i) => !run.res[i]) : [];
+}
+function scnRunErrors(run) {
+  return run ? run.indices.filter((i) => run.res[i] && run.res[i].s === "err") : [];
+}
+// Ligne qui a provoqué l'arrêt (« si erreur : stopper ») : on la rejoue à la reprise.
+function scnRunAbortRow(run) {
+  return run ? run.indices.find((i) => run.res[i] && run.res[i].aborted) : undefined;
+}
+function scnRunResumeIndices(run) {
+  const list = scnRunPending(run);
+  const ab = scnRunAbortRow(run);
+  if (ab !== undefined && !list.includes(ab)) list.push(ab);
+  return list.sort((a, b) => a - b);
+}
+
+function scnRunElapsed(run) {
+  if (!run) return 0;
+  return (run.activeMs || 0) + (run.status === "running" && run.segStart ? Date.now() - run.segStart : 0);
+}
+
+function scnRunSameData(run) {
+  return run && run.fileName === (state.originalFileName || "") && run.rowCount === state.rows.length;
+}
+
+function scnRunEnd(status, reason) {
+  if (!scnRun) return;
+  scnRun.activeMs = scnRunElapsed(scnRun);
+  scnRun.segStart = null;
+  scnRun.status = status;
+  scnRun.reason = reason || "";
+  scnRun.endedAt = Date.now();
+  scnRunSave();
+  renderScnRecap();
+}
+
+function scnEsc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function renderScnRecap() {
+  const box = $("scnRecap");
+  if (!box) return;
+  const run = scnRun;
+  if (!run || run.status === "running") { box.hidden = true; box.innerHTML = ""; return; }
+
+  const ok = run.indices.filter((i) => run.res[i] && run.res[i].s === "ok");
+  const errs = scnRunErrors(run);
+  const empty = run.indices.filter((i) => run.res[i] && run.res[i].s === "empty");
+  const pending = scnRunPending(run);
+  const resumeList = scnRunResumeIndices(run);
+  const dur = scnRunElapsed(run);
+  const statusTxt = {
+    done: "terminée",
+    stopped: "arrêtée",
+    aborted: "interrompue sur erreur"
+  }[run.status] || run.status;
+
+  let html = `<div class="scn-recap-head"><strong>Récap de la boucle</strong> — ${scnEsc(statusTxt)}` +
+    `${run.mode === "multi" ? " (plusieurs onglets)" : ""}` +
+    `<button class="remove-btn" id="scnRecapClose" type="button" title="Fermer le récap">✕</button></div>`;
+  if (run.reason) html += `<p class="hint">${scnEsc(run.reason)}</p>`;
+  html += `<div class="run-recap">` +
+    `<p class="recap-time"><strong>Temps passé :</strong> ${formatDuration(dur)} · ` +
+    `${run.endedAt ? new Date(run.endedAt).toLocaleString() : ""}` +
+    `${run.fileName ? " · " + scnEsc(run.fileName) : ""}</p>` +
+    `<p class="recap-counts"><span class="status-ok">${ok.length} réussie(s)</span> · ` +
+    `<span class="status-err">${errs.length} en erreur</span> · ` +
+    `<span class="status-skip">${empty.length} vide(s)</span>` +
+    `${pending.length ? ` · <span class="status-skip">${pending.length} non traitée(s)</span>` : ""}` +
+    ` / ${run.indices.length} ligne(s)</p></div>`;
+
+  if (errs.length) {
+    // Regroupement par étape : souvent une seule cause pour plusieurs lots.
+    const byStep = {};
+    errs.forEach((i) => {
+      const r = run.res[i];
+      const k = r.step != null ? `Étape ${r.step + 1} — ${r.stepLabel || ""}` : (r.stepLabel || "Hors étape");
+      byStep[k] = (byStep[k] || 0) + 1;
+    });
+    html += `<p class="scn-recap-sub">Erreurs par étape</p><ul class="scn-recap-steps">` +
+      Object.entries(byStep).sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `<li>${scnEsc(k)} : <strong>${n}</strong></li>`).join("") + `</ul>`;
+    html += `<p class="scn-recap-sub">Lots en erreur</p><div class="ssel-journal-wrap"><table class="ssel-journal-table scn-recap-table">` +
+      `<thead><tr><th>Ligne</th><th>Lot</th><th>Étape</th><th>Raison</th></tr></thead><tbody>` +
+      errs.map((i) => {
+        const r = run.res[i];
+        const etape = r.step != null ? `${r.step + 1} — ${r.stepLabel || ""}` : (r.stepLabel || "");
+        return `<tr><td>L${i + 1}${r.tab ? ` <span class="h2-note">${scnEsc(r.tab)}</span>` : ""}</td>` +
+          `<td>${scnEsc(r.label)}</td><td>${scnEsc(etape)}</td><td class="err">${scnEsc(r.error)}${r.aborted ? " (boucle stoppée)" : ""}</td></tr>`;
+      }).join("") + `</tbody></table></div>`;
+  }
+
+  html += `<details class="scn-recap-all"><summary>Détail de toutes les lignes</summary><div class="ssel-journal-wrap">` +
+    `<table class="ssel-journal-table scn-recap-table"><thead><tr><th>Ligne</th><th>Lot</th><th>Statut</th></tr></thead><tbody>` +
+    run.indices.map((i) => {
+      const r = run.res[i];
+      const st = !r ? ["non traitée", "skip"] : r.s === "ok" ? ["OK", "ok"] : r.s === "empty" ? ["ligne vide", "skip"] : ["ERREUR : " + (r.error || ""), "err"];
+      const lab = r ? r.label : (scnRunSameData(run) ? scnRowLabel(i) : "");
+      return `<tr><td>L${i + 1}</td><td>${scnEsc(lab)}</td><td class="${st[1]}">${scnEsc(st[0])}</td></tr>`;
+    }).join("") + `</tbody></table></div></details>`;
+
+  html += `<div class="field-row run-buttons">`;
+  if (resumeList.length) {
+    html += `<button class="btn primary" id="scnResumeBtn" type="button"><svg class="icon"><use href="#icon-play"/></svg> ` +
+      `Reprendre à la ligne ${resumeList[0] + 1} (${resumeList.length} ligne${resumeList.length > 1 ? "s" : ""})</button>`;
+  }
+  if (errs.length) {
+    html += `<button class="btn" id="scnRetryErrBtn" type="button"><svg class="icon"><use href="#icon-loop"/></svg> ` +
+      (errs.length > 1 ? `Relancer les ${errs.length} erreurs` : "Relancer l'erreur") + `</button>`;
+  }
+  html += `<button class="btn sm" id="scnRecapExportBtn" type="button"><svg class="icon icon-sm"><use href="#icon-download"/></svg> Exporter CSV</button></div>`;
+  if ((resumeList.length || errs.length) && !scnRunSameData(run)) {
+    html += `<p class="hint scn-recap-warn">⚠ Les données chargées ne correspondent plus à cette boucle ` +
+      `(fichier « ${scnEsc(run.fileName || "?")} », ${run.rowCount} lignes) : recharge ce fichier pour reprendre.</p>`;
+  }
+
+  box.innerHTML = html;
+  box.hidden = false;
+
+  $("scnRecapClose").addEventListener("click", () => {
+    if (scnRunResumeIndices(run).length &&
+      !confirm("Fermer le récap ? La reprise de cette boucle ne sera plus possible.")) return;
+    scnRun = null;
+    scnRunSave();
+    renderScnRecap();
+  });
+  if ($("scnResumeBtn")) $("scnResumeBtn").addEventListener("click", () => scnRestart("resume"));
+  if ($("scnRetryErrBtn")) $("scnRetryErrBtn").addEventListener("click", () => scnRestart("errors"));
+  $("scnRecapExportBtn").addEventListener("click", scnRecapExportCsv);
+}
+
+function scnRecapExportCsv() {
+  const run = scnRun;
+  if (!run) return;
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = [["Ligne", "Lot", "Statut", "Étape", "Raison", "Onglet", "Heure"].map(esc).join(";")];
+  run.indices.forEach((i) => {
+    const r = run.res[i];
+    const statut = !r ? "NON TRAITÉE" : r.s === "ok" ? "OK" : r.s === "empty" ? "VIDE" : "ERREUR";
+    lines.push([
+      `L${i + 1}`, r ? r.label : "", statut,
+      r && r.step != null ? `${r.step + 1} — ${r.stepLabel || ""}` : (r && r.stepLabel) || "",
+      r ? r.error || "" : "", r ? r.tab || "" : "", r ? new Date(r.t).toLocaleString() : ""
+    ].map(esc).join(";"));
+  });
+  const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `recap-boucle-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Lecture de la plage saisie (« Boucle : de la ligne … à … »).
+function scnReadRange() {
+  const startRowInput = parseInt($("scnStartRow").value, 10) || (dataStartIdx() + 1);
+  const endRowInput = $("scnEndRow").value.trim();
+  const startIdx = Math.max(0, startRowInput - 1);
+  const endIdx = Math.min(state.rows.length - 1, endRowInput ? parseInt(endRowInput, 10) - 1 : state.rows.length - 1);
+  if (endIdx < startIdx) return null;
+  const list = [];
+  for (let i = startIdx; i <= endIdx; i++) list.push(i);
+  return list;
+}
+
+// Reprise (lignes non traitées + ligne qui a stoppé la boucle) ou relance des erreurs.
+function scnRestart(kind) {
+  if (scnRunning || !scnRun) return;
+  if (!scnRunSameData(scnRun)) {
+    showStatus(`Recharge d'abord le fichier « ${scnRun.fileName || "?"} » (${scnRun.rowCount} lignes) pour reprendre.`, "error");
+    return;
+  }
+  const list = kind === "errors" ? scnRunErrors(scnRun) : scnRunResumeIndices(scnRun);
+  if (!list.length) { showStatus("Rien à reprendre.", "info"); return; }
+  return scnStartRun(scnRun.mode, list, { resume: kind });
+}
+
+// Point d'entrée commun des deux boucles (simple et multi-onglets).
+async function scnStartRun(mode, indices, { resume = null } = {}) {
   if (scnRunning) return;
-  if (mtState.active) {
+  if (mode === "multi" && mtState.active) {
     showStatus("Arrête d'abord la saisie multi-onglets (remplissage assisté).", "error");
     return;
   }
-
   const steps = getScenarioSteps();
   if (!steps.length) { showStatus("Ajoute au moins une étape au scénario.", "error"); return; }
   if (!state.rows.length) { showStatus("Charge d'abord des données (onglet Données).", "error"); return; }
   await diagPrepareRun(steps); // accès au dossier des DPE : pendant le geste utilisateur
   saveCustomFields();
-
-  const startRowInput = parseInt($("scnStartRow").value, 10) || (dataStartIdx() + 1);
-  const endRowInput = $("scnEndRow").value.trim();
-  const startIdx = Math.max(0, startRowInput - 1);
-  const endIdx = Math.min(state.rows.length - 1, endRowInput ? parseInt(endRowInput, 10) - 1 : state.rows.length - 1);
-  if (endIdx < startIdx) { showStatus("Plage de lignes invalide.", "error"); return; }
+  if (!indices || !indices.length) { showStatus("Plage de lignes invalide.", "error"); return; }
   const rowDelayMs = parseInt($("scnRowDelayMs").value, 10) || 0;
 
-  const queue = [];
-  for (let i = startIdx; i <= endIdx; i++) queue.push(i);
-  const total = queue.length;
-
-  // Inutile d'ouvrir plus d'onglets que de lignes à traiter.
-  const wanted = Math.min(
-    Math.min(Math.max(parseInt($("mtTabCount").value, 10) || 2, 2), 10),
-    total
-  );
-  if (wanted < 2) {
-    showStatus("Une seule ligne à traiter : utilise « Demarrer le scénario ».", "error");
-    return;
+  let tabId = null, tabIds = null;
+  if (mode === "multi") {
+    const wanted = Math.min(Math.min(Math.max(parseInt($("mtTabCount").value, 10) || 2, 2), 10), indices.length);
+    if (wanted < 2) {
+      // Une seule ligne à (re)traiter : inutile d'ouvrir plusieurs onglets.
+      mode = "loop";
+    } else {
+      try { ({ tabIds } = await acquireWorkerTabs(wanted)); }
+      catch (err) { showStatus(err.message, "error"); return; }
+    }
+  }
+  if (mode === "loop") {
+    try { tabId = await resolveTargetTabId(); }
+    catch (err) { showStatus(err.message, "error"); return; }
   }
 
-  let tabIds;
-  try {
-    ({ tabIds } = await acquireWorkerTabs(wanted));
-  } catch (err) {
-    showStatus(err.message, "error");
-    return;
+  // Nouveau suivi, ou on complète celui de la boucle reprise.
+  if (resume && scnRun) {
+    indices.forEach((i) => { delete scnRun.res[i]; });
+    scnRun.status = "running";
+    scnRun.reason = "";
+    scnRun.segStart = Date.now();
+    scnRun.stepCount = steps.length;
+  } else {
+    scnRun = {
+      mode, fileName: state.originalFileName || "", sheetName: state.sheetName || "",
+      rowCount: state.rows.length, stepCount: steps.length,
+      indices: indices.slice(), res: {},
+      status: "running", reason: "", startedAt: Date.now(), endedAt: null, activeMs: 0, segStart: Date.now()
+    };
   }
+  scnRunSave();
+  renderScnRecap();
 
   scnBegin();
-  let done = 0, okCount = 0, errCount = 0, skippedCount = 0;
+  const total = indices.length;
+  let done = 0;
   const runStart = Date.now();
   scnSetProgress(0, total);
   $("scnEstimate").textContent = "";
   scnUpdateTiming(0, total, runStart);
-  scnLog(`— Scénario en parallèle : ${total} ligne(s) réparties sur ${tabIds.length} onglet(s) —`);
+  const tick = () => { done++; scnSetProgress(done, total); scnUpdateTiming(done, total, runStart); };
+  if (resume) {
+    scnLog(`— Reprise : ${total} ligne(s) (${resume === "errors" ? "erreurs" : "à partir de L" + (indices[0] + 1)}) —`);
+  }
 
-  const tick = () => {
-    done++;
-    scnSetProgress(done, total);
-    scnUpdateTiming(done, total, runStart);
-  };
-
-  // Un « worker » par onglet : il pioche dans la file commune jusqu'à
-  // épuisement. La file étant un simple tableau et JS mono-thread, le
-  // shift() ne peut pas servir deux fois la même ligne.
-  const worker = async (tabId, n) => {
-    const tag = `O${n}`;
-    while (!scnStopRequested) {
-      const idx = queue.shift();
-      if (idx === undefined) return;
-
-      const row = state.rows[idx] || [];
-      if (!row.some((v) => String(v ?? "").trim() !== "")) {
-        scnLog(`${tag} · L${idx + 1} : ligne vide, ignorée.`, "skip");
-        skippedCount++;
-        tick();
-        continue;
-      }
-
-      const res = await runScenarioForRow(idx, tabId, steps, `${tag} · L${idx + 1} · `, { soloTab: true, batch: true });
-      if (res.stopped) return;
-      if (res.ok) okCount++; else errCount++;
+  const isEmpty = (idx) => !(state.rows[idx] || []).some((v) => String(v ?? "").trim() !== "");
+  // Traite une ligne et note le résultat. Renvoie false si la boucle doit s'arrêter.
+  const processRow = async (idx, tid, prefix, opts, tabTag) => {
+    if (isEmpty(idx)) {
+      scnLog(`${prefix}ligne vide, ignorée.`, "skip");
+      scnRunMark(idx, { s: "empty", tab: tabTag });
       tick();
-
-      if (rowDelayMs > 0 && !scnStopRequested) await scnSleep(rowDelayMs);
+      return true;
     }
+    let res;
+    try {
+      res = await runScenarioForRow(idx, tid, steps, prefix, opts);
+    } catch (err) {
+      res = { ok: false, error: (err && err.message) || String(err), stepLabel: "Exception" };
+      scnLog(`✗ ${prefix}${res.error}`, "err");
+    }
+    if (res.stopped) return false; // ligne interrompue en cours : reste « non traitée »
+    if (res.ok) scnRunMark(idx, { s: "ok", tab: tabTag });
+    else {
+      scnRunMark(idx, {
+        s: "err", step: res.stepIdx, stepLabel: res.stepLabel, error: res.error || "erreur inconnue",
+        aborted: !!res.aborted, tab: tabTag
+      });
+    }
+    tick();
+    return !scnStopRequested;
   };
 
-  await Promise.all(tabIds.map((id, i) => worker(id, i + 1).catch((err) => {
-    scnLog(`O${i + 1} : onglet interrompu — ${err.message}`, "err");
-    errCount++;
-  })));
+  let endReason = "";
+  try {
+    if (mode === "loop") {
+      for (let k = 0; k < indices.length; k++) {
+        const idx = indices[k];
+        if (scnStopRequested) break;
+        if (!isEmpty(idx)) { selectRow(idx); scnLog(`— Ligne L${idx + 1} —`); }
+        const cont = await processRow(idx, tabId, `L${idx + 1} · `, { batch: true }, "");
+        if (!cont) break;
+        if (rowDelayMs > 0 && k < indices.length - 1 && !scnStopRequested) await scnSleep(rowDelayMs);
+      }
+    } else {
+      const queue = indices.slice();
+      scnLog(`— Scénario en parallèle : ${total} ligne(s) réparties sur ${tabIds.length} onglet(s) —`);
+      // Un « worker » par onglet pioche dans la file commune (JS mono-thread :
+      // le shift() ne sert jamais deux fois la même ligne).
+      const worker = async (tid, n) => {
+        const tag = `O${n}`;
+        while (!scnStopRequested) {
+          const idx = queue.shift();
+          if (idx === undefined) return;
+          const cont = await processRow(idx, tid, `${tag} · L${idx + 1} · `, { soloTab: true, batch: true }, tag);
+          if (!cont) return;
+          if (rowDelayMs > 0 && !scnStopRequested) await scnSleep(rowDelayMs);
+        }
+      };
+      await Promise.all(tabIds.map((id, i) => worker(id, i + 1).catch((err) => {
+        scnLog(`O${i + 1} : onglet interrompu — ${err.message}`, "err");
+        endReason = `Onglet O${i + 1} interrompu : ${err.message}`;
+      })));
+    }
+  } catch (err) {
+    scnLog(`Boucle interrompue : ${err.message || err}`, "err");
+    endReason = `Boucle interrompue : ${err.message || err}`;
+  }
+
+  const ab = scnRunAbortRow(scnRun);
+  const pending = scnRunPending(scnRun);
+  let status = "done";
+  if (ab !== undefined && pending.length) {
+    status = "aborted";
+    const r = scnRun.res[ab];
+    endReason = endReason || `Arrêt sur la ligne L${ab + 1} (${r.label || "?"}) — étape ${r.step != null ? r.step + 1 : "?"} réglée sur « stopper » : ${r.error}`;
+  } else if (pending.length) {
+    status = "stopped";
+    endReason = endReason || (scnStopRequested ? "Arrêtée par l'utilisateur." : "");
+  }
 
   const durMs = Date.now() - runStart;
   $("scnProgressTiming").textContent = `Terminé en ${formatDuration(durMs)}`;
-  if (scnStopRequested) scnLog("Arrêté par l'utilisateur.", "skip");
-  const reste = queue.length;
+  if (status === "stopped" && scnStopRequested) scnLog("Arrêté par l'utilisateur.", "skip");
+  const nErr = scnRunErrors(scnRun).length;
   scnLog(
-    `Parallèle terminé en ${formatDuration(durMs)} : ${okCount} OK, ${errCount} erreur(s), ` +
-    `${skippedCount} ligne(s) vide(s)${reste ? `, ${reste} ligne(s) non traitée(s)` : ""}.`,
-    errCount ? "err" : "ok"
+    `${mode === "multi" ? "Parallèle" : "Boucle"} ${status === "done" ? "terminée" : "arrêtée"} en ${formatDuration(durMs)} — ` +
+    `voir le récap ci-dessous${scnRunResumeIndices(scnRun).length ? ` (${scnRunResumeIndices(scnRun).length} ligne(s) à reprendre)` : ""}.`,
+    nErr || pending.length ? "err" : "ok"
   );
+  scnRunEnd(status, endReason);
   scnFinish();
   updateScenarioEstimate();
+}
+
+$("runScenarioLoopBtn").addEventListener("click", () => {
+  if (scnRunning) return;
+  if (!state.rows.length) { showStatus("Charge d'abord des données (onglet Données).", "error"); return; }
+  return scnStartRun("loop", scnReadRange());
 });
+
+$("runScenarioMultiBtn").addEventListener("click", () => {
+  if (scnRunning) return;
+  if (!state.rows.length) { showStatus("Charge d'abord des données (onglet Données).", "error"); return; }
+  return scnStartRun("multi", scnReadRange());
+});
+
+// Restauration au chargement du panneau : une boucle restée « en cours »
+// a été coupée (panneau fermé, extension rechargée) → reprenable.
+chrome.storage.local.get("scnRunState").then((st) => {
+  const run = st && st.scnRunState;
+  if (!run || !Array.isArray(run.indices)) return;
+  if (run.status === "running") {
+    run.activeMs = (run.activeMs || 0);
+    run.segStart = null;
+    run.status = "stopped";
+    run.reason = "Boucle coupée : panneau fermé ou extension rechargée pendant l'exécution.";
+    run.endedAt = run.endedAt || Date.now();
+    chrome.storage.local.set({ scnRunState: run });
+  }
+  scnRun = run;
+  renderScnRecap();
+}).catch(() => { /* ignoré */ });
 
 /* ================== 5ter. TOOLBOX PDF (BÊTA) ================== */
 // Analyse locale de PDF (pdf.js) : extraction du texte page par page avec
