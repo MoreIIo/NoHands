@@ -266,6 +266,48 @@ deux modes :
      action refait `getElementById`. Champs à postback détectés aussi
      automatiquement (`onchange` avec `__doPostBack`, `changeType`,
      `performanceEnergetique`, ou `input type=submit`).
+   - **Fournisseur (v2.24.0, relevé sur SIGEO le 25/11/2026)** : le champ
+     code `body_x_proxyFou_x_txt_x_txt` n'a **aucun** handler de recherche
+     (son `onkeydown` = Entrée → Enregistrer) ; c'est la popup **fou_browse**
+     (bouton « Sélectionner ») qui renseigne l'opener. Son lien de résultat
+     fait exactement `lbl.innerHTML = 'ANAPLOMB'; txt.value = '0552043';
+     window.close()` — code **avec ses zéros**, aucun événement. Le serveur
+     ne réaffiche le libellé après un postback que s'il a été posté dans
+     `hidden_body:x:proxyFou:x:lbl:x:lbl` (rendu vide à chaque fois).
+     L'étape :
+     1. **normalise le code** comme une chaîne (jamais `Number`) : « FU » et
+        espaces retirés, zéros conservés ; une cellule Excel **numérique**
+        (zéro perdu : 552043) est re-paddée à 7 chiffres (0552043). Journal :
+        `code fournisseur : brut « 552043 » → normalisé « 0552043 »` ;
+     2. **résout le fournisseur AVANT toute saisie** : recherche « Par code »
+        de fou_browse faite en HTTP depuis la frame `diag_manage` (GET de la
+        popup, puis POST du formulaire comme « Rechercher », critères texte
+        vidés — le Nom garde sinon le dernier filtre de l'utilisatrice — et
+        `N° FU` renseigné ; pas de fenêtre popup) ; code et libellé sont lus
+        dans le `onclick` du lien de résultat. Variantes : le code normalisé,
+        puis sans zéros de tête (ou avec, s'il est trop court) ; on garde la
+        première qui renvoie **un seul** fournisseur. Rien → arrêt
+        `FOURNISSEUR_INTROUVABLE` (code brut + variantes testées), **aucune
+        fiche créée**. Statut « Interdit » → avertissement ;
+     3. **rejoue le callback de la popup** dans la page (libellé, code) et
+        renseigne aussi les **deux champs cachés** ; réappliqué après chaque
+        postback qui l'efface (8 fois max) ;
+     4. **garde-fou avant chaque « Enregistrer »** (n°1, n°2, revérification
+        de l'upload) : code, libellé et champs cachés relus ; s'il manque
+        quelque chose, nouvelle application puis, si ça ne tient pas, arrêt
+        `FOURNISSEUR_INTROUVABLE` sans cliquer ;
+     5. contrôle après enregistrement : code (zéros ignorés) et **libellé réel**
+        (`Fournisseur FU0552043 non reconnu par SIGEO (libellé) attendu
+        « ANAPLOMB », relu « »`) — plus de libellé fictif « libellé du code X ».
+   - **Fiche déjà présente sur le lot (v2.24.0)** : en création, la fiche lot
+     (`…/page.aspx/fr/sig_imm/lot_manage/ger|syn/{imm}/{lot}`, onglet
+     Diagnostics, lecture seule) est lue ; une fiche « Performance
+     Energetique » avec la même date de début de validité (= « Établi le »)
+     est **proposée en reprise** (« Compléter cette fiche » : réouverte en
+     modification et complétée — fournisseur, ADEME, PDF ; « Ne rien créer » :
+     `DOUBLON`, rien n'est créé). Deux fiches identiques déjà présentes →
+     `DOUBLON` avec leurs ids. Fiche lot illisible → avertissement, la
+     création continue.
    - **Phase A** — champs à postback, un par un : Type → Fournisseur →
      Établi le → Conso EP → GES. Pour chacun : relire le DOM, ne remplir que
      si la valeur normalisée diffère, fireAndSettle, vérifier qu'elle a tenu
@@ -976,7 +1018,9 @@ lettres forcées, fireAndSettle à horloge virtuelle, repli du handler,
 correspondance des fichiers, contrôle ADEME),
 `node tests/sigeo-diag.panel.e2e.js` (vrai panneau contre un faux SIGEO
 `diag_manage` — `tests/fixtures/sigeo-diag-server.js` : postbacks complets
-sérialisés au `submit()`, fournisseur à postback, change synthétique sans
+sérialisés au `submit()`, fournisseur conforme au vrai SIGEO — code sans
+handler, popup fou_browse, libellé reconstruit depuis le champ caché —, fiche
+lot (onglet Diagnostics), change synthétique sans
 effet sur « Établi le », ADEME `body_x_textIdDpe_x_textIdDpe`, coûts après
 la conso, refus serveur, upload multipart — : saisie de bout en bout, ancien
 DPE, fichiers absent / ambigu / mauvais ADEME / scan / non PDF,
@@ -989,9 +1033,14 @@ ancien DPE 24/11/2020 + ADEME 2021N1001671X → 2 enregistrements, nouveau DPE
 → 1 seul, `ADEME_CHAMP_ABSENT`, fiche incomplète puis reprise sans doublon
 par le journal et par la colonne résultat ; depuis 2.17.1 : PDF visible
 seulement après un nouvel « Enregistrer », PDF jamais visible puis relances
-sans nouvel upload).
+sans nouvel upload ; depuis 2.24.0 : code fournisseur en cellule numérique
+552043 → 0552043 résolu dans fou_browse, variante sans zéro, libellé avec
+apostrophe et « & », `FOURNISSEUR_INTROUVABLE` sans aucune fiche, libellé non
+retenu après enregistrement, reprise d'une fiche existante du lot acceptée /
+refusée / doublon déjà présent).
 
-**Version** : 2.23.0 — **DPE extraction / Analyse DPE** : coûts lus aussi dans l'ancien tableau « Frais annuels d'énergie » (anciens DPE, DPE hors habitation après 07/2021) : montant TTC de la ligne « Consommation d'énergie pour les usages recensés » (abonnement inclus, montant de l'abonnement ignoré), arrondi à l'euro → Coût min = Coût max ; utilisé quand Intralia n'a ni fourchette ni montant estimé (`MTDIAG`, désormais repris lui aussi), y compris pour les DPE d'avant 07/2021 (date d'indexation des prix : Intralia, sinon le PDF).
+**Version** : 2.24.0 — **Saisir un DPE** : fournisseur **résolu dans la popup fou_browse avant le premier Enregistrer** (recherche « Par code » en HTTP, code et libellé lus dans le lien de résultat, variantes avec / sans zéro de tête, fournisseur unique exigé) et appliqué comme le fait la popup (libellé + code) **plus les deux champs cachés** `hidden_…proxyFou…`, réappliqué après chaque postback ; code fournisseur traité comme une chaîne, re-paddé à 7 chiffres si la cellule Excel est numérique (brut et normalisé au journal) ; garde-fou avant chaque « Enregistrer » → `FOURNISSEUR_INTROUVABLE`, aucune fiche sans fournisseur ; écart après enregistrement avec le libellé réel ; fiche DPE déjà présente sur le lot (même date) proposée en reprise au lieu d'un doublon.
+2.23.0 — **DPE extraction / Analyse DPE** : coûts lus aussi dans l'ancien tableau « Frais annuels d'énergie » (anciens DPE, DPE hors habitation après 07/2021) : montant TTC de la ligne « Consommation d'énergie pour les usages recensés » (abonnement inclus, montant de l'abonnement ignoré), arrondi à l'euro → Coût min = Coût max ; utilisé quand Intralia n'a ni fourchette ni montant estimé (`MTDIAG`, désormais repris lui aussi), y compris pour les DPE d'avant 07/2021 (date d'indexation des prix : Intralia, sinon le PDF).
 2.22.0 — **DPE extraction** : IM SIGEO cherché **par désignation + site** (Site SIGEO réglable, 391 par défaut) au lieu de l'adresse sans site : tous les autres critères vidés, libellé caché du site écrit, aucune alert() bloquante ; 1 Nom E.I. identique → retenu, sinon CP / ville Intralia, sinon À VÉRIFIER ; repli par adresse facultatif (même site + CP) ; colonnes `ID immeuble SIGEO` et `Méthode IM SIGEO`.
 2.21.1 — **DPE extraction** : IM et id interne toujours cherchés (Recherche IM SIGEO puis Recherche d'id interne de lot) quand « IM SIGEO » / « id interne » pointent sur la colonne immeuble / lots ou sur une case sans IM ; listes renommées « … déjà connu », « auto » en tête.
 2.17.7 — **Saisir un DPE** : N° ADEME « NC » (ou non communiqué / non trouvé / 99999…) → « NC » est saisi dans le champ N° ADEME (après le 1er enregistrement pour un DPE d'avant 07/2021) ; le PDF est retrouvé par son nom ; une création que SIGEO n'a pas faite (page revenue en création) ne bloque plus la relance par un faux « enregistrement lancé sans confirmation ».

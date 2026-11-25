@@ -7706,11 +7706,13 @@ function diagAskConfirm(info) {
   const run = () => new Promise((resolve) => {
     const box = $("scnConfirm");
     const body = $("scnConfirmBody");
-    $("scnConfirmTitle").textContent = "Joindre ce PDF au diagnostic ?";
+    // info.title + info.lines : question générique (ex. reprise d'une fiche
+    // DPE existante) ; sinon confirmation d'upload du PDF.
+    $("scnConfirmTitle").textContent = info.title || "Joindre ce PDF au diagnostic ?";
     body.innerHTML = "";
-    [["Ligne", info.row], ["Lot", info.lot], ["Fiche", info.fiche || "—"],
+    (info.lines || [["Ligne", info.row], ["Lot", info.lot], ["Fiche", info.fiche || "—"],
       ["N° ADEME", info.ademe ? `${info.ademe} (${info.ademeSrc})` : "—"],
-      ["Fichier", `${info.path} (${info.size})`], ["Retenu par", info.via], ["Contrôle", info.check]]
+      ["Fichier", `${info.path} (${info.size})`], ["Retenu par", info.via], ["Contrôle", info.check]])
       .forEach(([k, v]) => {
         const d = document.createElement("div");
         const b = document.createElement("b");
@@ -7725,6 +7727,8 @@ function diagAskConfirm(info) {
     if (panelEl && panelEl.hidden) showTab(panelEl.getAttribute("data-tab")); // la question doit être visible
     try { box.scrollIntoView({ block: "nearest" }); } catch (_) { /* ignoré */ }
     const yes = $("scnConfirmYes"), no = $("scnConfirmNo");
+    yes.textContent = info.yes || "Joindre";
+    no.textContent = info.no || "Annuler";
     let timer = null;
     const done = (v) => {
       clearInterval(timer);
@@ -7856,6 +7860,19 @@ function diagAdapter(tabId, prefix, batch, timeoutMs) {
       try { return (await chrome.tabs.get(tabId)).status === "loading"; } catch (_) { return false; }
     },
     navigate: (url) => navigateTabAndWait(tabId, url, true, timeoutMs),
+    // Recherche « Par code » de la popup fou_browse, faite en HTTP depuis la
+    // frame diag_manage (pas de fenêtre popup). Lecture seule.
+    supplierSearch: async (num) => {
+      const r = await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, func: diagSupplierOp,
+        args: [{ ids: DIAG_IDS, url: DIAG_FOU_BROWSE, num }] });
+      return r && r[0] ? r[0].result : { ok: false, error: "recherche fou_browse : aucun résultat de l'onglet" };
+    },
+    // Fiches de diagnostic déjà présentes sur le lot (fiche lot, onglet Diagnostics).
+    lotDiags: async (q) => {
+      const r = await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, func: diagLotDiagsOp,
+        args: [Object.assign({ ids: DIAG_IDS }, q)] });
+      return r && r[0] ? r[0].result : { ok: false, error: "fiche lot : aucun résultat de l'onglet" };
+    },
     resolveFile: (want) => diagResolveFile(want, batch),
     pdfText: diagPdfText,
     confirm: diagAskConfirm,

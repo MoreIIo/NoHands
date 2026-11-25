@@ -195,15 +195,17 @@ const { makePdf, COLS, row } = H;
   assert.ok(/^ERREUR — fichier DPE « SCAN_lot15\.pdf » : N° ADEME 2475E4444444B introuvable .* refusé en boucle sans confirmation/.test(res[8]), res[8]);
   assert.ok(/^ERREUR — fichier DPE « notpdf\.pdf » n'est pas un PDF/.test(res[9]), res[9]);
   for (const lot of ["393604", "393606", "393608", "393609"]) assert.strictEqual(lotDiags(lot).length, 0, "rien enregistré pour " + lot);
-  // 4. refus serveur : texte de #msgbody dans le journal et la colonne
-  assert.ok(/^ERREUR — SIGEO a refusé l'enregistrement : Le fournisseur 999999 n'existe pas\./.test(res[5]), res[5]);
-  assert.ok(/SIGEO a refusé l'enregistrement : Le fournisseur 999999 n'existe pas/.test(log));
+  // 4. fournisseur inconnu : introuvable dans fou_browse → arrêt AVANT toute
+  //    saisie (plus de fiche créée ni de refus serveur), variantes listées
+  assert.ok(/^ERREUR — FOURNISSEUR_INTROUVABLE — code brut « 999999 », variantes testées : 999999 : aucun fournisseur ; 0999999 : aucun fournisseur — aucune fiche créée/.test(res[5]), res[5]);
   assert.strictEqual(lotDiags("393605").length, 0);
   // ADEME lu dans le texte du PDF (pas dans le nom), type hors habitation
   assert.ok(/^OK — diagnostic \d+, ADEME 2375E3333333A — PDF joint \(IM0393700_14_DPE_2023-01-10\.pdf\)/.test(res[7]), res[7]);
   assert.ok(/ADEME dans le texte du PDF/.test(log));
   assert.strictEqual(lotDiags("393607")[0].type, "15");
-  assert.ok(/3 OK|2 OK/.test(log));
+  // Récap de fin de boucle (encadré #scnRecap depuis la v2.21.0) : L3 et L8 réussies.
+  const recap = await panel.evaluate(() => $("scnRecap").innerText);
+  assert.ok(/2 réussie\(s\)/.test(recap), recap);
 
   // ===== 5d. Rechargement complet pendant la saisie (après la date) =====
   let reloaded = false;

@@ -438,6 +438,91 @@ check("HTML de l'étape et lecture des réglages", () => {
   assert.ok(/scn-diag-timeout"[^>]*value="30000"/.test(D.diagStepHtml({ diagTimeout: 30000 }, String)), "valeur personnalisée conservée");
 });
 
+check("code fournisseur avec zéro de tête : chaîne, jamais Number, re-paddé si la cellule est numérique", () => {
+  // Cellule Excel numérique 552043 (zéro perdu) → 0552043, brut gardé pour le journal
+  assert.deepStrictEqual(D.diagFouCode("552043", { t: "n", v: 552043 }), { raw: "552043", value: "0552043", padded: true, numeric: true });
+  // Cellule numérique au format « 0000000 » : texte « 0552043 », valeur 552043
+  assert.deepStrictEqual(D.diagFouCode("0552043", { t: "n", v: 552043 }), { raw: "0552043", value: "0552043", padded: true, numeric: true });
+  // Texte : zéros conservés tels quels, jamais convertis
+  assert.strictEqual(D.diagFouCode("0552043").value, "0552043");
+  assert.strictEqual(D.diagFouCode("FU 0552043").value, "0552043");
+  assert.strictEqual(D.diagFouCode("00012").value, "00012", "chaîne courte avec zéros : intacte");
+  assert.deepStrictEqual(D.diagFouCode("552043"), { raw: "552043", value: "552043", padded: false, numeric: false }, "texte sans zéro : pas de padding (variante essayée ensuite)");
+  // Variantes essayées dans fou_browse
+  assert.deepStrictEqual(D.diagFouVariants("0552043"), ["0552043", "552043"]);
+  assert.deepStrictEqual(D.diagFouVariants("552043"), ["552043", "0552043"]);
+  assert.deepStrictEqual(D.diagFouVariants("1552043"), ["1552043"], "7 chiffres sans zéro : une seule variante");
+  assert.deepStrictEqual(D.diagFouVariants("AB12"), ["AB12"]);
+  // Données de la ligne : brut + normalisé
+  const r = D.diagNormalizeData({ code_fournisseur: { text: "552043", cell: { t: "n", v: 552043 } }, date_etabli: { text: "12/09/2022" },
+    numero_ademe: { text: "2222E0000001A" }, conso_ep: { text: "224" }, emission_ges: { text: "52,6" } }, Date.UTC(2026, 10, 25));
+  assert.deepStrictEqual([r.v.fou, r.v.fouRaw, r.v.fouPadded, typeof r.v.fou], ["0552043", "552043", true, "string"]);
+  assert.deepStrictEqual(r.errors, []);
+});
+
+check("fou_browse : fournisseur unique, variante sans zéro, ambiguïté, introuvable", async () => {
+  const ANA = { code: "0552043", label: "ANAPLOMB", labelHtml: "ANAPLOMB", status: "Interdit" };
+  // correspondance exacte prioritaire, sinon même clé (zéros ignorés)
+  assert.strictEqual(D.diagPickSupplier([ANA], "0552043").unique, ANA);
+  assert.strictEqual(D.diagPickSupplier([ANA], "552043").unique, ANA, "recherche 552043 → FU0552043");
+  assert.strictEqual(D.diagPickSupplier([ANA, { code: "1552043", label: "AUTRE" }], "552043").unique, ANA, "« contient » filtré par le code");
+  const amb = D.diagPickSupplier([{ code: "0777001", label: "A" }, { code: "777001", label: "B" }], "77700");
+  assert.deepStrictEqual([amb.unique, amb.hits.length], [null, 0]);
+  const two = D.diagPickSupplier([{ code: "0777001", label: "A" }, { code: "0777001", label: "B" }], "0777001");
+  assert.deepStrictEqual([two.unique, two.hits.length], [null, 2], "deux fournisseurs pour le même code : refusé");
+  assert.strictEqual(D.diagPickSupplier([{ code: "0552043", label: "" }], "0552043").unique, null, "sans libellé : refusé");
+  // résolution : 0552043 ne donne rien, 552043 donne le fournisseur → variante gardée
+  const asked = [];
+  const search = async (n) => { asked.push(n); return { ok: true, rows: n === "552043" ? [ANA] : [] }; };
+  const rs = await D.diagResolveSupplier(search, "0552043");
+  assert.deepStrictEqual(asked, ["0552043", "552043"]);
+  assert.deepStrictEqual([rs.ok, rs.supplier.code, rs.supplier.label, rs.supplier.variant], [true, "0552043", "ANAPLOMB", "552043"]);
+  // trouvé du premier coup : pas de 2e recherche
+  asked.length = 0;
+  const rs1 = await D.diagResolveSupplier(async (n) => { asked.push(n); return { ok: true, rows: [ANA] }; }, "0552043");
+  assert.deepStrictEqual([asked, rs1.supplier.variant], [["0552043"], "0552043"]);
+  // introuvable : variantes listées pour FOURNISSEUR_INTROUVABLE
+  const none = await D.diagResolveSupplier(async (n) => ({ ok: true, rows: n === "552043" ? [{ code: "0552043", label: "X" }, { code: "0552043", label: "Y" }] : [] }), "0552043");
+  assert.strictEqual(none.ok, false);
+  assert.strictEqual(D.diagTriedText(none.tried), "0552043 : aucun fournisseur ; 552043 : 2 fournisseurs (FU0552043 X, FU0552043 Y)");
+  // session expirée : arrêt immédiat
+  const auth = await D.diagResolveSupplier(async () => ({ ok: false, auth: true, error: "session SIGEO expirée" }), "0552043");
+  assert.deepStrictEqual([auth.ok, auth.auth, auth.tried.length], [false, true, 1]);
+  assert.strictEqual(D.DIAG_CODES.fouMissing, "FOURNISSEUR_INTROUVABLE");
+});
+
+check("plan avec fournisseur résolu : code exact, libellé, champs cachés (garde-fou)", () => {
+  const sup = { code: "0552043", label: "ANAPLOMB", labelHtml: "ANAPLOMB" };
+  const sel = (o) => ({ fouSel: Object.assign({ present: true, code: "", label: "", hidTxt: "", hidLbl: "", hidTxtPresent: true, hidLblPresent: true }, o) });
+  const keys = (s, o) => D.diagPlan(snap({ f: sel(s) }), Object.assign({}, REALV, { fou: "0552043" }), Object.assign({ supplier: sup }, o))
+    .specs.filter((x) => /^fou/.test(x.key)).map((x) => `${x.key}:${x.ok ? "ok" : "KO"}`);
+  // code tapé sans zéro et rien d'autre (bug d'origine) → 3 écarts
+  assert.deepStrictEqual(keys({ code: "552043" }), ["fou:KO", "fouLabel:KO", "fouHidden:KO"]);
+  // callback de la popup seul (code + libellé, cachés vides) → encore un écart
+  assert.deepStrictEqual(keys({ code: "0552043", label: "ANAPLOMB" }), ["fou:ok", "fouLabel:ok", "fouHidden:KO"]);
+  assert.deepStrictEqual(keys({ code: "0552043", label: "ANAPLOMB", hidTxt: "0552043", hidLbl: "ANAPLOMB" }), ["fou:ok", "fouLabel:ok", "fouHidden:ok"]);
+  // après enregistrement : code relu sans zéros accepté, cachés non exigés, libellé obligatoire
+  assert.deepStrictEqual(keys({ code: "552043", label: "ANAPLOMB" }, { fouAfterSave: true }), ["fou:ok", "fouLabel:ok"]);
+  const p = D.diagPlan(snap({ f: sel({ code: "552043", label: "" }) }), Object.assign({}, REALV, { fou: "0552043" }), { supplier: sup, fouAfterSave: true });
+  const g = p.specs.filter((x) => /^fou/.test(x.key) && !x.ok);
+  assert.strictEqual(D.diagGapText(g), "1 écart(s) : Libellé fournisseur attendu « ANAPLOMB », relu « »", "libellé réel, plus de « libellé du code X »");
+  const act = p.specs.find((x) => x.key === "fou").act;
+  assert.deepStrictEqual([act.kind, act.code, act.label], ["supplier", "0552043", "ANAPLOMB"]);
+});
+
+check("fiches existantes du lot : même type et même « Établi le »", () => {
+  const rows = [
+    { id: "1147948", label: "Performance Energetique", debut: "17/04/2023", fin: "16/04/2033" },
+    { id: "1148169", label: "Performance Energetique", debut: "17/04/2023", fin: "16/04/2033" },
+    { id: "1148168", label: "Performance Energetique", debut: "05/06/2012", fin: "04/06/2022" },
+    { id: "900", label: "Amiante", debut: "17/04/2023", fin: "" }
+  ];
+  const m = D.diagExistingMatch(rows, { dateEtabli: "17/04/2023" });
+  assert.deepStrictEqual([m.dpe.length, m.same.map((r) => r.id)], [3, ["1147948", "1148169"]]);
+  assert.deepStrictEqual(D.diagExistingMatch(rows, { dateEtabli: "05/06/2012" }).same.map((r) => r.id), ["1148168"]);
+  assert.deepStrictEqual(D.diagExistingMatch(rows, { dateEtabli: "01/01/2024" }).same, []);
+});
+
 (async () => {
   for (const [name, fn] of tests) {
     try { await fn(); console.log("✓ " + name); }

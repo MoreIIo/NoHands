@@ -43,6 +43,16 @@
  *   d'attente active chacun) et la liste relue — JAMAIS de nouvel upload.
  *   Une relance après échec revérifie de même au lieu de ré-uploader.
  *
+ * v2.24.0 (relevé sur SIGEO le 25/11/2026) : le champ code fournisseur n'a
+ *   aucun handler de recherche ; le fournisseur est résolu AVANT toute saisie
+ *   dans la popup fou_browse (recherche « Par code » en HTTP, diagSupplierOp),
+ *   puis le callback de la popup est rejoué (libellé + code) et les champs
+ *   cachés hidden_…proxyFou… renseignés (le serveur reconstruit le libellé à
+ *   partir d'eux) ; garde-fou avant chaque Enregistrer, FOURNISSEUR_INTROUVABLE
+ *   sinon. Code fournisseur = chaîne, re-paddé à 7 chiffres si la cellule est
+ *   numérique. Fiche DPE déjà présente sur le lot (diagLotDiagsOp, même
+ *   « Établi le ») proposée en reprise au lieu d'un doublon.
+ *
  * Garde-fous : jamais de touche Entrée (Fournisseur et Description
  * déclenchent Enregistrer), jamais « Enreg. et fermer » ; enregistrement
  * et upload protégés contre les doublons (état de la page + journal dans
@@ -61,6 +71,17 @@ const DIAG_IDS = Object.freeze({
   fouBtn: "body_x_proxyFou_x_btn",
   // Libellé du fournisseur résolu par SIGEO (id avec deux-points).
   fouLabel: "body:x:proxyFou:x:lbl:x:lbl",
+  // Champs cachés du sélecteur (rendus par le serveur ; la popup ne les
+  // remplit pas, l'étape les renseigne avec le code et le libellé).
+  fouHidTxt: "hidden_body:x:proxyFou:x:txt:x:txt",
+  fouHidLbl: "hidden_body:x:proxyFou:x:lbl:x:lbl",
+  // Popup fou_browse (recherche « Par code », grille des fournisseurs).
+  fouNum: "body_x_tbNum_x_nTbNum",
+  fouNom: "body_x_tbNom_x_nTbNom",
+  fouSearch: "body_x_searchRaz_x_cmdSearchBtn_x__btn",
+  fouGrid: "body_x_gFournisseurs_x",
+  // Fiche lot, onglet Diagnostics (fiches existantes).
+  lotDiagGrid: "body_x_tabc_x_diagnostic_tab_x_diagnostic_x_grid_x",
   dateReal: "body_x_txtDateReal_x_txtDateReal",
   dateFin: "body_x_txtDateFinValid_x_txtDateFinValid",
   dateFinLabel: "fake_txtDateFinValid_x_txtDateFinValid",
@@ -150,8 +171,16 @@ const DIAG_DEFAULTS = Object.freeze({
 // Codes d'erreur (en tête du message, donc de la colonne résultat).
 const DIAG_CODES = Object.freeze({
   timeout: "POSTBACK_TIMEOUT", before: "ECART_AVANT_ENREG", after: "ECART_APRES_ENREG",
-  tooLong: "VALEUR_TROP_LONGUE", ademe: "ADEME_INVALIDE", ademeAbsent: "ADEME_CHAMP_ABSENT"
+  tooLong: "VALEUR_TROP_LONGUE", ademe: "ADEME_INVALIDE", ademeAbsent: "ADEME_CHAMP_ABSENT",
+  fouMissing: "FOURNISSEUR_INTROUVABLE"
 });
+
+// Popup de sélection du fournisseur (URL du bouton « Sélectionner », relevée
+// sur SIGEO le 25/11/2026) ; l'URL lue dans le onclick du bouton est
+// prioritaire.
+const DIAG_FOU_BROWSE = "/popup.aspx/fr/sig_tec/fou_browse/ger?opener=diag_manage&txt=body_x_proxyFou_x_txt_x_txt&lbl=body:x:proxyFou:x:lbl:x:lbl";
+// Longueur d'un code fournisseur SIGEO (FU0552043 → « 0552043 »).
+const DIAG_FOU_LEN = 7;
 
 /* ---------------------------------------------------------------- *
  * 1. Normalisation des données de la ligne                         *
@@ -349,8 +378,12 @@ function diagNormalizeData(raw, now = Date.now()) {
   const t = diagType(txt("type_local"));
   if (t.ok) v.type = t.value; else errors.push(t.error);
 
-  // « FU » est un préfixe affiché hors du champ : retiré, comme les espaces.
-  v.fou = txt("code_fournisseur").replace(/\s+/g, "").replace(/^fu/i, "");
+  // Code fournisseur : toujours une chaîne, zéros de tête conservés ; une
+  // cellule numérique (zéros perdus par Excel) est re-paddée à 7 chiffres.
+  const fc = diagFouCode(g("code_fournisseur").text, g("code_fournisseur").cell);
+  v.fou = fc.value;
+  v.fouRaw = fc.raw;
+  v.fouPadded = fc.padded;
   if (!v.fou) errors.push(emptyMsg("code_fournisseur"));
   else if (v.fou.length > 9) errors.push(`code fournisseur trop long (9 caractères max) : ${v.fou}`);
 
@@ -439,10 +472,99 @@ function diagSame(kind, got, want) {
     default: return diagNorm(got) === diagNorm(want);
   }
 }
-// Code fournisseur : SIGEO le stocke comme un nombre (zéros de tête
-// supprimés : 0448957 → 448957) ; « FU » est un préfixe d'affichage.
+// Clé de comparaison d'un code fournisseur : sans « FU », sans espaces ni
+// zéros de tête (0552043 ≡ 552043). Sert à rapprocher deux codes ; le code
+// SAISI est toujours celui que renvoie la popup fou_browse (avec ses zéros).
 function diagFouKey(v) {
   return String(v ?? "").trim().toUpperCase().replace(/\s+/g, "").replace(/^FU/, "").replace(/^0+/, "") || "0";
+}
+
+// Code fournisseur de la ligne → { raw, value, padded, numeric }.
+// Jamais de Number() : la valeur reste une chaîne et garde ses zéros de tête.
+// « FU » (préfixe d'affichage) et espaces retirés. Si la cellule Excel est
+// numérique (zéros de tête perdus : 552043), le code est re-paddé à
+// DIAG_FOU_LEN chiffres (0552043). raw = valeur brute (pour le journal).
+function diagFouCode(text, cell) {
+  const numeric = !!cell && cell.t === "n" && cell.v !== undefined && cell.v !== null && cell.v !== "";
+  // Cellule numérique : son nombre écrit en entier, sans passer par un format
+  // (« 552 043 », « 5,52E+05 »…) — String(552043) = "552043".
+  const src = numeric && Number.isInteger(cell.v) ? String(cell.v) : String(text ?? "");
+  const raw = diagNorm(text) || (numeric ? String(cell.v) : "");
+  let value = src.replace(/\s+/g, "").replace(/^fu/i, "");
+  let padded = false;
+  if (numeric && /^\d+$/.test(value) && value.length < DIAG_FOU_LEN) {
+    value = value.padStart(DIAG_FOU_LEN, "0");
+    padded = true;
+  }
+  return { raw, value, padded, numeric };
+}
+
+// Codes à chercher dans fou_browse : le code normalisé d'abord, puis la
+// variante sans zéros de tête (s'il en a) ou avec (s'il est trop court).
+function diagFouVariants(code) {
+  const c = String(code ?? "").trim();
+  const out = [c];
+  if (/^\d+$/.test(c)) {
+    if (/^0\d/.test(c)) out.push(c.replace(/^0+(?=\d)/, ""));
+    else if (c.length < DIAG_FOU_LEN) out.push(c.padStart(DIAG_FOU_LEN, "0"));
+  }
+  return [...new Set(out.filter(Boolean))];
+}
+
+// Résultats d'une recherche fou_browse → fournisseur retenu pour `variant`.
+// rows = [{ code, label, labelHtml, status, cell }] (code et libellé lus dans
+// le onclick du lien, exactement ce que la popup renvoie à l'opener).
+// Correspondance exacte du code d'abord, sinon même clé (zéros ignorés) ;
+// retenu seulement si UN SEUL fournisseur (avec un libellé) correspond.
+function diagPickSupplier(rows, variant) {
+  const list = (rows || []).filter((r) => r && r.code);
+  const uniq = (arr) => {
+    const seen = new Set();
+    return arr.filter((r) => { const k = r.code + "|" + diagFold(r.label); if (seen.has(k)) return false; seen.add(k); return true; });
+  };
+  let hits = uniq(list.filter((r) => r.code === variant));
+  if (!hits.length) hits = uniq(list.filter((r) => diagFouKey(r.code) === diagFouKey(variant)));
+  const unique = hits.length === 1 && diagNorm(hits[0].label) ? hits[0] : null;
+  return { hits, unique };
+}
+
+// Résolution du fournisseur : search(code) → { ok, rows[], error?, auth? }
+// (recherche « Par code » de fou_browse). Variantes essayées dans l'ordre ;
+// la première qui renvoie un fournisseur unique est gardée.
+// → { ok, supplier?: { code, label, labelHtml, status, variant }, tried[] }
+async function diagResolveSupplier(search, code) {
+  const tried = [];
+  for (const x of diagFouVariants(code)) {
+    let r;
+    try { r = await search(x); } catch (e) { r = { ok: false, error: (e && e.message) || String(e) }; }
+    if (!r || !r.ok) {
+      tried.push({ variant: x, error: (r && r.error) || "recherche impossible", auth: !!(r && r.auth) });
+      if (r && r.auth) break;
+      continue;
+    }
+    const pick = diagPickSupplier(r.rows, x);
+    tried.push({ variant: x, count: (r.rows || []).length, hits: pick.hits.map((h) => `FU${h.code} ${h.label || "(sans libellé)"}`) });
+    if (pick.unique) return { ok: true, supplier: Object.assign({ variant: x }, pick.unique), tried };
+  }
+  return { ok: false, tried, auth: tried.some((t) => t.auth) };
+}
+
+// « 0552043 : aucun fournisseur ; 552043 : 2 fournisseurs (FU… X, FU… Y) »
+function diagTriedText(tried) {
+  return (tried || []).map((t) => {
+    if (t.error) return `${t.variant} : ${t.error}`;
+    if (!t.hits.length) return `${t.variant} : aucun fournisseur${t.count ? ` correspondant (${t.count} résultat(s) de recherche)` : ""}`;
+    return `${t.variant} : ${t.hits.length === 1 ? "1 fournisseur sans libellé" : t.hits.length + " fournisseurs"} (${t.hits.slice(0, 4).join(", ")}${t.hits.length > 4 ? "…" : ""})`;
+  }).join(" ; ");
+}
+
+// Fiches de diagnostic du lot (onglet Diagnostics de la fiche lot) qui
+// correspondent au DPE de la ligne : type « Performance Energetique » et date
+// de début de validité = « Établi le ». rows = [{ id, label, debut, fin }].
+function diagExistingMatch(rows, v) {
+  const dpe = (rows || []).filter((r) => /performance energetique|(?<![a-z])dpe(?![a-z])/.test(diagFold(r.label)));
+  const same = v && v.dateEtabli ? dpe.filter((r) => diagDateEq(r.debut, v.dateEtabli)) : [];
+  return { dpe, same };
 }
 
 // Valeur lisible dans le journal et les messages d'écart.
@@ -731,6 +853,16 @@ function diagPageOp(cfg) {
     return { name, dedicated: own.length > 0, src };
   }
 
+  // État du sélecteur fournisseur : code (input), libellé (label), champs cachés.
+  function supplierSel() {
+    const txt = byId(ID.fou), lbl = ID.fouLabel ? byId(ID.fouLabel) : null;
+    const ht = ID.fouHidTxt ? byId(ID.fouHidTxt) : null, hl = ID.fouHidLbl ? byId(ID.fouHidLbl) : null;
+    return {
+      present: !!txt, labelPresent: !!lbl, code: txt ? String(txt.value ?? "") : "", label: lbl ? norm(lbl.textContent) : "",
+      hidTxtPresent: !!ht, hidLblPresent: !!hl, hidTxt: ht ? String(ht.value ?? "") : "", hidLbl: hl ? String(hl.value ?? "") : ""
+    };
+  }
+
   function messages() {
     const line = byId(ID.msgLine), body = byId(ID.msgBody);
     const shown = !!body && (line ? visible(line) : visible(body));
@@ -780,7 +912,7 @@ function diagPageOp(cfg) {
       conso: g("conso"), consoLettre: g("consoLettre"), ges: g("ges"), gesLettre: g("gesLettre"),
       forceEp: g("forceEp"), forceGes: g("forceGes"), altitude: g("altitude"), nouvelles: g("nouvelles"),
       coutMin: g("coutMin"), coutMax: g("coutMax"), datePrix: g("datePrix"),
-      resultat: g("resultat"), comment: g("comment"), ademe: ademe(), fouName: supplier()
+      resultat: g("resultat"), comment: g("comment"), ademe: ademe(), fouName: supplier(), fouSel: supplierSel()
     };
     const sel = byId(ID.type);
     f.type.text = sel && sel.selectedIndex >= 0 && sel.options[sel.selectedIndex] ? norm(sel.options[sel.selectedIndex].text) : "";
@@ -909,6 +1041,30 @@ function diagPageOp(cfg) {
     apply(a, el);
     const e2 = target(a);
     return { ok: true, before, after: e2 ? cur(e2) : "", pb, docId, leaving: leaving() };
+  }
+
+  // Fournisseur : reproduit EXACTEMENT le callback du lien de la popup
+  // fou_browse sur l'opener (libellé en innerHTML, puis code dans l'input),
+  // et renseigne aussi les deux champs cachés du sélecteur. Aucun événement
+  // (la popup n'en déclenche pas ; la touche Entrée enregistrerait).
+  if (cfg.op === "supplier") {
+    const a = cfg.action || {};
+    const txt = byId(ID.fou), lbl = byId(ID.fouLabel);
+    if (!txt) return { ok: false, error: `champ code fournisseur #${ID.fou} introuvable`, docId };
+    if (!lbl) return { ok: false, error: `libellé fournisseur #${ID.fouLabel} introuvable`, docId };
+    const code = String(a.code ?? "");
+    if (txt.maxLength > 0 && code.length > txt.maxLength) {
+      return { ok: false, code: "VALEUR_TROP_LONGUE", error: `code fournisseur « ${code} » : ${code.length} caractères, la page en accepte ${txt.maxLength}`, docId };
+    }
+    const before = supplierSel();
+    lbl.innerHTML = String(a.labelHtml ?? a.label ?? "");
+    txt.value = code;
+    const missing = [];
+    for (const [id, val] of [[ID.fouHidTxt, code], [ID.fouHidLbl, String(a.label ?? "")]]) {
+      const h = id ? byId(id) : null;
+      if (h) h.value = val; else missing.push(id);
+    }
+    return { ok: true, before, after: supplierSel(), missingHidden: missing, docId, leaving: leaving() };
   }
 
   if (cfg.op === "save") {
@@ -1046,6 +1202,161 @@ function diagMainHandler(cfg) {
 }
 
 /* ---------------------------------------------------------------- *
+ * 4ter. Recherche du fournisseur (popup fou_browse, sans fenêtre)  *
+ * ---------------------------------------------------------------- *
+ * Injectée dans la frame diag_manage (même origine, cookies de session).
+ * Fait en HTTP ce que fait la popup : GET de fou_browse (URL lue dans le
+ * onclick du bouton « Sélectionner », sinon cfg.url), puis POST du
+ * formulaire comme le bouton « Rechercher », critères texte vidés (le Nom
+ * garde le dernier filtre de l'utilisateur) sauf « N° FU » = cfg.num.
+ * Chaque résultat est un lien dont le onclick fait, sur l'opener :
+ *   getElementById('body:x:proxyFou:x:lbl:x:lbl').innerHTML = 'ANAPLOMB';
+ *   getElementById('body_x_proxyFou_x_txt_x_txt').value = '0552043';
+ *   window.close();
+ * → code et libellé sont lus dans ce onclick (exactement ce que la popup
+ * renverrait). Rien n'est modifié dans SIGEO. Autonome.
+ * → { ok, url, num, echo, count, rows: [{ code, label, labelHtml, status,
+ *     cell, name, txtId, lblId }] } | { ok: false, error, auth? } */
+async function diagSupplierOp(cfg) {
+  const ID = cfg.ids;
+  const norm = (s) => String(s ?? "").replace(/[   ]/g, " ").replace(/\s+/g, " ").trim();
+  const fold = (s) => norm(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const msg = (e) => String((e && e.message) || e);
+  let url = cfg.url || "";
+  const btn = document.getElementById(ID.fouBtn);
+  const m = btn && /popup\(\s*'([^']*fou_browse[^']*)'/.exec(btn.getAttribute("onclick") || "");
+  if (m) url = m[1];
+  let base;
+  try { base = new URL(url, location.href); } catch (_) { return { ok: false, error: `URL fou_browse invalide (${url})` }; }
+  const parse = (html) => new DOMParser().parseFromString(html, "text/html");
+  const get = async (u, init) => {
+    const r = await fetch(u, Object.assign({ credentials: "include", cache: "no-store" }, init || {}));
+    return { status: r.status, html: await r.text() };
+  };
+  let g1;
+  try { g1 = await get(base.href); } catch (e) { return { ok: false, error: "popup fou_browse injoignable : " + msg(e) }; }
+  const d1 = parse(g1.html);
+  if (d1.querySelector('input[type="password"]')) return { ok: false, auth: true, error: "session SIGEO expirée (page de connexion)" };
+  const form = d1.getElementById("mainForm") || d1.forms[0];
+  const num = d1.getElementById(ID.fouNum), search = d1.getElementById(ID.fouSearch);
+  if (g1.status >= 400 || !form || !num || !search) {
+    return { ok: false, error: `formulaire de recherche fou_browse introuvable (HTTP ${g1.status}, champ N° FU #${ID.fouNum} ${num ? "ok" : "absent"}, bouton Rechercher ${search ? "ok" : "absent"})` };
+  }
+  const pairs = [];
+  for (const el of Array.from(form.elements)) {
+    if (!el.name || el.disabled) continue;
+    const t = String(el.type || "").toLowerCase();
+    if (["submit", "button", "image", "file", "reset"].includes(t)) continue;
+    if ((t === "checkbox" || t === "radio") && !el.checked) continue;
+    if (el.tagName === "SELECT") {
+      if (el.multiple) Array.from(el.selectedOptions).forEach((o) => pairs.push([el.name, o.value]));
+      else pairs.push([el.name, el.value]);
+      continue;
+    }
+    let v = String(el.value ?? "");
+    if (el === num) v = String(cfg.num ?? "");
+    else if (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && /^(text|search|tel|email|)$/.test(t))) v = "";
+    pairs.push([el.name, v]);
+  }
+  pairs.push([search.name, search.value]);
+  const enc = String(form.getAttribute("enctype") || "").toLowerCase();
+  let body;
+  if (enc.includes("multipart")) { body = new FormData(); pairs.forEach(([k, v]) => body.append(k, v)); }
+  else body = new URLSearchParams(pairs);
+  let action;
+  try { action = new URL(form.getAttribute("action") || base.href, base.href).href; } catch (_) { action = base.href; }
+  let g2;
+  try { g2 = await get(action, { method: "POST", body }); } catch (e) { return { ok: false, error: "recherche fou_browse impossible : " + msg(e) }; }
+  const d2 = parse(g2.html);
+  if (d2.querySelector('input[type="password"]')) return { ok: false, auth: true, error: "session SIGEO expirée (page de connexion)" };
+  const grid = d2.getElementById(ID.fouGrid);
+  const echoEl = d2.getElementById(ID.fouNum);
+  const echo = echoEl ? String(echoEl.value ?? "") : "";
+  if (!grid) {
+    const errs = Array.from(d2.querySelectorAll("#msgbody li")).map((li) => norm(li.textContent)).filter(Boolean);
+    return { ok: false, error: `grille des fournisseurs #${ID.fouGrid} absente après la recherche (HTTP ${g2.status}${errs.length ? " — " + errs.join(" | ") : ""})` };
+  }
+  const trs = Array.from(grid.querySelectorAll("tr")).filter((tr) => !tr.querySelector("tr"));
+  let statusIdx = -1;
+  for (const tr of trs) {
+    const i = Array.from(tr.children).findIndex((c) => fold(c.textContent) === "statut");
+    if (i >= 0) { statusIdx = i; break; }
+  }
+  const lit = "'((?:\\\\.|[^'\\\\])*)'";
+  const reLbl = new RegExp("getElementById\\(\\s*'([^']*)'\\s*\\)\\.innerHTML\\s*=\\s*" + lit);
+  const reTxt = new RegExp("getElementById\\(\\s*'([^']*)'\\s*\\)\\.value\\s*=\\s*" + lit);
+  const unjs = (s) => String(s).replace(/\\(.)/g, "$1");
+  const rows = [];
+  for (const tr of trs) {
+    const a = tr.querySelector("a.edit_link[onclick], a[onclick*='opener']");
+    if (!a) continue;
+    const oc = a.getAttribute("onclick") || "";
+    const mL = reLbl.exec(oc), mT = reTxt.exec(oc);
+    if (!mT) continue;
+    const labelHtml = mL ? unjs(mL[2]) : "";
+    const tpl = document.createElement("template");
+    tpl.innerHTML = labelHtml;
+    const cells = Array.from(tr.children).map((c) => norm(c.textContent));
+    rows.push({
+      code: unjs(mT[2]), label: norm(tpl.content.textContent), labelHtml, txtId: mT[1], lblId: mL ? mL[1] : "",
+      cell: norm(a.textContent), name: cells[1] || "", status: statusIdx >= 0 ? (cells[statusIdx] || "") : ""
+    });
+  }
+  const cm = norm(grid.textContent).match(/(\d+)\s*r[ée]sultat/i);
+  return { ok: true, url: base.pathname + base.search, num: String(cfg.num ?? ""), echo, count: cm ? +cm[1] : rows.length, rows };
+}
+
+/* ---------------------------------------------------------------- *
+ * 4quater. Fiches de diagnostic déjà présentes sur le lot           *
+ * ---------------------------------------------------------------- *
+ * Injectée dans la frame diag_manage. GET de la fiche lot
+ * (…/page.aspx/fr/sig_imm/lot_manage/{ger|syn}/{imm}/{lot}, mêmes
+ * identifiants que l'URL diag_manage) et lecture de la grille de l'onglet
+ * « Diagnostics » : chaque ligne a un lien popup(…/diag_manage/{imm}/{lot}/{id}).
+ * Lecture seule. Autonome.
+ * → { ok, url, rows: [{ id, label, debut, fin, comment, resultat }] } | { ok: false, error } */
+async function diagLotDiagsOp(cfg) {
+  const ID = cfg.ids;
+  const norm = (s) => String(s ?? "").replace(/[   ]/g, " ").replace(/\s+/g, " ").trim();
+  const fold = (s) => norm(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const tried = [];
+  for (const metier of cfg.metiers || ["ger", "syn"]) {
+    const path = `/page.aspx/fr/sig_imm/lot_manage/${metier}/${encodeURIComponent(cfg.imm)}/${encodeURIComponent(cfg.lot)}`;
+    let html = "", status = 0;
+    try {
+      const r = await fetch(path, { credentials: "include", cache: "no-store" });
+      status = r.status;
+      html = await r.text();
+    } catch (e) { tried.push(`${metier} : ${String((e && e.message) || e)}`); continue; }
+    const d = new DOMParser().parseFromString(html, "text/html");
+    if (d.querySelector('input[type="password"]')) return { ok: false, auth: true, error: "session SIGEO expirée (page de connexion)" };
+    const grid = d.getElementById(ID.lotDiagGrid);
+    if (!grid) { tried.push(`${metier} : grille Diagnostics absente (HTTP ${status}${d.title ? ", « " + norm(d.title) + " »" : ""})`); continue; }
+    const trs = Array.from(grid.querySelectorAll("tr")).filter((tr) => !tr.querySelector("tr"));
+    const idx = { label: 3, comment: 4, debut: 5, fin: 6, resultat: 7 };
+    for (const tr of trs) {
+      const cells = Array.from(tr.children).map((c) => fold(c.textContent));
+      const at = (re) => cells.findIndex((c) => re.test(c));
+      if (at(/^diagnostic$/) < 0) continue;
+      idx.label = at(/^diagnostic$/);
+      [["comment", /^commentaire/], ["debut", /debut de validite/], ["fin", /fin de validite/], ["resultat", /^resultat$/]]
+        .forEach(([k, re]) => { const i = at(re); if (i >= 0) idx[k] = i; });
+      break;
+    }
+    const rows = [];
+    for (const tr of trs) {
+      const link = Array.from(tr.querySelectorAll("a[onclick]")).find((a) => /diag_manage\//.test(a.getAttribute("onclick") || ""));
+      const mm = link && /diag_manage\/[^/'"?]+\/[^/'"?]+\/(\d+)/.exec(link.getAttribute("onclick") || "");
+      if (!mm || mm[1] === "0") continue;
+      const c = Array.from(tr.children).map((x) => norm(x.textContent));
+      rows.push({ id: mm[1], label: c[idx.label] || "", comment: c[idx.comment] || "", debut: c[idx.debut] || "", fin: c[idx.fin] || "", resultat: c[idx.resultat] || "" });
+    }
+    return { ok: true, url: path, rows };
+  }
+  return { ok: false, error: "fiche lot illisible : " + tried.join(" ; ") };
+}
+
+/* ---------------------------------------------------------------- *
  * 5. Plan de saisie et comparaison (logique pure)                  *
  * ---------------------------------------------------------------- *
  * diagPlan(s, v, opts) → { specs[], warnings[] }, s = instantané (op read).
@@ -1070,7 +1381,7 @@ function diagPlan(s, v, opts = {}) {
     const f = o.field || fld(o.key);
     const sp = Object.assign({ present: !!f.present, visible: !!f.visible, pb: !!f.pb, note: "" }, o);
     delete sp.field;
-    sp.ok = diagSame(sp.kind, sp.got, sp.want);
+    sp.ok = o.ok !== undefined ? !!o.ok : diagSame(sp.kind, sp.got, sp.want);
     specs.push(sp);
     return sp;
   };
@@ -1078,7 +1389,28 @@ function diagPlan(s, v, opts = {}) {
 
   // — Phase A (postback) + « Valable jusqu'au » calculé
   add({ key: "type", label: "Type", phase: "A", kind: "select", act: { kind: "select", id: I.type }, want: v.type, got: val("type") });
-  add({ key: "fou", label: "Fournisseur", phase: "A", kind: "fou", act: { kind: "value", id: I.fou, blur: true }, want: v.fou, got: val("fou") });
+  // Fournisseur résolu dans fou_browse (opts.supplier) : code tel que la popup
+  // le renvoie, libellé, et (avant enregistrement) champs cachés renseignés.
+  // Saisie = callback de la popup (op "supplier"), sans postback. Après
+  // enregistrement (opts.fouAfterSave), le code est comparé sans zéros de
+  // tête et les champs cachés ne sont plus exigés.
+  const sup = opts.supplier;
+  if (sup) {
+    const sel = F.fouSel || { present: fld("fou").present, code: val("fou"), label: (F.fouName || {}).name || "", hidTxt: "", hidLbl: "" };
+    const fouField = Object.assign({}, fld("fou"), { pb: false });
+    const act = { kind: "supplier", code: sup.code, label: sup.label, labelHtml: sup.labelHtml ?? sup.label };
+    add({ key: "fou", label: "Fournisseur", phase: "A", kind: opts.fouAfterSave ? "fou" : "code", act, want: sup.code, got: sel.code, field: fouField });
+    add({ key: "fouLabel", label: "Libellé fournisseur", phase: "A", kind: "text", act, want: sup.label, got: sel.label,
+      ok: !!diagNorm(sel.label) && diagFold(sel.label) === diagFold(sup.label), field: fouField });
+    if (!opts.fouAfterSave) {
+      const hid = (x) => diagNorm(x) ? diagNorm(x) : "(vide)";
+      add({ key: "fouHidden", label: "Champs cachés fournisseur", phase: "A", kind: "text", act,
+        want: `${sup.code} / ${sup.label}`, got: `${hid(sel.hidTxt)} / ${hid(sel.hidLbl)}`,
+        ok: !!diagNorm(sel.hidTxt) && !!diagNorm(sel.hidLbl), field: fouField });
+    }
+  } else {
+    add({ key: "fou", label: "Fournisseur", phase: "A", kind: "fou", act: { kind: "value", id: I.fou, blur: true }, want: v.fou, got: val("fou") });
+  }
   add({ key: "dateReal", label: "Établi le", phase: "A", kind: "date", act: { kind: "value", id: I.dateReal }, want: v.dateEtabli, got: val("dateReal") });
   const exp = diagExpectedValidity(v.dateEtabli);
   const fin = fld("dateFin");
@@ -1231,9 +1563,11 @@ async function diagSettle(ad, read, docBefore, o = {}) {
  *   execMain(cfg):     diagMainHandler dans le monde de la page (facultatif)
  *   tabLoading():      l'onglet est-il en chargement ? (facultatif)
  *   navigate(url):     { ok, error? }
+ *   supplierSearch(num): diagSupplierOp (recherche « Par code » de fou_browse)
+ *   lotDiags({ imm, lot }): diagLotDiagsOp (fiches déjà présentes sur le lot ; facultatif)
  *   resolveFile({ name, ademe }): { file:{ name, path, size }, via, bytes() } | { error }
  *   pdfText(bytes):    texte du PDF ("" si illisible)
- *   confirm(info):     Promise<boolean>
+ *   confirm(info):     Promise<boolean> (upload du PDF, ou { title, lines } : reprise d'une fiche existante)
  *   journalGet(key) / journalSet(key, entry|null)  (chrome.storage.session)
  *   debug(snapshot, label)  (mode debug : relevé des champs)
  *   log(text, cls), sleep(ms), now(), stopped()
@@ -1339,13 +1673,17 @@ async function diagProcess(ad, p) {
 
   // — 2. Vérification de la page
   let s = null;
-  for (const t0 = ad.now(); ;) {
-    if (ad.stopped()) return fail("arrêté par l'utilisateur", "ARRÊT");
-    s = await read();
-    if (s && s.readyState === "complete" && (s.isDiag || s.login)) break;
-    if (ad.now() - t0 > T) break;
-    await ad.sleep(250);
-  }
+  const waitDiag = async () => {
+    for (const t0 = ad.now(); ;) {
+      if (ad.stopped()) return "arrêté par l'utilisateur";
+      s = await read();
+      if (s && s.readyState === "complete" && (s.isDiag || s.login)) break;
+      if (ad.now() - t0 > T) break;
+      await ad.sleep(250);
+    }
+    return "";
+  };
+  if (await waitDiag()) return fail("arrêté par l'utilisateur", "ARRÊT");
   const pe = pageError(s);
   if (pe) return fail(pe, s && s.login ? "AUTH" : "PAGE");
   if (!s.f.type.present) return fail("liste « Type » introuvable sur la fiche", "PAGE");
@@ -1367,7 +1705,121 @@ async function diagProcess(ad, p) {
       return fail("un enregistrement de ce DPE a été lancé sans confirmation (rechargement pendant l'enregistrement ?) : vérifie dans SIGEO ; s'il n'existe pas, vide l'historique DPE puis relance", "DOUBLON");
     }
   }
+  // — 2bis. Fiche DPE déjà présente sur le lot (même type, même « Établi le »,
+  //   ex. une fiche créée sans fournisseur ni PDF) : proposée en reprise au
+  //   lieu d'une création, pour éviter un doublon. Lecture seule de la fiche lot.
+  if (!s.saved && !known && !J && ad.lotDiags) {
+    const up = diagUrlParts(s.url);
+    let ex = null;
+    try { ex = up ? await ad.lotDiags({ imm: up.lotId, lot: up.kind }) : null; } catch (e) { ex = { ok: false, error: e.message || String(e) }; }
+    if (!ex || !ex.ok) {
+      warn(`fiches existantes du lot non vérifiées (${(ex && ex.error) || "URL diag_manage illisible"}) : risque de doublon non contrôlé`);
+    } else {
+      const mt = diagExistingMatch(ex.rows, v);
+      const list = (rows) => rows.map((r) => `${r.id} (${r.label || "?"}, ${r.debut || "?"} → ${r.fin || "?"})`).join(", ");
+      if (mt.dpe.length) log(`fiche lot : ${mt.dpe.length} DPE déjà enregistré(s) — ${list(mt.dpe)}`);
+      if (mt.same.length > 1) {
+        return fail(`DOUBLON — ${mt.same.length} fiches DPE établies le ${v.dateEtabli} existent déjà sur ce lot (${list(mt.same)}) : ouvre celle à compléter (URL …/{id}) et supprime les doublons — rien n'a été créé`, "DOUBLON");
+      }
+      if (mt.same.length === 1) {
+        const old = mt.same[0];
+        const oldUrl = diagUrlWithId(s.url, old.id);
+        let reuse = true;
+        if (p.simulate) log(`simulation : fiche DPE ${old.id} (établie le ${old.debut}) déjà présente sur le lot → reprise en modification`);
+        else {
+          reuse = ad.confirm ? await ad.confirm({
+            title: "Compléter la fiche DPE existante ?", yes: "Compléter cette fiche", no: "Ne rien créer",
+            lines: [["Ligne", p.rowLabel || ""], ["Lot", v.lot || s.lotId], ["Fiche existante", `${old.id} — ${old.label}, établie le ${old.debut}${old.fin ? ", valable jusqu'au " + old.fin : ""}`],
+              ["Action", "la compléter (fournisseur, ADEME, PDF…) au lieu de créer une nouvelle fiche"], ["Lien", oldUrl]]
+          }) : false;
+        }
+        if (!reuse) {
+          return fail(`DOUBLON — la fiche DPE ${old.id} (établie le ${old.debut}) existe déjà sur ce lot : reprise refusée, aucune nouvelle fiche créée — ${oldUrl}`, "DOUBLON");
+        }
+        log(`fiche DPE ${old.id} déjà présente sur le lot (établie le ${old.debut}) : reprise en modification au lieu d'une création — ${oldUrl}`);
+        const nav = await ad.navigate(oldUrl);
+        if (!nav || !nav.ok) return fail("ouverture de la fiche existante impossible : " + ((nav && nav.error) || oldUrl), "PAGE");
+        if (await waitDiag()) return fail("arrêté par l'utilisateur", "ARRÊT");
+        const pe2 = pageError(s);
+        if (pe2) return fail(pe2, s && s.login ? "AUTH" : "PAGE");
+        if (!s.saved) return fail(`la fiche DPE ${old.id} ne s'ouvre pas en modification (${s.url}) — rien n'a été créé`, "PAGE");
+        const oldAdeme = s.f.ademe.mode === "label" ? s.f.ademe.labelText : (s.f.ademe.input ? s.f.ademe.input.value : "");
+        if (v.ademe && !v.ademeNc && diagAdemeKey(oldAdeme) && diagAdemeKey(oldAdeme) !== v.ademe) {
+          return fail(`DOUBLON — la fiche DPE ${old.id} (établie le ${old.debut}) porte un autre N° ADEME (${diagAdemeKey(oldAdeme)} ≠ ${v.ademe}) : rien n'a été modifié ni créé — vérifie dans SIGEO`, "DOUBLON");
+        }
+      }
+    }
+  }
+
   log(`fiche ${s.lotId || "?"} · ${s.saved ? "diagnostic déjà enregistré (id " + (s.idDiag || "?") + ") : modification" : "création"} · type ${s.f.type.text || s.f.type.value || "(vide)"}`);
+
+  // — Fournisseur : résolu dans fou_browse AVANT toute saisie (le champ code
+  //   n'a aucun handler de recherche : taper le code ne renseigne ni le
+  //   libellé ni les champs cachés). Introuvable → arrêt, rien n'est saisi.
+  log(`code fournisseur : brut ${diagQ(v.fouRaw ?? v.fou)} → normalisé ${diagQ(v.fou)}` +
+    `${v.fouPadded ? ` (cellule numérique : zéros de tête rétablis, ${DIAG_FOU_LEN} chiffres)` : ""}`);
+  if (!ad.supplierSearch) return fail(`${DIAG_CODES.fouMissing} — recherche du fournisseur indisponible — rien n'a été saisi`, "ERREUR", DIAG_CODES.fouMissing);
+  const rs = await diagResolveSupplier((num) => ad.supplierSearch(num), v.fou);
+  if (!rs.ok) {
+    if (rs.auth) return fail("session SIGEO expirée pendant la recherche du fournisseur", "AUTH");
+    return fail(`${DIAG_CODES.fouMissing} — code brut ${diagQ(v.fouRaw ?? v.fou)}, variantes testées : ${diagTriedText(rs.tried)}` +
+      ` — ${s.saved ? "fiche non modifiée" : "aucune fiche créée"}`, "ERREUR", DIAG_CODES.fouMissing);
+  }
+  const sup = opts.supplier = rs.supplier;
+  // Fiche déjà enregistrée : SIGEO réaffiche le code sans zéros de tête et
+  // rend les champs cachés vides ; le fournisseur y est conforme si le code
+  // (zéros ignorés) et le libellé correspondent. Les champs cachés sont
+  // renseignés juste avant chaque « Enregistrer » (ensureSupplier), sans
+  // provoquer à eux seuls un nouvel enregistrement.
+  opts.fouAfterSave = !!s.saved;
+  log(`fournisseur trouvé dans fou_browse : FU${sup.code} — ${sup.label}` +
+    `${sup.variant !== v.fou ? ` (trouvé avec la variante ${diagQ(sup.variant)} — ${diagTriedText(rs.tried.slice(0, -1))})` : ""}` +
+    `${sup.status ? ` · statut ${sup.status}` : ""}`, "ok");
+  if (/interdit|bloqu|inactif|ferm/i.test(diagFold(sup.status))) {
+    warn(`fournisseur FU${sup.code} ${sup.label} au statut « ${sup.status} » dans SIGEO : il pourrait ne pas être retenu à l'enregistrement`);
+  }
+  // Garde-fou avant CHAQUE « Enregistrer » : code, libellé et champs cachés
+  // du fournisseur doivent être renseignés comme par la popup ; sinon
+  // nouvelle application, puis arrêt (rien n'est enregistré).
+  const supplierProblems = (snap) => {
+    const x = (snap && snap.f && snap.f.fouSel) || {};
+    const pb = [];
+    if (!x.present) pb.push(`champ code #${DIAG_IDS.fou} absent`);
+    else if (diagNorm(x.code) !== sup.code) pb.push(`code ${diagQ(diagNorm(x.code))} au lieu de ${diagQ(sup.code)}`);
+    if (!diagNorm(x.label)) pb.push("libellé vide");
+    else if (diagFold(x.label) !== diagFold(sup.label)) pb.push(`libellé ${diagQ(x.label)} au lieu de ${diagQ(sup.label)}`);
+    if (!x.hidTxtPresent || !diagNorm(x.hidTxt)) pb.push(`#${DIAG_IDS.fouHidTxt} ${x.hidTxtPresent ? "vide" : "absent"}`);
+    if (!x.hidLblPresent || !diagNorm(x.hidLbl)) pb.push(`#${DIAG_IDS.fouHidLbl} ${x.hidLblPresent ? "vide" : "absent"}`);
+    return pb;
+  };
+  const applySupplier = async (why) => {
+    let r;
+    try { r = await ad.exec({ op: "supplier", action: { code: sup.code, label: sup.label, labelHtml: sup.labelHtml ?? sup.label } }); }
+    catch (e) { r = { ok: false, error: e.message || String(e) }; }
+    if (!r || !r.ok) return { error: r && r.code ? `${r.code} — ${r.error}` : `${DIAG_CODES.fouMissing} — fournisseur non appliqué : ${(r && r.error) || "page indisponible"}`, code: (r && r.code) || DIAG_CODES.fouMissing };
+    const b = r.before || {}, a = r.after || {};
+    changed = true; // (déclaré plus bas ; appelée seulement pendant la saisie)
+    log(`Fournisseur (sélection fou_browse) : ${diagQ(b.code)} ${diagQ(b.label)} → ${diagQ(a.code)} ${diagQ(a.label)} · cachés ${diagQ(a.hidTxt)} / ${diagQ(a.hidLbl)}${why ? " — " + why : ""}`);
+    if (r.missingHidden && r.missingHidden.length) log(`champ(s) caché(s) absent(s) de la page : ${r.missingHidden.join(", ")}`, "skip");
+    return { ok: true, r };
+  };
+  const ensureSupplier = async (when) => {
+    const w = await stable();
+    if (w.stopped) return E("arrêté par l'utilisateur", "ARRÊT");
+    if (w.timeout) return E(`${DIAG_CODES.timeout} — page toujours en rechargement avant ${when}`, "ERREUR", DIAG_CODES.timeout);
+    s = w.snap;
+    let pb = supplierProblems(s);
+    if (!pb.length) return { ok: true };
+    const ap = await applySupplier(`${pb.join(", ")} avant ${when}`);
+    if (ap.error) return E(ap.error, "ERREUR", ap.code);
+    const s2 = await read();
+    if (s2) s = s2;
+    pb = supplierProblems(s2);
+    if (pb.length) {
+      return E(`${DIAG_CODES.fouMissing} — fournisseur FU${sup.code} ${sup.label} non retenu par la page avant ${when} (${pb.join(", ")}) — code brut ${diagQ(v.fouRaw ?? v.fou)}, variantes testées : ${diagTriedText(rs.tried)} — Enregistrer non cliqué`, "ERREUR", DIAG_CODES.fouMissing);
+    }
+    return { ok: true };
+  };
 
   // N° ADEME : saisissable avant l'enregistrement seulement pour un DPE
   // ≥ 01/07/2021 ; sinon (création) après le 1er enregistrement.
@@ -1501,7 +1953,18 @@ async function diagProcess(ad, p) {
       const plan = diagPlan(s, v, opts);
       const gap = plan.specs.find((x) => !x.ok && (x.phase === "A" || (x.phase === "calc" && (st.attempts.dateFin || 0) < 2)));
       if (!gap) return { snap: s };
-      if (gap.key !== "type" && gap.key !== "fou" && !s.divConso) return E("bloc des consommations (div#div_conso) non affiché alors que le type est sélectionné");
+      const isFou = gap.act && gap.act.kind === "supplier";
+      if (gap.key !== "type" && !isFou && !s.divConso) return E("bloc des consommations (div#div_conso) non affiché alors que le type est sélectionné");
+      if (isFou) {
+        // Sans postback : callback de la popup fou_browse rejoué dans la page.
+        // Un rechargement ultérieur (date, conso…) peut l'effacer : il est
+        // alors réappliqué (8 fois au plus sur toute la saisie).
+        const n = st.attempts.fouSel = (st.attempts.fouSel || 0) + 1;
+        if (n > 8) return E(`${DIAG_CODES.fouMissing} — la page ne retient pas le fournisseur FU${opts.supplier.code} ${opts.supplier.label} (${gap.label} relu ${diagQ(gap.got)}) — rien n'a été enregistré`, "ERREUR", DIAG_CODES.fouMissing);
+        const ap = await applySupplier(n > 1 ? `${gap.label} ${diagQ(gap.got)} après rechargement` : "");
+        if (ap.error) return E(ap.error, "ERREUR", ap.code);
+        continue;
+      }
       let sp = gap, why = "";
       if (gap.phase === "calc") {
         // « Valable jusqu'au » ≠ calcul : « Établi le » n'a pas été pris en compte → nouveau déclenchement.
@@ -1621,6 +2084,10 @@ async function diagProcess(ad, p) {
     return id ? diagUrlWithId(snap.url, id) : snap.url;
   };
   const saveOnce = async (n, isNew) => {
+    // Garde-fou : jamais d'« Enregistrer » sans fournisseur (libellé + champs
+    // cachés) — c'est ce qui créait des fiches DPE orphelines.
+    const g = await ensureSupplier(`« Enregistrer » n°${n}`);
+    if (g.error) return g;
     if (!s.saveBtn.present) return E("bouton « Enregistrer » introuvable");
     if (isNew) await ad.journalSet(key, { phase: "saving", row: p.rowLabel || "", lotId: s.lotId, t: ad.now() });
     const before = s.docId;
@@ -1700,16 +2167,14 @@ async function diagProcess(ad, p) {
 
   // — Contrôle APRÈS enregistrement (même comparateur), avant tout upload.
   //   N° ADEME lu dans span#body_x_labelIdDpe s'il existe, sinon dans l'input.
+  // Fournisseur : code comparé sans zéros de tête, libellé relu comparé au
+  // libellé obtenu dans fou_browse (vide = fournisseur non retenu par SIGEO).
+  opts.fouAfterSave = true;
   const pa = diagPlan(s, v, opts);
   pa.warnings.forEach(warn);
-  const bad = pa.specs.filter((x) => !x.ok);
-  // Fournisseur : code comparé sans zéros de tête (SIGEO stocke un nombre)
-  // ET libellé #body:x:proxyFou:x:lbl:x:lbl non vide, sinon écart réel.
-  const fn = s.f.fouName || {};
+  const bad = pa.specs.filter((x) => !x.ok).map((x) => (x.key === "fouLabel" && !diagNorm(x.got)
+    ? Object.assign({}, x, { label: `Fournisseur FU${sup.code} non reconnu par SIGEO (libellé)` }) : x));
   const fouSpec = pa.specs.find((x) => x.key === "fou");
-  if (fouSpec && fouSpec.ok && (fn.labelFound || fn.dedicated) && !fn.name) {
-    bad.push({ key: "fouLabel", label: "Fournisseur non reconnu par SIGEO", kind: "text", want: `libellé du code ${v.fou}`, got: "" });
-  }
   const ademeSpec = pa.specs.find((x) => x.key === "ademe");
   ademeConfirmed = !v.ademe || !!(ademeSpec && ademeSpec.ok);
   if (bad.length) return fail(`${DIAG_CODES.after} — ${diagGapText(bad)} — upload annulé`, "ERREUR", DIAG_CODES.after);
@@ -1717,9 +2182,8 @@ async function diagProcess(ad, p) {
   if (ademeOk) log(`N° ADEME relu après enregistrement : ${ademeOk} (${s.f.ademe.mode === "label" ? "texte enregistré" : "champ de saisie"})`);
   log(`contrôle après enregistrement : ${pa.specs.length} valeur(s) conforme(s) · ${summary(pa)}`, "ok");
   const fouRelu = fouSpec ? diagNorm(fouSpec.got) : "";
-  if (fn.name && fouRelu && fouRelu !== v.fou) log(`Fournisseur ${v.fou} relu ${fouRelu} (zéros de tête supprimés par SIGEO) — OK, libellé : ${fn.name}`);
-  else if (fn.name) log(`fournisseur : ${v.fou} — ${fn.name}`);
-  else warn("nom du fournisseur non repéré sur la page (active le mode debug pour le localiser)");
+  log(`fournisseur relu après enregistrement : ${fouRelu || "(vide)"} — ${diagNorm(s.f.fouSel && s.f.fouSel.label) || "(libellé vide)"}` +
+    `${fouRelu && fouRelu !== sup.code ? ` (saisi ${sup.code}, zéros de tête retirés par SIGEO)` : ""}`);
 
   const okInfo = () => [res.idDiag ? "diagnostic " + res.idDiag : "diagnostic enregistré", ademeOk ? "ADEME " + ademeOk : ""].filter(Boolean).join(", ");
   if (!p.attach) return Object.assign(res, { ok: true, status: "OK", info: okInfo() + " — PDF non joint (option désactivée)" });
@@ -1746,6 +2210,8 @@ async function diagProcess(ad, p) {
       const pe0 = pageError(s);
       if (pe0) return { error: pe0, status: s.login ? "AUTH" : "PAGE" };
       if (res.idDiag && s.idDiag !== res.idDiag) return { error: `la popup n'affiche plus la fiche DPE ${res.idDiag} (${s.url}) — rien n'a été recliqué`, status: "PAGE" };
+      const gs = await ensureSupplier(`le ${ord(k)} nouvel enregistrement (revérification de l'upload)`);
+      if (gs.error) return { error: gs.error, status: gs.status, code: gs.code };
       if (!s.saveBtn.present) return { error: "bouton « Enregistrer » introuvable pour revérifier l'upload" };
       const before = s.docId, t0 = ad.now();
       const r = await ad.exec({ op: "save" });
@@ -1907,7 +2373,7 @@ function diagStepHtml(step, esc) {
         <label title="${esc(f.hint || f.k)}">${f.label}${f.req ? " *" : ""}</label>
         <input type="text" class="scn-diag-col" data-k="${f.k}" value="${esc(cols[f.k] ?? "")}" />`).join("");
   return `
-      <p class="hint scn-only-diag">Remplit le formulaire « Diagnostic » SIGEO (popup <code>diag_manage</code>) en phases : A) champs à postback un par un (type → fournisseur → établi le → conso → GES, rechargement attendu à chaque fois), B) champs sans postback (N° ADEME, dates, coûts, lettres forcées…), C) contrôle complet avant « Enregistrer », D) enregistrement et contrôle après, E) PDF joint. « Valable jusqu'au » n'est jamais saisi (calculé par SIGEO, vérifié). Tout rechargement inattendu fait repartir de la phase A. Jamais de touche Entrée ni « Enreg. et fermer » ; la popup reste ouverte.</p>
+      <p class="hint scn-only-diag">Remplit le formulaire « Diagnostic » SIGEO (popup <code>diag_manage</code>) en phases : fournisseur d'abord cherché dans la popup fou_browse (code avec / sans zéro de tête, fournisseur unique, sinon arrêt FOURNISSEUR_INTROUVABLE sans rien créer) ; A) champs à postback un par un (type → fournisseur choisi comme le fait la popup → établi le → conso → GES, rechargement attendu à chaque fois), B) champs sans postback (N° ADEME, dates, coûts, lettres forcées…), C) contrôle complet avant « Enregistrer », D) enregistrement et contrôle après, E) PDF joint. « Valable jusqu'au » n'est jamais saisi (calculé par SIGEO, vérifié). Tout rechargement inattendu fait repartir de la phase A. Jamais de touche Entrée ni « Enreg. et fermer » ; la popup reste ouverte.</p>
       <div class="scn-row scn-only-diag">
         <label>URL de la fiche :</label>
         <input type="text" class="scn-diag-url" placeholder="vide = fiche déjà ouverte · ex : …/popup.aspx/fr/sig_imm/diag_manage/{ID interne}/10/0" value="${esc(step.diagUrl || "")}" />
@@ -1994,9 +2460,10 @@ if (typeof module !== "undefined" && module.exports) {
     DIAG_IDS, DIAG_FIELDS, DIAG_PRESETS, DIAG_DEFAULTS, DIAG_INTRALIA_URL,
     diagNorm, diagFold, diagDate, diagDateEq, diagSerialToDate, diagExpectedValidity, diagIsNewDpe, ademeSaisissableAvantEnreg,
     diagParseNum, diagNum, diagNumEq, diagBool, diagLetter, diagAdeme, diagAdemeKey, diagType, diagNormalizeData,
-    diagSame, diagShow, diagQ, diagFouKey, DIAG_CODES, DIAG_PHASE_A,
+    diagSame, diagShow, diagQ, diagFouKey, diagFouCode, diagFouVariants, diagPickSupplier, diagResolveSupplier, diagTriedText, diagExistingMatch,
+    DIAG_CODES, DIAG_PHASE_A, DIAG_FOU_BROWSE, DIAG_FOU_LEN,
     diagMatchFile, diagCheckFileAdeme, diagIsPdf, diagToBase64, diagFmtSize,
     diagUrlParts, diagUrlWithId, diagJournalKey, diagClassifyMessages, diagFindDocRow, diagRowHasFile,
-    diagPageOp, diagMainHandler, diagPlan, diagCompare, diagGapText, diagCapped, diagSettle, diagProcess, diagStepHtml, diagStepRead
+    diagPageOp, diagMainHandler, diagSupplierOp, diagLotDiagsOp, diagPlan, diagCompare, diagGapText, diagCapped, diagSettle, diagProcess, diagStepHtml, diagStepRead
   };
 }

@@ -84,8 +84,21 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
     /* L16 */ row(Object.assign({}, OLD, { lot: "590015", numero_ademe: "NC", fichier_dpe: "DPE_2021N1001671X.pdf" })),
     /* L17 */ row(Object.assign({}, NEW, { lot: "590016", code_fournisseur: "FU 0448957" })),
     /* L18 */ row(Object.assign({}, NEW, { lot: "590017", numero_ademe: "NC", fichier_dpe: "DPE_2222E0000001A.pdf" })),
-    /* L19 */ row(Object.assign({}, NEW, { lot: "590018" }))
+    /* L19 */ row(Object.assign({}, NEW, { lot: "590018" })),
+    /* L20 */ row(Object.assign({}, NEW, { lot: "590019", code_fournisseur: "552043" })), // cellule NUMÉRIQUE (zéro perdu par Excel)
+    /* L21 */ row(Object.assign({}, NEW, { lot: "590020", code_fournisseur: "0612345" })),
+    /* L22 */ row(Object.assign({}, NEW, { lot: "590021", code_fournisseur: "9999991" })),
+    /* L23 */ row(Object.assign({}, NEW, { lot: "590023", code_fournisseur: "0552043" })),
+    /* L24 */ row(Object.assign({}, NEW, { lot: "590024", code_fournisseur: "0552043" })),
+    /* L25 */ row(Object.assign({}, NEW, { lot: "590025", code_fournisseur: "0552043" }))
   ]]);
+  // Classeur : la ligne L20 a un code fournisseur en cellule numérique (552043).
+  await panel.evaluate(() => {
+    const aoa = state.rows.map((r, i) => r.map((v, j) => (i === 19 && j === 1 ? 552043 : v)));
+    state.workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(state.workbook, XLSX.utils.aoa_to_sheet(aoa), "F");
+    state.sheetName = "F";
+  });
 
   await panel.evaluate((u) => {
     document.getElementById("scenarioSteps").innerHTML = "";
@@ -314,8 +327,10 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
   console.log("--- 16a. libellé fournisseur vide ---\n" + run.log);
   await cfg("fouLabelBlank=0");
   c = await cell(16, "Saisie DPE");
-  assert.ok(/Fournisseur : attendu « 0448957 » · avant « » · après « 0448957 »/.test(run.log), "FU et espace retirés avant la saisie");
-  assert.ok(/^ERREUR — ECART_APRES_ENREG — 1 écart\(s\) : Fournisseur non reconnu par SIGEO attendu « libellé du code 0448957 », relu « » — upload annulé — fiche DPE (\d+) créée mais incomplète \(PDF manquant\)/.test(c), c);
+  assert.ok(/code fournisseur : brut « FU 0448957 » → normalisé « 0448957 »/.test(run.log), "FU et espace retirés avant la saisie");
+  assert.ok(/Fournisseur \(sélection fou_browse\) : « » « » → « 0448957 » « ACADE Diagnostic » · cachés « 0448957 » \/ « ACADE Diagnostic »/.test(run.log), run.log);
+  assert.ok(/^ERREUR — ECART_APRES_ENREG — 1 écart\(s\) : Fournisseur FU0448957 non reconnu par SIGEO \(libellé\) attendu « ACADE Diagnostic », relu « » — upload annulé — fiche DPE (\d+) créée mais incomplète \(PDF manquant\)/.test(c), c);
+  assert.ok(!/libellé du code/.test(c), "plus de libellé fictif");
   assert.deepStrictEqual(delta(s0, stats()), { creates: 1, updates: 0, uploads: 0, saves: 1 });
   const id16 = c.match(/fiche DPE (\d+)/)[1];
   assert.strictEqual(lotDiags("590016")[0].fou, "448957", "SIGEO stocke le code sans zéros de tête");
@@ -327,8 +342,8 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
   await setOpt(".scn-diag-confirm", true);
   assert.ok(run.log.includes(`fiche DPE ${id16} déjà créée (colonne résultat) : réouverture en modification`), run.log);
   assert.ok(/diagnostic déjà enregistré et conforme : pas de nouvel enregistrement/.test(run.log), "pas de ressaisie du fournisseur");
-  assert.ok(/Fournisseur 0448957 relu 448957 \(zéros de tête supprimés par SIGEO\) — OK, libellé : ACADE Diagnostic/.test(run.log), run.log);
-  assert.ok(!/Fournisseur : attendu/.test(run.log), "fournisseur non retapé");
+  assert.ok(/fournisseur relu après enregistrement : 448957 — ACADE Diagnostic \(saisi 0448957, zéros de tête retirés par SIGEO\)/.test(run.log), run.log);
+  assert.ok(!/Fournisseur \(sélection fou_browse\)/.test(run.log), "fournisseur conforme : non réappliqué");
   assert.deepStrictEqual(delta(s0, stats()), { creates: 0, updates: 0, uploads: 1, saves: 0 }, "directement à l'upload");
   assert.strictEqual(lotDiags("590016").length, 1);
   assert.ok(/^OK — diagnostic \d+, ADEME 2222E0000001A — PDF joint/.test(await cell(16, "Saisie DPE")), await cell(16, "Saisie DPE"));
@@ -357,6 +372,72 @@ const OLD2 = { code_fournisseur: "448957", date_etabli: "08/10/2020", numero_ade
   assert.ok(/^OK — /.test(await cell(18, "Saisie DPE")), await cell(18, "Saisie DPE"));
   assert.deepStrictEqual(delta(s0, stats()), { creates: 1, updates: 0, uploads: 1, saves: 1 });
   assert.strictEqual(lotDiags("590018").length, 1);
+
+  // ===== 19. Code fournisseur avec zéro de tête =====
+  // 19a. Cellule Excel NUMÉRIQUE 552043 : re-paddée en 0552043, fournisseur
+  //      résolu dans fou_browse AVANT l'enregistrement (libellé + champs cachés).
+  await setOpt(".scn-diag-confirm", false);
+  s0 = stats();
+  let f0 = { searches: srv.stats.fouSearches, hidden: srv.stats.hiddenLabelPosted, orphan: srv.stats.savedWithoutSupplier };
+  run = await runActive(panel, 19);
+  console.log("--- 19a. code fournisseur en cellule numérique 552043 ---\n" + run.log);
+  c = await cell(19, "Saisie DPE");
+  assert.ok(/code fournisseur : brut « 552043 » → normalisé « 0552043 » \(cellule numérique : zéros de tête rétablis, 7 chiffres\)/.test(run.log), run.log);
+  assert.ok(/fournisseur trouvé dans fou_browse : FU0552043 — ANAPLOMB · statut Interdit/.test(run.log), run.log);
+  assert.ok(/^OK — diagnostic \d+, ADEME 2222E0000001A — PDF joint .*⚠ fournisseur FU0552043 ANAPLOMB au statut « Interdit »/.test(c), c);
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 1, updates: 0, uploads: 1, saves: 1 });
+  d = lotDiags("590019");
+  assert.deepStrictEqual([d.length, d[0].fou, d[0].fouLabel], [1, "552043", "ANAPLOMB"], "fournisseur bien retenu par SIGEO");
+  assert.strictEqual(srv.stats.savedWithoutSupplier - f0.orphan, 0, "jamais de fiche sans fournisseur");
+  assert.strictEqual(srv.stats.fouSearches - f0.searches, 1, "trouvé avec le code normalisé, une seule recherche");
+  assert.ok(srv.stats.hiddenLabelPosted - f0.hidden >= 4, "libellé posté dans le champ caché à chaque postback");
+  // 19b. 0612345 : rien avec le zéro, trouvé sans ; libellé avec apostrophe et &
+  await cfg("fouNoZeroSearch=1");
+  s0 = stats();
+  run = await runActive(panel, 20);
+  await cfg("fouNoZeroSearch=0");
+  console.log("--- 19b. variante sans zéro ---\n" + run.log);
+  assert.ok(/fournisseur trouvé dans fou_browse : FU0612345 — L'EXPERT & FILS \(trouvé avec la variante « 612345 » — 0612345 : aucun fournisseur\)/.test(run.log), run.log);
+  assert.ok(/^OK — /.test(await cell(20, "Saisie DPE")), await cell(20, "Saisie DPE"));
+  assert.deepStrictEqual([lotDiags("590020")[0].fou, lotDiags("590020")[0].fouLabel], ["612345", "L'EXPERT & FILS"]);
+  // 19c. Fournisseur introuvable : FOURNISSEUR_INTROUVABLE, rien saisi, aucune fiche
+  s0 = stats();
+  run = await runActive(panel, 21);
+  console.log("--- 19c. fournisseur introuvable ---\n" + run.log);
+  c = await cell(21, "Saisie DPE");
+  assert.ok(/^ERREUR — FOURNISSEUR_INTROUVABLE — code brut « 9999991 », variantes testées : 9999991 : aucun fournisseur — aucune fiche créée/.test(c), c);
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 0, updates: 0, uploads: 0, saves: 0 });
+  assert.strictEqual(lotDiags("590021").length, 0);
+  assert.ok(!/Type : attendu/.test(run.log), "rien n'a été saisi");
+
+  // ===== 20. Reprise d'une fiche existante du lot (ex. 1148596 sans fournisseur ni PDF) =====
+  const orphan = (id, lot) => srv.store.set(id, { lot, type: "11", fou: "552043", fouLabel: "", dateReal: "12/09/2022", dateFin: "11/09/2032", dateDeb: "",
+    ademe: "2222E0000001A", conso: "224,00", ges: "52,60", forceEp: "", forceGes: "", altitude: false, nouvelles: false,
+    coutMin: "900", coutMax: "1300", datePrix: "01/01/2021", resultat: "", comment: "", docs: [] });
+  orphan("1148596", "590023");
+  s0 = stats();
+  run = await runActive(panel, 22, async (body) => { assert.ok(/Fiche existante : 1148596 — Performance Energetique, établie le 12\/09\/2022/.test(body), body); await yes(); });
+  console.log("--- 20a. reprise de la fiche 1148596 ---\n" + run.log);
+  c = await cell(22, "Saisie DPE");
+  assert.ok(/fiche DPE 1148596 déjà présente sur le lot \(établie le 12\/09\/2022\) : reprise en modification au lieu d'une création/.test(run.log), run.log);
+  assert.ok(/^OK — diagnostic 1148596, ADEME 2222E0000001A — PDF joint/.test(c), c);
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 0, updates: 1, uploads: 1, saves: 1 }, "complétée, pas de doublon");
+  assert.deepStrictEqual([lotDiags("590023").length, srv.store.get("1148596").fouLabel, srv.store.get("1148596").docs.length], [1, "ANAPLOMB", 1]);
+  // 20b. reprise refusée : rien n'est créé
+  orphan("1148597", "590024");
+  s0 = stats();
+  run = await runActive(panel, 23, async () => { await panel.click("#scnConfirmNo"); });
+  c = await cell(23, "Saisie DPE");
+  assert.ok(/^ERREUR — DOUBLON — la fiche DPE 1148597 \(établie le 12\/09\/2022\) existe déjà sur ce lot : reprise refusée, aucune nouvelle fiche créée/.test(c), c);
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 0, updates: 0, uploads: 0, saves: 0 });
+  // 20c. deux fiches identiques déjà présentes (doublon existant) : arrêt, rien créé
+  orphan("1148598", "590025"); orphan("1148599", "590025");
+  s0 = stats();
+  run = await runActive(panel, 24, async () => { throw new Error("aucune confirmation attendue"); });
+  c = await cell(24, "Saisie DPE");
+  assert.ok(/^ERREUR — DOUBLON — 2 fiches DPE établies le 12\/09\/2022 existent déjà sur ce lot \(1148598 .*1148599 /.test(c), c);
+  assert.deepStrictEqual(delta(s0, stats()), { creates: 0, updates: 0, uploads: 0, saves: 0 });
+  await setOpt(".scn-diag-confirm", true);
 
   assert.strictEqual(srv.stats.enterSaves, 0, "jamais de touche Entrée");
   assert.strictEqual(srv.stats.saveCloses, 0, "jamais « Enreg. et fermer »");
