@@ -68,8 +68,11 @@ const INTRA_SAISIE_COLS = Object.freeze([
   "GES (kg CO2/m²/an)", "Classe GES", "Coût min (€/an)", "Coût max (€/an)", "Date d'indexation des prix",
   "Remarques DPE"
 ]);
-const INTRA_ID_COL = "ID interne SIGEO";
+const INTRA_ID_COL = "ID interne SIGEO";       // id interne du LOT (URL de la fiche DPE)
 const INTRA_IM_COL = "IM SIGEO";
+const INTRA_IMM_ID_COL = "ID immeuble SIGEO";   // id interne de l'IMMEUBLE (lien de la recherche)
+const INTRA_METHOD_COL = "Méthode IM SIGEO";    // comment l'IM a été trouvé + nb de résultats
+const INTRA_DEFAULT_SITE = "391";               // 391 - ORALIA SOGIMAT
 // Popup « Diagnostic » SIGEO d'un lot : {IM} = n° d'immeuble, {ID} = id interne du lot.
 const INTRA_FICHE_DEFAULT = "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/{IM}/{ID}/0";
 
@@ -354,6 +357,10 @@ function intraNormalizeConfig(c = {}) {
     sigeo: c.sigeo !== false,
     imCol: String(c.imCol ?? ""),
     idCol: String(c.idCol ?? ""),
+    // Site de la recherche d'immeubles SIGEO (code, « 391 - ORALIA SOGIMAT » → 391 ; vide = tous les sites).
+    siteCode: c.siteCode === undefined || c.siteCode === null ? INTRA_DEFAULT_SITE : String(c.siteCode).trim().split(/\s+-\s+/)[0].trim(),
+    // Repli « par adresse » (toujours avec le site et le CP) : désactivé par défaut.
+    imAdrFallback: c.imAdrFallback === true,
     fiche: String(c.fiche ?? "").trim() || INTRA_FICHE_DEFAULT,
     out: !old && c.out === "all" ? "all" : "saisie",
     ocr: ["auto", "always", "never"].includes(c.ocr) ? c.ocr : "auto",
@@ -482,8 +489,10 @@ function intraSaisieValues(res, ds) {
   // Fiche SIGEO (id interne du lot) : res.sigeo = { status, url, text }.
   const sg = res.sigeo;
   if (sg) {
-    if (sg.url) v["URL fiche DPE"] = sg.url;
-    else rem.push(`fiche SIGEO introuvable : ${sg.text || sg.status}`);
+    if (sg.url) {
+      v["URL fiche DPE"] = sg.url;
+      if (sg.check) rem.push(`IM SIGEO à vérifier : ${sg.check}`);
+    } else rem.push(`fiche SIGEO introuvable : ${sg.text || sg.status}`);
   }
   if (!a) rem.push("PDF non analysé : fournisseur et n° ADEME à saisir");
   else if (a.error) rem.push(`analyse du PDF impossible (${a.error}) : fournisseur et n° ADEME à saisir`);
@@ -881,7 +890,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     INTRA_DEFAULT_BASE, INTRA_DEFAULT_FLOWER, INTRA_DEFAULT_SOC, INTRA_ALL_SOC, INTRA_DEFAULT_CABINETS,
     INTRA_DEFAULT_REGEX, INTRA_DEFAULT_NAME, INTRA_DEFAULT_FOLDER, INTRA_DEFAULT_DELAY, INTRA_DEFAULT_MAX_AGE_DAYS,
-    INTRA_STATUS, INTRA_COLS, INTRA_FIELDS, INTRA_SUPPLIER_COL, INTRA_SAISIE_COLS, INTRA_ID_COL, INTRA_IM_COL, INTRA_FICHE_DEFAULT,
+    INTRA_STATUS, INTRA_COLS, INTRA_FIELDS, INTRA_SUPPLIER_COL, INTRA_SAISIE_COLS, INTRA_ID_COL, INTRA_IM_COL, INTRA_IMM_ID_COL, INTRA_METHOD_COL, INTRA_DEFAULT_SITE, INTRA_FICHE_DEFAULT,
     intraFicheUrl, intraTypeLocal, intraSplitAdr,
     intraNormName, intraNormLot, intraFold, intraIndexUrl, intraFormUrl, intraLotUrl, intraFlowerViewUrl, intraFlowerDownloadUrl,
     intraBuildIndex, intraSimilarity, intraCloseNames, intraLookup, intraCompileRegex, intraIsDpeName, intraSelectDpe,

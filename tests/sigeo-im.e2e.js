@@ -92,6 +92,20 @@ async function runSuite(browser, label, url) {
   assert.strictEqual(im.imResolve(S("8 RUE LAMARCK"), [{ im: "IM1", adresse: "8 BOULEVARD LAMARCK 18000 BOURGES" }]).status, "Introuvable");
   assert.strictEqual(im.imResolve(S("8 LAMARCK"), [{ im: "IM1", adresse: "8 BOULEVARD LAMARCK 18000 BOURGES" }]).status, "OK");
   assert.strictEqual(im.imResolve(S("129 RUE LAMARCK", { cp: "75018" }), [{ im: "IM1", adresse: "129 RUE LAMARCK 18000 BOURGES" }]).status, "Introuvable");
+  // Recherche par désignation (v2.22.0) : jamais la première ligne par défaut.
+  const R = (i, nom, adresse) => ({ im: i, nom, adresse, id: i.replace(/^IM0*/, "") });
+  const bourg = [R("IM0399982", "LE BOURG", "le bourg 36 RUE CENTRALE 69490 ST ROMAIN DE POPEY"),
+    R("IM0399100", "LE BOURG", "2 PLACE DE L EGLISE 69170 TARARE"), R("IM0399200", "LE BOURG NORD", "1 RUE HAUTE 69490 ST ROMAIN DE POPEY")];
+  const pk = (rows, nom, o) => { const r = im.imPickByName(rows, nom, o); return [r.row && r.row.im, r.exact, r.by, r.check, r.candidates.length]; };
+  assert.deepStrictEqual(pk(bourg.slice(0, 1), " lé  bourg ", {}), ["IM0399982", 1, "", "", 1], "1 nom identique (casse, accents, espaces)");
+  assert.deepStrictEqual(pk(bourg, "LE BOURG", { cp: "69490" }), ["IM0399982", 2, "CP 69490", "", 1], "2 identiques → CP");
+  assert.deepStrictEqual(pk(bourg, "LE BOURG", { ville: "SAINT ROMAIN DE POPEY" }), ["IM0399982", 2, "ville SAINT ROMAIN DE POPEY", "", 1], "ST = SAINT");
+  assert.deepStrictEqual(pk(bourg, "LE BOURG", {}), [null, 2, "", "", 2], "2 identiques sans CP ni ville → rien");
+  assert.deepStrictEqual(pk(bourg, "BOURG", { cp: "69490" }), [null, 0, "CP 69490", "", 2], "aucun identique, 2 au CP → rien");
+  assert.deepStrictEqual(pk(bourg, "BOURG", { cp: "69170" }), ["IM0399100", 0, "CP 69170", "Nom E.I. « LE BOURG » ≠ « BOURG » : immeuble retenu par CP 69170 seulement", 1]);
+  assert.deepStrictEqual(pk(bourg.slice(0, 1), "LE BOURG", { cp: "69000" }), ["IM0399982", 1, "", "CP de l'immeuble SIGEO 69490 ≠ CP Intralia 69000", 1]);
+  assert.deepStrictEqual(pk([], "LE BOURG", { cp: "69490" }), [null, 0, "", "", 0]);
+  assert.strictEqual(im.IM_GER_IDS.site, "body_x_sites_x_ddlSite_x");
   console.log("✓ tests unitaires");
 
   const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome", headless: true });

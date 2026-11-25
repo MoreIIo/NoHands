@@ -12,6 +12,7 @@ const assert = require("assert");
 const { chromium } = require("playwright");
 const mock = require("./fixtures/intralia-mock.js");
 const lotMock = require("./fixtures/sigeo-lot-server.js");
+const gerMod = require("./fixtures/sigeo-im-ger.js");
 
 const ROOT = path.resolve(__dirname, "..");
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".gz": "application/gzip", ".wasm": "application/wasm" };
@@ -207,7 +208,7 @@ const ROWS = [
   const col = (n) => { const i = H.indexOf(n); assert.ok(i >= 4, "colonne " + n); return i; };
   const C = Object.fromEntries(["Intralia_Cabinet", "Intralia_ID_Immeuble", "Intralia_URL_Lot", "DPE_Statut", "DPE_Detail", "DPE_Fichier", "DPE_Date_GED", "DPE_UUID",
     "DPE_Lien_FlowerDocs", "DPE_Fichier_Local", "Intralia_DPE_Classe", "Intralia_DPE_kWh_m2", "Intralia_GES_Classe", "Intralia_GES_kgCO2_m2", "Intralia_Date_Diag"].map((n) => [n, col(n)]));
-  assert.strictEqual(H.length, 4 + 15 + 1 + 17, "« toutes » : 10 colonnes fixes + 5 champs cochés + ID interne SIGEO + 17 colonnes du fichier prêt");
+  assert.strictEqual(H.length, 4 + 15 + 3 + 17, "« toutes » : 10 colonnes fixes + 5 champs cochés + ID immeuble / ID interne / Méthode IM SIGEO + 17 colonnes du fichier prêt");
   const gs = (r, n) => out.rows[r - 1][H.indexOf(n)];
   assert.deepStrictEqual(["DPE analyse", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "N° FU"].map((n) => gs(2, n)),
     ["À VÉRIFIER", "05/06/2012", "04/06/2022", "105", "C", ""], "sans analyse du PDF : données Intralia, fournisseur à saisir");
@@ -256,12 +257,12 @@ const ROWS = [
   const H2 = out.rows[0];
   const ac = ["DPE analyse", "PDF analysé", "N° FU", "Fournisseur DPE", "N° ADEME", "Établi le", "Valable jusqu'au", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "Remarques DPE"];
   const ga = (r) => ac.map((n) => { const i = H2.indexOf(n); assert.ok(i >= 0, "colonne " + n); return out.rows[r - 1][i]; });
-  assert.deepStrictEqual(H2.slice(4), ["ID interne SIGEO", "DPE analyse", "URL fiche DPE", "Type de local", "PDF analysé", "N° FU", "Fournisseur DPE", "Établi le", "Valable jusqu'au",
+  assert.deepStrictEqual(H2.slice(4), ["ID immeuble SIGEO", "ID interne SIGEO", "Méthode IM SIGEO", "DPE analyse", "URL fiche DPE", "Type de local", "PDF analysé", "N° FU", "Fournisseur DPE", "Établi le", "Valable jusqu'au",
     "N° ADEME", "Énergie primaire (kWh/m²/an)", "Classe énergie", "GES (kg CO2/m²/an)", "Classe GES", "Coût min (€/an)", "Coût max (€/an)",
     "Date d'indexation des prix", "Remarques DPE"], "uniquement le fichier prêt pour la saisie");
   const gx = (r, n) => out.rows[r - 1][H2.indexOf(n)];
-  assert.deepStrictEqual([gx(2, "ID interne SIGEO"), gx(2, "URL fiche DPE"), gx(2, "Type de local")],
-    ["38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0", "habitation"]);
+  assert.deepStrictEqual([gx(2, "ID interne SIGEO"), gx(2, "URL fiche DPE"), gx(2, "Type de local"), gx(2, "Méthode IM SIGEO")],
+    ["38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0", "habitation", "IM de la colonne « IM_format »"]);
   assert.deepStrictEqual([gx(3, "ID interne SIGEO"), gx(4, "ID interne SIGEO"), gx(12, "ID interne SIGEO"), gx(6, "ID interne SIGEO")], ["12", "5", "38", ""]);
   assert.deepStrictEqual([gx(5, "DPE analyse"), gx(5, "URL fiche DPE")], ["À VÉRIFIER", ""]);
   assert.strictEqual(gx(5, "Remarques DPE"), "fiche SIGEO introuvable : lot 278 introuvable dans SIGEO — IM0393004 : Introuvable");
@@ -366,7 +367,7 @@ const ROWS = [
   // id interne déjà connu (ex. colonne id_server) : réutilisé, pas de recherche SIGEO.
   const posts0 = lsrv.stats.post;
   const known = await panel.evaluate(async () => intraSigeoLookup({ imIdx: 0, knownIdx: 1, fiche: "", lc: getLotConfig(), run: {}, ad: null }, ["IM0393999", "77"], "5"));
-  assert.deepStrictEqual(known, { status: "OK", im: "393999", id: "77", known: true, url: "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393999/77/0" });
+  assert.deepStrictEqual(known, { status: "OK", im: "393999", id: "77", known: true, url: "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393999/77/0", method: "IM de la colonne « IM »" });
   assert.strictEqual(lsrv.stats.post, posts0);
   // Session SIGEO expirée : arrêt avec la ligne de reprise.
   await ctx.clearCookies();
@@ -418,8 +419,21 @@ const ROWS = [
   Object.assign(lotMock.DB, { 393022: [{ lt: 7, id: 90, type: "Cave" }], // même adresse, pas le lot 130
     393030: [{ lt: 1, id: 3, type: "Appartement" }], 393031: [{ lt: 37, id: 21, type: "Appartement" }],
     393032: [{ lt: 2, id: 8, type: "Appartement" }], 393033: [{ lt: 2, id: 9, type: "Appartement" }] });
+  // Recherche d'immeubles « immeuble_browse/ger » fidèle (section 9) : [site, IM, Nom E.I., Adresse].
+  const ger = gerMod.create([
+    ["391", "IM0399982", "LE BOURG", "le bourg 36 RUE CENTRALE 69490 ST ROMAIN DE POPEY"],
+    ["391", "IM0399100", "LE BOURG", "2 PLACE DE L EGLISE 69170 TARARE"],
+    ["391", "IM0399200", "LE BOURG NORD", "1 RUE HAUTE 69490 ST ROMAIN DE POPEY"],
+    ["390", "IM0388001", "LE BOURG", "5 RUE CENTRALE 69490 ST ROMAIN DE POPEY"],     // autre site, même CP
+    ["391", "IM0399300", "LES CHENES", "3 RUE A 69001 LYON"],
+    ["391", "IM0399301", "LES CHENES", "8 RUE B 69001 LYON"],
+    ["391", "IM0393001", "PARC FLEURI LE CONCERTO 1", "12 RUE DES MUSICIENS 59000 LILLE"],
+    ["391", "IM0393002", "COUR SAINT-HUBERT", "5 COUR SAINT HUBERT 59000 LILLE"],
+    ["390", "IM0393022", "COUR SAINT-HUBERT", "5 COUR SAINT HUBERT 59000 LILLE"]      // homonyme sur le site 390
+  ]);
   const sigeo = await new Promise((resolve) => {
     const px = http.createServer((req, res) => {
+      if (ger.handle(req, res)) return;
       if (req.url.startsWith("/imsearch")) { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(imHtml); return; }
       if (req.url.startsWith("/imreal")) { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(imReal); return; }
       const up = http.request(lsrv.origin + req.url, { method: req.method, headers: Object.assign({}, req.headers, { host: new URL(lsrv.origin).host }) }, (r) => {
@@ -436,7 +450,8 @@ const ROWS = [
   await panel.evaluate(([u, rows]) => {
     $("lotUrl").value = u;
     state.rows = rows; renderColumns();
-    applyIntraConfig(Object.assign(getIntraConfig(), { soc: "19", nomCol: "", lotCol: "", imCol: "", idCol: "", mode: "find", analyze: false, out: "saisie" }));
+    applyIntraConfig(Object.assign(getIntraConfig(), { soc: "19", nomCol: "", lotCol: "", imCol: "", idCol: "", mode: "find", analyze: false, out: "saisie",
+      siteCode: "", imAdrFallback: true })); // ancienne page simulée : noms SIGEO ≠ noms du fichier → repli par adresse
   }, [sigeo.origin + "/page.aspx/fr/sig_imm/lot_browse/syn", [["immeuble", "lots"], ["PARC FLEURI LE CONCERTO 1", "732"], ["COUR SAINT-HUBERT", "130"], ["RESIDENCE CHATEAUBRIAND", "278"]]]);
   assert.deepStrictEqual(await panel.evaluate(() => { const c = getIntraConfig(); return [c.nomCol, c.lotCol, c.imCol, c.idCol, c.sigeo]; }), ["immeuble", "lots", "", "", true]);
   await panel.fill("#startRow", "2");
@@ -444,17 +459,18 @@ const ROWS = [
   out = await run();
   console.log("--- journal (immeuble + lots seulement) ---\n" + out.log);
   const H7 = out.rows[0];
-  assert.deepStrictEqual(H7.slice(2, 6), ["IM SIGEO", "ID interne SIGEO", "DPE analyse", "URL fiche DPE"]);
+  assert.deepStrictEqual(H7.slice(2, 8), ["IM SIGEO", "ID immeuble SIGEO", "ID interne SIGEO", "Méthode IM SIGEO", "DPE analyse", "URL fiche DPE"]);
   const g7 = (r, n) => out.rows[r - 1][H7.indexOf(n)];
   assert.deepStrictEqual([g7(2, "IM SIGEO"), g7(2, "ID interne SIGEO"), g7(2, "URL fiche DPE")], ["IM0393001", "38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0"]);
   assert.deepStrictEqual([g7(3, "IM SIGEO"), g7(3, "ID interne SIGEO"), g7(3, "URL fiche DPE")], ["IM0393002", "12", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393002/12/0"]);
-  assert.ok(/Ligne 3 : SIGEO IM0393002 lot id 12 .*IM par l'adresse « 5 COUR SAINT-HUBERT » \(2 candidats, départagés par le lot\)/.test(out.log), out.log);
+  assert.ok(/Ligne 3 : SIGEO IM0393002 lot id 12 .*IM par l'adresse « 5 COUR SAINT-HUBERT » \+ tous sites \(repli\) \(2 candidats, départagés par le lot\)/.test(out.log), out.log);
+  assert.ok(/^adresse \+ tous sites \(repli\) — « COUR SAINT-HUBERT » : 0 résultat, 0 nom identique ; .* \(2 candidats, départagés par le lot\)$/.test(g7(3, "Méthode IM SIGEO")), g7(3, "Méthode IM SIGEO"));
   assert.ok(/SIGEO : recherche d'immeubles — onglet http:\/\/127\.0\.0\.1:\d+\/imsearch/.test(out.log), out.log);
   // Nom du PDF : {Immeuble} / {lots} = colonnes choisies (ici « immeuble » / « lots », en minuscules).
   assert.strictEqual(await panel.evaluate(() => intraParams(getIntraConfig(), state.rows[1], 0, null).name({ name: "dpe.pdf", date: "2013-07-17" }, ".pdf", {})),
     "DPE/Intralia/PARC FLEURI LE CONCERTO 1_lot732_2013-07-17.pdf");
   assert.deepStrictEqual([g7(4, "IM SIGEO"), g7(4, "URL fiche DPE")], ["", ""]);
-  assert.ok(/^fiche SIGEO introuvable : IM introuvable \(adresse Intralia « 9 BOULEVARD DE LA LIBERTÉ 59800 LILLE »\) — recherches SIGEO : Nom « 9 BOULEVARD DE LA LIBERTÉ » : 0 résultat\(s\) ; Nom « LIBERTE » : 0 résultat\(s\) ; par adresse « LIBERTE » \+ CP 59800 : 0 résultat\(s\) ; Nom « RESIDENCE CHATEAUBRIAND » : 0 résultat\(s\)\. Ajoute une colonne « IM » au fichier pour le donner à la main/.test(g7(4, "Remarques DPE")), g7(4, "Remarques DPE"));
+  assert.ok(/^fiche SIGEO introuvable : IM à vérifier : désignation \+ tous sites, puis adresse \(repli\) — « RESIDENCE CHATEAUBRIAND » : 0 résultat, 0 nom identique ; repli Nom « 9 BOULEVARD DE LA LIBERTÉ » \+ tous sites : 0 résultat\(s\) ; repli Nom « LIBERTE » \+ tous sites : 0 résultat\(s\) ; repli par adresse « LIBERTE » \+ CP 59800 \+ tous sites : 0 résultat\(s\) — adresse Intralia « 9 BOULEVARD DE LA LIBERTÉ 59800 LILLE »\. Mets l'IM dans une colonne « IM SIGEO » et relance/.test(g7(4, "Remarques DPE")), g7(4, "Remarques DPE"));
   // Recherches directes (cas réels de Dijon) : adresse Intralia sans voie → nom = adresse ;
   // « BD » abrégé ; nom seul (Nom E.I. identique, même CP) ; introuvable avec le détail.
   const dij = await panel.evaluate(async () => {
@@ -473,15 +489,17 @@ const ROWS = [
   });
   console.log(JSON.stringify(dij, null, 1));
   assert.deepStrictEqual(dij.slice(0, 3).map((r) => [r.status, r.im, r.id, r.via]), [
-    ["OK", "393030", "3", "IM par l'adresse « 9 RUE CHARLES BRIFAUT »"],
-    ["OK", "393031", "21", "IM par l'adresse « 18 BD JEANNE D ARC »"],
-    ["OK", "393032", "8", "IM par le nom « LES PINS »"]]);
+    ["OK", "393030", "3", "IM par l'adresse « 9 RUE CHARLES BRIFAUT » + tous sites (repli)"],
+    ["OK", "393031", "21", "IM par désignation « AMBROISE PARE » + tous sites"],
+    ["OK", "393032", "8", "IM par désignation « LES PINS » + tous sites"]]);
+  // « LES PINS » : 2 Nom E.I. identiques (Dijon / Paris) → départagés par le CP Intralia.
+  assert.strictEqual(dij[2].method, "désignation + tous sites — « LES PINS » : 2 résultats, 2 noms identiques, retenu par CP 21000");
   assert.deepStrictEqual(dij.slice(4).map((r) => [r.status, r.im, r.id, r.via]), [
-    ["OK", "393030", "3", "IM par l'adresse « 9 RUE CHARLES BRIFAUT »"], ["OK", "393031", "21", "IM de la colonne"]]);
+    ["OK", "393030", "3", "IM par l'adresse « 9 RUE CHARLES BRIFAUT » + tous sites (repli)"], ["OK", "393031", "21", "IM de la colonne"]]);
   assert.strictEqual(dij[3].status, "INTROUVABLE");
-  assert.strictEqual(dij[3].text, "IM introuvable (adresse Intralia « 95 RUE DE MAZY 21160 MARSANNAY LA COTE ») — recherches SIGEO : " +
-    "Nom « 95 RUE DE MAZY » : 0 résultat(s) ; Nom « MAZY » : 0 résultat(s) ; par adresse « MAZY » + CP 21160 : 0 résultat(s). " +
-    "Ajoute une colonne « IM » au fichier pour le donner à la main");
+  assert.strictEqual(dij[3].text, "IM à vérifier : désignation + tous sites, puis adresse (repli) — « 95 RUE DE MAZY » : 0 résultat, 0 nom identique ; " +
+    "repli Nom « 95 RUE DE MAZY » + tous sites : 0 résultat(s) ; repli Nom « MAZY » + tous sites : 0 résultat(s) ; repli par adresse « MAZY » + CP 21160 + tous sites : 0 résultat(s)" +
+    " — adresse Intralia « 95 RUE DE MAZY 21160 MARSANNAY LA COTE ». Mets l'IM dans une colonne « IM SIGEO » et relance");
   // Colonne IM qui contient autre chose qu'un IM (nom) + id « connu » non numérique :
   // pas d'arrêt « IM invalide » → recherche IM SIGEO puis recherche d'id interne.
   const notIm = await panel.evaluate(async () => {
@@ -490,7 +508,7 @@ const ROWS = [
     return intraSigeoLookup(ctx, ["9 RUE CHARLES BRIFAUT", "1", "BRIFAUT", "à voir"], "1", { adr: "21000 DIJON", nomIntralia: "" });
   });
   assert.deepStrictEqual([notIm.status, notIm.im, notIm.id, notIm.known, notIm.via],
-    ["OK", "393030", "3", undefined, "« BRIFAUT » (colonne IM) n'est pas un IM → IM par l'adresse « 9 RUE CHARLES BRIFAUT »"]);
+    ["OK", "393030", "3", undefined, "« BRIFAUT » (colonne IM) n'est pas un IM → IM par l'adresse « 9 RUE CHARLES BRIFAUT » + tous sites (repli)"]);
 
   // 7b. Réglage vu le 25/11 : « IM SIGEO » = colonne « immeuble », « id interne » =
   // colonne « lots ». Avant : « fiche SIGEO introuvable : IM invalide « LE BOURG » »,
@@ -501,7 +519,7 @@ const ROWS = [
     applyIntraConfig(Object.assign(getIntraConfig(), { nomCol: "immeuble", lotCol: "lots", imCol: "immeuble", idCol: "lots" }));
   });
   assert.deepStrictEqual(await panel.evaluate(() => [$("intraImCol").value, $("intraIdCol").value, $("intraImCol").options[0].text, $("intraIdCol").options[0].text]),
-    ["", "", "auto — Recherche IM SIGEO (adresse Intralia)", "auto — Recherche d'id interne (IM + lot)"], "réglage enregistré remis sur auto");
+    ["", "", "auto — Recherche IM SIGEO (désignation + site)", "auto — Recherche d'id interne (IM + lot)"], "réglage enregistré remis sur auto");
   await panel.selectOption("#intraImCol", "immeuble");
   await panel.selectOption("#intraIdCol", "lots");
   assert.deepStrictEqual(await panel.evaluate(() => [$("intraImCol").value, $("intraIdCol").value, getIntraConfig().imCol, getIntraConfig().idCol]),
@@ -514,7 +532,7 @@ const ROWS = [
   out = await run();
   const H7b = out.rows[0];
   const g7b = (r, n) => out.rows[r - 1][H7b.indexOf(n)];
-  assert.deepStrictEqual(H7b.slice(0, 4), ["immeuble", "lots", "IM SIGEO", "ID interne SIGEO"], out.log);
+  assert.deepStrictEqual(H7b.slice(0, 6), ["immeuble", "lots", "IM SIGEO", "ID immeuble SIGEO", "ID interne SIGEO", "Méthode IM SIGEO"], out.log);
   assert.deepStrictEqual([g7b(2, "lots"), g7b(2, "IM SIGEO"), g7b(2, "ID interne SIGEO"), g7b(2, "URL fiche DPE")],
     ["732", "IM0393001", "38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0"], out.log);
   assert.deepStrictEqual([g7b(3, "lots"), g7b(3, "IM SIGEO"), g7b(3, "ID interne SIGEO"), g7b(3, "URL fiche DPE")],
@@ -525,9 +543,10 @@ const ROWS = [
   // adresse / Par mandat dans un seul formulaire (critères combinés), Site
   // « 390 - ORALIA SICOV - OPTIM » affiché. Colonne « IM SIGEO » présente mais
   // vide (fichier relancé) : la recherche d'immeubles doit quand même se faire.
+  // v2.22.0 : site cible 390, repli par adresse SUR LE MÊME SITE (jamais tous sites).
   await stab.goto(sigeo.origin + "/imreal");
   const real = await panel.evaluate(async () => {
-    const ctx = Object.assign(intraSigeoCtx(getIntraConfig()), { imIdx: 2, nomIdx: 0 });
+    const ctx = Object.assign(intraSigeoCtx(getIntraConfig()), { imIdx: 2, nomIdx: 0, site: "390", adrFallback: true });
     ctx.stopped = () => false;
     const go = (nom, lot, adr) => intraSigeoLookup(ctx, [nom, lot, ""], lot, { adr, nomIntralia: nom });
     const out = [];
@@ -540,19 +559,22 @@ const ROWS = [
     return { out, page: ctx.imPage, searches, searchesBefore };
   });
   console.log(JSON.stringify(real, null, 1));
-  assert.ok(/onglet .*\/imreal — Site « 390 - ORALIA SICOV - OPTIM », puis tous les sites si rien n'est trouvé$/.test(real.page), real.page);
+  assert.ok(/onglet .*\/imreal — recherche par désignation \+ site « 390 - ORALIA SICOV - OPTIM », repli par adresse sur le même site$/.test(real.page), real.page);
   assert.deepStrictEqual(real.out.map((r) => [r.status, r.im, r.id, r.via]), [
-    ["OK", "393893", "4", "IM par l'adresse « 95 RUE DE MAZY »"],
-    ["OK", "393031", "21", "IM par l'adresse « 18 BD JEANNE D ARC »"],
-    ["OK", "393034", "2", "IM par l'adresse « 4 RUE MOYENNE » (tous sites)"],
-    ["OK", "393887", "6", "IM par l'adresse « 71 RUE DE MAZY »"]]);
+    ["OK", "393893", "4", "IM par désignation « 95 RUE DE MAZY » + site 390"],
+    ["OK", "393031", "21", "IM par désignation « AMBROISE PARE » + site 390"],
+    // 4 RUE MOYENNE 18000 BOURGES n'est pas sur le site 390 : introuvable (avant : « tous sites »).
+    ["INTROUVABLE", undefined, undefined, undefined],
+    ["OK", "393887", "6", "IM par désignation « 71 RUE DE MAZY » + site 390"]]);
+  assert.ok(/^IM à vérifier : désignation \+ site 390, puis adresse \(repli\) — « MOYENNE » : 0 résultat, 0 nom identique ; repli /.test(real.out[2].text), real.out[2].text);
   // Recherche « par adresse » : le Nom de la recherche précédente est vidé (sinon ET → 0 résultat).
   const byAdr = real.searches.filter((c) => c.adr);
   assert.ok(byAdr.length && byAdr.every((c) => c.nom === "" && c.ville === ""), JSON.stringify(byAdr));
   assert.ok(real.searches.filter((c) => c.nom).every((c) => c.adr === "" && c.cp === ""), "Nom seul");
-  // Le Site de la page (390) est remis après une recherche « tous sites ».
+  // Toujours le site cible, y compris dans le repli par adresse (jamais « tous sites »).
   assert.deepStrictEqual(real.searches.slice(real.searchesBefore).map((c) => [c.nom, c.site]), [["71 RUE DE MAZY", "390"]]);
-  assert.ok(real.searches.some((c) => c.site === ""), "repli tous sites");
+  assert.ok(real.searches.length && real.searches.every((c) => c.site === "390"), JSON.stringify(real.searches));
+  assert.ok(real.searches.filter((c) => c.adr).every((c) => c.cp), "par adresse : toujours avec le CP");
   // Recherche d'immeubles absente de l'onglet (et pas d'URL réglée) : arrêt avec un message clair.
   await stab.goto(sigeo.origin + "/page.aspx/fr/sig_imm/lot_browse/syn");
   out = await run();
@@ -562,7 +584,7 @@ const ROWS = [
   await stab.goto(sigeo.origin + "/imreal");
   await panel.evaluate(() => {
     state.rows = [["immeuble", "lots", "IM SIGEO", "ID interne SIGEO"], ["PARC FLEURI LE CONCERTO 1", "732", "", ""]]; renderColumns();
-    applyIntraConfig(Object.assign(getIntraConfig(), { nomCol: "", lotCol: "", imCol: "", idCol: "" }));
+    applyIntraConfig(Object.assign(getIntraConfig(), { nomCol: "", lotCol: "", imCol: "", idCol: "", siteCode: "390", imAdrFallback: true }));
   });
   assert.deepStrictEqual(await panel.evaluate(() => { const c = getIntraConfig(); return [c.imCol, c.idCol]; }), ["IM SIGEO", "ID interne SIGEO"]);
   out = await run();
@@ -571,7 +593,103 @@ const ROWS = [
   const g8 = (n) => out.rows[1][H8.indexOf(n)];
   assert.deepStrictEqual([g8("IM SIGEO"), g8("ID interne SIGEO"), g8("URL fiche DPE")],
     ["IM0393001", "38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0"], out.log);
-  assert.ok(/SIGEO : recherche d'immeubles — onglet .*\/imreal — Site « 390 - ORALIA SICOV - OPTIM »/.test(out.log), out.log);
+  assert.ok(/SIGEO : recherche d'immeubles — onglet .*\/imreal — recherche par désignation \+ site « 390 - ORALIA SICOV - OPTIM »/.test(out.log), out.log);
+  assert.ok(/^adresse \+ site 390 \(repli\) — « PARC FLEURI LE CONCERTO 1 » : 0 résultat, 0 nom identique ; /.test(g8("Méthode IM SIGEO")), g8("Méthode IM SIGEO"));
+
+  // 9. Recherche « par désignation + site » (v2.22.0) sur la page
+  // immeuble_browse/ger décrite le 25/11 : postback COMPLET, id exacts, Site +
+  // libellé caché, alert si Adresse sans CP ni ville, grille #body_x_grid_x.
+  const dialogs = [];
+  stab.on("dialog", (d) => { dialogs.push(d.message()); d.dismiss().catch(() => {}); });
+  Object.assign(lotMock.DB, { 399982: [{ lt: 1, id: 77, type: "Appartement" }], 399100: [{ lt: 1, id: 78, type: "Appartement" }],
+    388001: [{ lt: 1, id: 79, type: "Appartement" }], 399300: [{ lt: 2, id: 80, type: "Appartement" }], 399301: [{ lt: 2, id: 81, type: "Appartement" }] });
+  await stab.goto(sigeo.origin + gerMod.PATH);
+  // Formulaire laissé « sale » par une saisie précédente : Adresse sans CP (cliquer
+  // tel quel → alert), Siret, N° E.I., codes copro / programme, Filtre.
+  await stab.evaluate((F) => {
+    const set = (id, v) => { document.getElementById(id).value = v; };
+    set(F.adresse, "36 RUE CENTRALE"); set(F.siret, "123"); set(F.code, "IM0000001"); set(F.codeCopro, "C1"); set(F.codeProg, "P1"); set(F.filtre, "G");
+  }, gerMod.F);
+  const g9 = await panel.evaluate(async () => {
+    imClearCache();
+    const ctx = Object.assign(intraSigeoCtx(getIntraConfig()), { imIdx: -1, knownIdx: -1, nomIdx: 0, site: "391", adrFallback: false });
+    ctx.stopped = () => false;
+    const go = (nom, lot, res) => intraSigeoLookup(ctx, [nom, lot], lot, res);
+    const out = [];
+    out.push(await go("LE BOURG", "1", { adr: "36 RUE CENTRALE 69490 ST ROMAIN DE POPEY", nomIntralia: "LE BOURG" }));
+    out.push(await go("le  Bourg ", "1", { adr: "", nomIntralia: "" }));                   // CP inconnu : 2 « LE BOURG » sur le site 391
+    out.push(await go("LES CHENES", "2", { adr: "3 RUE A 69001 LYON", nomIntralia: "" }));  // 2 homonymes au même CP
+    out.push(await go("COUR SAINT-HUBERT", "130", { adr: "5 COUR SAINT-HUBERT 59000 LILLE", nomIntralia: "" })); // homonyme du site 390 ignoré
+    const bad = Object.assign(intraSigeoCtx(getIntraConfig()), { imIdx: -1, knownIdx: -1, nomIdx: 0, site: "999", adrFallback: false });
+    bad.stopped = () => false;
+    out.push(await intraSigeoLookup(bad, ["LE BOURG", "1"], "1", { adr: "", nomIntralia: "" }));
+    return { out, page: ctx.imPage, tabId: ctx.tabId, sites: Array.from($("intraSiteList").options).map((o) => o.value), stored: (window.__store.sigeoSites || []).length };
+  });
+  console.log(JSON.stringify(g9, null, 1));
+  const u9 = (im, id) => `http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/${im}/${id}/0`;
+  assert.deepStrictEqual(g9.out.slice(0, 4).map((r) => [r.status, r.im, r.immId, r.id, r.url]), [
+    ["OK", "399982", "399982", "77", u9(399982, 77)],
+    ["INTROUVABLE", undefined, undefined, undefined, undefined],
+    ["INTROUVABLE", undefined, undefined, undefined, undefined],
+    ["OK", "393002", "393002", "12", u9(393002, 12)]]);
+  assert.strictEqual(g9.out[0].method, "désignation + site 391 — « LE BOURG » : 3 résultats, 2 noms identiques, retenu par CP 69490");
+  assert.strictEqual(g9.out[0].via, "IM par désignation « LE BOURG » + site 391");
+  assert.strictEqual(g9.out[0].check, "");
+  assert.strictEqual(g9.out[1].text, "IM à vérifier : désignation + site 391 — « le Bourg » : 3 résultats, 2 noms identiques → 2 candidats : " +
+    "IM0399982 LE BOURG (le bourg 36 RUE CENTRALE 69490 ST ROMAIN DE POPEY) ; IM0399100 LE BOURG (2 PLACE DE L EGLISE 69170 TARARE). Mets l'IM dans une colonne « IM SIGEO » et relance");
+  assert.ok(/^IM à vérifier : désignation \+ site 391 — « LES CHENES » : 2 résultats, 2 noms identiques, puis CP 69001 \+ ville LYON → 2 candidats : IM0399300 .* ; IM0399301 /.test(g9.out[2].text), g9.out[2].text);
+  assert.strictEqual(g9.out[3].method, "désignation + site 391 — « COUR SAINT-HUBERT » : 1 résultat, 1 nom identique");
+  assert.deepStrictEqual([g9.out[4].status, g9.out[4].setup], ["ERREUR", true]);
+  assert.ok(/^site « 999 » introuvable dans la liste « Site » de la recherche d'immeubles SIGEO/.test(g9.out[4].text), g9.out[4].text);
+  assert.ok(/onglet .*\/immeuble_browse\/ger\)? — recherche par désignation \+ site « 391 - ORALIA SOGIMAT »$/.test(g9.page), g9.page);
+  assert.deepStrictEqual([g9.sites, g9.stored], [["390", "391", "392"], 5], "liste des sites lue sur la page (sans Mes mandats / Mes sites)");
+  // Ce que SIGEO a reçu : Nom seul + Site 391 (libellé caché cohérent), tout le reste vidé, jamais « Réinit. ».
+  const first = ger.log[0];
+  assert.deepStrictEqual([first.nom, first.site, first.siteLabel, first.adresse, first.cp, first.ville, first.siret, first.code, first.codeCopro, first.codeProg, first.filtre, first.type, first.searchBtn, first.raz],
+    ["LE BOURG", "391", "391 - ORALIA SOGIMAT", "", "", "", "", "", "", "", "", "", true, false]);
+  assert.deepStrictEqual(ger.log.map((c) => [c.nom, c.site]), [["LE BOURG", "391"], ["LES CHENES", "391"], ["COUR SAINT-HUBERT", "391"]], "« le Bourg » : même recherche (cache)");
+  assert.ok(ger.log.every((c) => !c.raz && c.siteLabel === "391 - ORALIA SOGIMAT"));
+  // Grille sans en-têtes : colonnes par position ([1] N° E.I., [2] Nom E.I., [3] Adresse).
+  await stab.goto(sigeo.origin + gerMod.PATH + "?nohead=1");
+  const pos = await panel.evaluate(async () => {
+    imClearCache();
+    const ctx = Object.assign(intraSigeoCtx(getIntraConfig()), { imIdx: -1, knownIdx: -1, nomIdx: 0, site: "391", adrFallback: false });
+    ctx.stopped = () => false;
+    return intraSigeoLookup(ctx, ["LE BOURG", "1"], "1", { adr: "36 RUE CENTRALE 69490 ST ROMAIN DE POPEY", nomIntralia: "" });
+  });
+  assert.deepStrictEqual([pos.status, pos.im, pos.immId, pos.id], ["OK", "399982", "399982", "77"], JSON.stringify(pos));
+  // Jamais d'alert() : Adresse sans CP ni ville → clic non fait ; et si la page en
+  // affiche une quand même pendant le clic, elle est interceptée.
+  await stab.goto(sigeo.origin + gerMod.PATH);
+  const guard = await panel.evaluate(async (tabId) => {
+    const ad = imChromeAdapter(tabId, 5000);
+    const noCp = await imSearchAllPages(ad, { mode: "adresse", term: "CENTRALE", cp: "", siteValue: "391", ids: IM_GER_IDS, clearAll: true, timeoutMs: 3000 });
+    await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", func: (id) => { document.getElementById(id).value = "X"; }, args: [IM_GER_IDS.adresse] });
+    const hidden = await ad.exec(0, { op: "prepare", token: "t1", mode: "nom", term: "LE BOURG", siteValue: "391", ids: IM_GER_IDS, sel: { adresse: "#absent" } });
+    return { noCp: noCp.error, hidden };
+  }, g9.tabId);
+  assert.ok(/recherche non lancée/.test(guard.noCp), guard.noCp);
+  assert.deepStrictEqual([guard.hidden.status, guard.hidden.detail], ["alert", "Merci de préciser un code postal ou une ville"]);
+  assert.deepStrictEqual(dialogs, [], "aucune alert() affichée dans l'onglet SIGEO");
+  // Extraction complète : réglages par défaut (site 391, pas de repli).
+  await stab.goto(sigeo.origin + gerMod.PATH);
+  await panel.evaluate(() => {
+    state.rows = [["immeuble", "lots"], ["PARC FLEURI LE CONCERTO 1", "732"], ["COUR SAINT-HUBERT", "130"]]; renderColumns();
+    applyIntraConfig(Object.assign(getIntraConfig(), { nomCol: "", lotCol: "", imCol: "", idCol: "", siteCode: "391", imAdrFallback: false }));
+  });
+  assert.deepStrictEqual(await panel.evaluate(() => [$("intraSite").value, $("intraAdrFallback").checked, $("intraSiteName").textContent]), ["391", false, "391 - ORALIA SOGIMAT"]);
+  out = await run();
+  console.log("--- journal (désignation + site) ---\n" + out.log);
+  const H9 = out.rows[0];
+  const g9r = (r, n) => out.rows[r - 1][H9.indexOf(n)];
+  assert.deepStrictEqual(H9.slice(0, 8), ["immeuble", "lots", "IM SIGEO", "ID immeuble SIGEO", "ID interne SIGEO", "Méthode IM SIGEO", "DPE analyse", "URL fiche DPE"]);
+  assert.deepStrictEqual(["IM SIGEO", "ID immeuble SIGEO", "ID interne SIGEO", "Méthode IM SIGEO", "URL fiche DPE"].map((n) => g9r(2, n)),
+    ["IM0393001", "393001", "38", "désignation + site 391 — « PARC FLEURI LE CONCERTO 1 » : 1 résultat, 1 nom identique", u9(393001, 38)]);
+  assert.deepStrictEqual(["IM SIGEO", "ID immeuble SIGEO", "ID interne SIGEO", "Méthode IM SIGEO", "URL fiche DPE"].map((n) => g9r(3, n)),
+    ["IM0393002", "393002", "12", "désignation + site 391 — « COUR SAINT-HUBERT » : 1 résultat, 1 nom identique", u9(393002, 12)]);
+  assert.ok(/SIGEO : IM cherché par désignation \+ site 391 → id interne du lot/.test(out.log), out.log);
+  assert.ok(/SIGEO : recherche d'immeubles — onglet .* — recherche par désignation \+ site « 391 - ORALIA SOGIMAT »/.test(out.log), out.log);
+  assert.deepStrictEqual(dialogs, [], "aucune alert()");
   sigeo.px.close();
 
   assert.deepStrictEqual(srv.stats.posts, [], "lecture seule : aucun POST vers Intralia");

@@ -553,7 +553,7 @@ que de deux colonnes, le nom de l'immeuble et le n° de lot**. Pour chaque
 ligne, dans l'ordre : Intralia (n° d'immeuble, page DPE du lot, DPE saisi,
 DPE le plus récent de la GED) → FlowerDocs (téléchargement du PDF, lecture du
 fournisseur / n° FU et du n° ADEME) → **SIGEO** (IM de l'immeuble retrouvé
-par l'adresse Intralia, id interne du lot, URL de la fiche DPE) → une ligne du
+par son nom sur le site SIGEO choisi, id interne du lot, URL de la fiche DPE) → une ligne du
 fichier prêt pour la saisie. Logique dans `intralia-dpe.js`.
 
 **Intralia n'est que lu** : uniquement des `GET` ; le formulaire du lot
@@ -640,24 +640,37 @@ Windows → `_` ; extension = celle du fichier reçu). Pour les étapes
 à la Toolbox**, puis retrouver le PDF par `{DPE_Fichier_Local}`.
 
 **Étape 4 — SIGEO : IM, id interne, URL de la fiche** (v2.20.0) :
-- **IM** (v2.20.1) : colonne IM *auto* (défaut) → recherche d'immeubles
-  SIGEO (moteur et réglages de *Recherche IM SIGEO*). Adresses cherchées :
-  l'**adresse Intralia** de l'immeuble et, quand elle n'a que le CP et la
-  ville, le **nom de l'immeuble s'il a la forme d'une adresse**
-  (« 9 RUE CHARLES BRIFAUT »). Pour chacune : mode *auto* (valeur complète
-  dans « Nom », puis la voie seule), puis « par adresse » (voie + CP) ;
-  correspondance sur la colonne Adresse de SIGEO (n°, BIS/TER, voie avec
-  abréviations BD/AV…, CP). En dernier, le nom de l'immeuble (fichier et
-  Intralia) dans « Nom » : Nom E.I. identique et même CP. Plusieurs IM → le
-  lot est cherché dans chacun : un seul le contient → retenu ; plusieurs →
-  `AMBIGU`. Introuvable → la remarque liste **chaque recherche faite et son
-  nombre de résultats** (+ adresses proches). Le journal indique l'onglet de
-  recherche d'immeubles utilisé.
-  **Site** (v2.20.2) : celui affiché sur la page de recherche quand
-  l'extraction démarre (ex. « 390 - ORALIA SICOV - OPTIM ») ; si rien n'est
-  trouvé, tout est refait avec le Site vide (tous les sites, désactivable
-  par « Site à vide » de *Recherche IM SIGEO*). Le Site de la page est remis
-  pour la ligne suivante.
+- **IM** (v2.22.0) : colonne IM *auto* (défaut) → recherche d'immeubles
+  SIGEO (`…/sig_imm/immeuble_browse/ger`) **par désignation + site** :
+  - **Site SIGEO** (réglage de DPE extraction, enregistré avec les autres) :
+    `391` (ORALIA SOGIMAT) par défaut ; la liste se remplit avec les sites lus
+    sur la page. Code absent de la liste « Site » → arrêt avec « site X
+    introuvable dans la liste ». Vide = tous les sites (déconseillé).
+  - Avant chaque recherche : Adresse, Code postal, Ville, Siret, N° E.I.,
+    codes copropriété / programme commercial vidés ; Filtre et Type sur
+    « Tous » ; Nom = nom de l'immeuble du fichier ; Site = site choisi, avec
+    son libellé écrit dans le champ caché `body_x_sites_x_hdSiteLabel`
+    (`input` + `change` sur chaque champ modifié, sauf postback). Jamais
+    « Réinit. ». Champs trouvés par leurs id exacts (`IM_GER_IDS` dans
+    `sigeo-im.js`), sinon par leurs libellés.
+  - Jamais d'`alert()` bloquante : pas de clic si Adresse est remplie sans
+    CP ni ville, et toute alert/confirm pendant le clic est interceptée.
+  - Le clic sur Rechercher recharge toute la page : c'est le panneau
+    latéral qui pilote (il survit au rechargement), il attend la nouvelle
+    grille `#body_x_grid_x` puis la lit (en-têtes, ou positions [1] N° E.I.,
+    [2] Nom E.I., [3] Adresse ; id immeuble = fin du lien `a.edit_link`).
+  - Choix (le champ Nom est un « contient ») : **exactement 1 Nom E.I.
+    identique** (majuscules, sans accents, espaces réduits) → retenu ;
+    sinon départage par le **CP puis la ville** de l'adresse Intralia
+    (colonne Adresse) ; sinon rien → `À VÉRIFIER` avec le nombre de
+    résultats et les candidats. Jamais la première ligne. Si le fichier ne
+    donne rien, le nom Intralia est essayé (s'il diffère).
+  - **Repli par adresse** (case, décochée par défaut) : l'ancienne recherche
+    par l'adresse Intralia, toujours sur le même site, « par adresse »
+    seulement avec le CP ; plusieurs IM → départagés par le lot.
+  - Colonnes de contrôle : `ID immeuble SIGEO` (lien de la fiche immeuble)
+    et `Méthode IM SIGEO` (ex. « désignation + site 391 — « LE BOURG » :
+    3 résultats, 2 noms identiques, retenu par CP 69490 »).
   Une colonne IM peut aussi être donnée (`IM`, `IM SIGEO`, `IM_format`…,
   devinée) : remplie avec un IM → utilisée telle quelle ; vide ou sans IM
   (ex. un nom d'immeuble) → recherche auto (la recherche d'immeubles est
@@ -690,7 +703,7 @@ hors habitation, autre → à vérifier), `PDF analysé`, `N° FU`,
 primaire, classe énergie, GES, classe GES, coûts min/max, `Date d'indexation
 des prix` (DPE ≥ 01/07/2021 : 01/01/année de référence Intralia, sinon le
 PDF), `Remarques DPE`, précédées de `IM SIGEO` (IM + 7 chiffres, si IM
-auto) et `ID interne SIGEO`. Ensuite : onglet Saisie →
+auto), `ID immeuble SIGEO`, `ID interne SIGEO` (du lot) et `Méthode IM SIGEO`. Ensuite : onglet Saisie →
 **Modèle DPE** reconnaît ce fichier et règle l'étape « SIGEO : saisir un DPE »
 toute seule (préréglage « Fichier DPE extraction » : colonnes + URL
 `{URL fiche DPE}` reprise telle quelle) ; il reste à choisir le dossier
@@ -935,7 +948,12 @@ téléchargement, analyse, vérification du contenu par pdf.js, Toolbox,
 sessions expirées, cache de l'index, profils, fichier d'entrée « immeuble +
 lots » seulement avec IM retrouvé par l'adresse dans un faux SIGEO —
 recherche d'immeubles + lot_browse sur la même origine, deux IM à la même
-adresse départagés par le lot —, aucun POST).
+adresse départagés par le lot —, et depuis 2.22.0 la page
+`immeuble_browse/ger` fidèle (`tests/fixtures/sigeo-im-ger.js` : postback
+complet, id exacts, Site + libellé caché, alert si Adresse sans CP ni ville,
+grille `#body_x_grid_x`) : LE BOURG → IM0399982 / fiche 399982 sur le site
+391 malgré un homonyme du site 390, homonymes à départager, formulaire
+laissé rempli, site absent, aucun POST vers Intralia).
 Analyse DPE : `node tests/dpe-scan.node.js` (moteur : classes, n° ADEME,
 fournisseurs, rattachement, puis 5 DPE fictifs — texte, scanné, ancien,
 fournisseur inconnu, PDF sans ligne — générés par
@@ -964,7 +982,8 @@ par le journal et par la colonne résultat ; depuis 2.17.1 : PDF visible
 seulement après un nouvel « Enregistrer », PDF jamais visible puis relances
 sans nouvel upload).
 
-**Version** : 2.21.1 — **DPE extraction** : IM et id interne toujours cherchés (Recherche IM SIGEO puis Recherche d'id interne de lot) quand « IM SIGEO » / « id interne » pointent sur la colonne immeuble / lots ou sur une case sans IM ; listes renommées « … déjà connu », « auto » en tête.
+**Version** : 2.22.0 — **DPE extraction** : IM SIGEO cherché **par désignation + site** (Site SIGEO réglable, 391 par défaut) au lieu de l'adresse sans site : tous les autres critères vidés, libellé caché du site écrit, aucune alert() bloquante ; 1 Nom E.I. identique → retenu, sinon CP / ville Intralia, sinon À VÉRIFIER ; repli par adresse facultatif (même site + CP) ; colonnes `ID immeuble SIGEO` et `Méthode IM SIGEO`.
+2.21.1 — **DPE extraction** : IM et id interne toujours cherchés (Recherche IM SIGEO puis Recherche d'id interne de lot) quand « IM SIGEO » / « id interne » pointent sur la colonne immeuble / lots ou sur une case sans IM ; listes renommées « … déjà connu », « auto » en tête.
 2.17.7 — **Saisir un DPE** : N° ADEME « NC » (ou non communiqué / non trouvé / 99999…) → « NC » est saisi dans le champ N° ADEME (après le 1er enregistrement pour un DPE d'avant 07/2021) ; le PDF est retrouvé par son nom ; une création que SIGEO n'a pas faite (page revenue en création) ne bloque plus la relance par un faux « enregistrement lancé sans confirmation ».
 2.17.6 — **Saisir un DPE** : fournisseur — préfixe « FU » et espaces retirés avant la saisie, validation par perte du focus (jamais Entrée) ; contrôle sans zéros de tête (SIGEO stocke 0448957 comme 448957 : info au journal, pas d'écart) ET libellé `#body:x:proxyFou:x:lbl:x:lbl` non vide, sinon écart « Fournisseur non reconnu par SIGEO » ; reprise d'une fiche existante aussi par un lien `…/diag_manage/{imm}/{n}/{id}` ou « diagnostic {id} » dans la colonne résultat (champs vérifiés, puis upload direct).
 2.17.5 — **Analyse DPE** : colonne `Prix indexés au` retirée (inutile à la saisie) ; dans l'étape de saisie, la date d'indexation des prix devient facultative.

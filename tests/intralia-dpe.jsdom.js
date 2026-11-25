@@ -222,6 +222,10 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
     assert.deepStrictEqual([k.imCol, k.idCol], ["IM_format", "id_server"], "vraies colonnes IM / id gardées");
     const sc = { imCol: "lots", idCol: "IM_format" };
     assert.deepStrictEqual(intra.intraFixSigeoCols(sc, "immeuble", "lots"), [{ k: "im", col: "lots" }]);
+    // Site SIGEO de la recherche d'immeubles : 391 par défaut, code seul, vide = tous ; repli par adresse coupé.
+    assert.deepStrictEqual([c.siteCode, c.imAdrFallback], ["391", false]);
+    assert.deepStrictEqual([intra.intraNormalizeConfig({ siteCode: "391 - ORALIA SOGIMAT" }).siteCode, intra.intraNormalizeConfig({ siteCode: " 390 " }).siteCode,
+      intra.intraNormalizeConfig({ siteCode: "" }).siteCode, intra.intraNormalizeConfig({ imAdrFallback: true }).imAdrFallback], ["391", "390", "", true]);
     assert.deepStrictEqual([intra.intraKnownId(" 38 "), intra.intraKnownId("38.0"), intra.intraKnownId("à voir"), intra.intraKnownId("")], ["38", "38", "", ""]);
   });
 

@@ -358,11 +358,27 @@ function imStatusText(res) {
  *   "read"    → lignes {im, nom, adresse} de la page + total + pagination.
  *   "next"    → clique « Page suivante » (ou signale la dernière page).
  * cfg.sel    : sélecteurs forcés { nom, site, adresse, cp, submit, toggle, table }.
+ * cfg.ids    : id exacts essayés AVANT la détection par libellés (IM_GER_IDS :
+ *              nom, siret, adresse, cp, ville, site, siteLabel, filtre, type,
+ *              code, codeCopro, codeProg, submit, table) ; absents → détection.
+ * cfg.clearAll     : vide aussi Siret, N° E.I., codes copro / programme,
+ *                    Filtre et Type remis sur « Tous » (jamais « Réinit. »).
+ * cfg.changeEvents : « input » + « change » sur chaque champ modifié (sauf
+ *                    s'il déclencherait un postback).
  * cfg.token  : marqueur des éléments « périmés » (avant postback).
+ * Aucune alert()/confirm() ne peut bloquer : le clic sur Rechercher n'est pas
+ * fait si Adresse est remplie sans CP ni ville (alerte SIGEO), et les
+ * alert/confirm éventuels pendant le clic sont interceptés (statut "alert").
  */
 function imPageOp(cfg) {
   const ATTR = "data-osa-im-stale";
   const sel = cfg.sel || {};
+  const ids = cfg.ids || {};
+  const byId = (k) => {
+    if (!ids[k]) return null;
+    const el = document.getElementById(ids[k]);
+    return el && el.isConnected ? el : null;
+  };
   const norm = (s) => String(s ?? "").replace(/[   ]/g, " ").replace(/\s+/g, " ").trim();
   const fold = (s) => norm(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase();
   const isVisible = (el) => {
@@ -461,7 +477,10 @@ function imPageOp(cfg) {
   };
   function findField(kind, anchor) {
     if (sel[kind]) return resolve(sel[kind]);
+    const exact = byId(kind);
+    if (exact) return exact;
     const rule = FIELD_RULES[kind];
+    if (!rule) return null;
     const pool = rule.tags === "select" ? Array.from(document.querySelectorAll("select")) : textInputs();
     let best = null, bestScore = 0;
     for (const el of pool) {
@@ -477,6 +496,8 @@ function imPageOp(cfg) {
   }
   function findSubmit(anchor) {
     if (sel.submit) return resolve(sel.submit);
+    const exact = byId("submit");
+    if (exact) return exact;
     const c = submitCandidates();
     if (!anchor) return c[0] || null;
     return c.sort((a, b) => depthToCommon(a, anchor) - depthToCommon(b, anchor))[0] || null;
@@ -524,6 +545,12 @@ function imPageOp(cfg) {
     return null;
   }
   function findTable() {
+    const grid = !sel.table && byId("table");
+    if (grid && grid.tagName === "TABLE" && isVisible(grid)) {
+      const h = headerInfo(grid);
+      // Grille SIGEO #body_x_grid_x : [0] icônes, [1] N° E.I., [2] Nom E.I., [3] Adresse.
+      return h ? { table: grid, ...h } : { table: grid, headerRow: -1, num: 1, nom: 2, adr: 3 };
+    }
     let pool;
     if (sel.table) {
       const el = resolve(sel.table);
@@ -548,7 +575,10 @@ function imPageOp(cfg) {
         im = first && (norm(first.textContent).match(/IM\d{7}/i) || [])[0];
       }
       if (!im) continue; // pagination, ligne vide, séparateur…
-      out.push({ im: im.toUpperCase(), nom: txt(info.nom), adresse: txt(info.adr) });
+      // Id interne de l'immeuble : fin du lien de la fiche (immeuble_manage/ger/399982).
+      const a = row.querySelector('a.edit_link[href], a[href*="immeuble_manage"]');
+      const id = a ? ((a.getAttribute("href") || "").match(/\/(\d+)\/?(?:[?#].*)?$/) || [])[1] || "" : "";
+      out.push({ im: im.toUpperCase(), nom: txt(info.nom), adresse: txt(info.adr), id });
     }
     return out;
   }
@@ -606,9 +636,11 @@ function imPageOp(cfg) {
     const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
     if (setter) setter.call(el, v); else el.value = v;
-    // Pas de « change » ni de blur : un TextBox AutoPostBack déclencherait
-    // un __doPostBack avant le clic sur Rechercher.
+    // Pas de blur, et « change » seulement si demandé (cfg.changeEvents) ET
+    // sans postback : un TextBox AutoPostBack déclencherait un __doPostBack
+    // avant le clic sur Rechercher.
     el.dispatchEvent(new Event("input", { bubbles: true }));
+    if (cfg.changeEvents && !triggersPostback(el)) el.dispatchEvent(new Event("change", { bubbles: true }));
     return true;
   }
   const triggersPostback = (el) => /__doPostBack|WebForm_DoPostBack|AutoPostBack/i.test(
@@ -644,6 +676,12 @@ function imPageOp(cfg) {
         const o = st.options[st.selectedIndex];
         return { value: st.value, text: o ? norm(o.textContent) : "" };
       })(),
+      // Options de la liste « Site » (réglage « Site SIGEO » du panneau).
+      siteOptions: (() => {
+        const st = findField("site", anchor);
+        if (!st || st.tagName !== "SELECT") return [];
+        return Array.from(st.options).slice(0, 400).map((o) => ({ value: o.value, text: norm(o.textContent) }));
+      })(),
       busy: busy(),
       // Champ principal visible, ou masqué derrière la bascule « Par nom /
       // Par adresse » (l'opération prepare cliquera dessus).
@@ -670,6 +708,7 @@ function imPageOp(cfg) {
     const wantSite = typeof cfg.siteValue === "string";
     if (wantSite || cfg.siteEmpty) {
       const site = findField("site", main);
+      if (wantSite && !(site && site.tagName === "SELECT")) return { status: "no_site_field" };
       if (site && site.tagName === "SELECT") {
         const opt = wantSite ? Array.from(site.options).find((o) => o.value === cfg.siteValue)
           : Array.from(site.options).find((o) => o.value === "") ||
@@ -683,8 +722,13 @@ function imPageOp(cfg) {
             site.dispatchEvent(new Event("change", { bubbles: true }));
             return { status: "site_postback", detail: describe(site) };
           }
+          // SIGEO : le onchange copie seulement le libellé dans le champ caché.
           site.dispatchEvent(new Event("change", { bubbles: true }));
         }
+        // Libellé caché du site (body_x_sites_x_hdSiteLabel) : écrit aussi ici,
+        // pour que le serveur ne reçoive jamais un site incohérent.
+        const lab = byId("siteLabel");
+        if (lab && lab.value !== norm(opt.textContent)) lab.value = norm(opt.textContent);
       }
     }
     // 3. Critères : le champ principal reçoit le terme, l'autre mode est vidé.
@@ -707,11 +751,42 @@ function imPageOp(cfg) {
         if (f && f !== main && f.value) { setVal(f, ""); filled.push(`${k} vidé`); }
       }
     }
-    // 4. Résultats actuels marqués périmés, puis clic sur Rechercher.
+    if (cfg.clearAll) {
+      // Tous les autres critères (ils se combinent en ET) — jamais « Réinit. ».
+      for (const k of ["siret", "code", "codeCopro", "codeProg"]) {
+        const f = byId(k);
+        if (f && f !== main && f.value) { setVal(f, ""); filled.push(`${k} vidé`); }
+      }
+      for (const k of ["filtre", "type"]) {
+        const f = byId(k);
+        if (f && f.tagName === "SELECT" && f.value !== "" && Array.from(f.options).some((o) => o.value === "") && !triggersPostback(f)) {
+          f.value = "";
+          f.dispatchEvent(new Event("change", { bubbles: true }));
+          filled.push(`${k}=Tous`);
+        }
+      }
+    }
+    // 4. Alerte SIGEO « Merci de préciser un code postal ou une ville » :
+    // Adresse remplie sans CP ni ville → on ne clique pas (DPE extraction ;
+    // ailleurs, l'alerte éventuelle est interceptée ci-dessous).
+    if (cfg.clearAll) {
+      const fa = findField("adresse", main), fc = findField("cp", main), fv = findField("ville", main);
+      if (fa && norm(fa.value) && !(fc && norm(fc.value)) && !(fv && norm(fv.value))) return { status: "would_alert", filled };
+    }
+    // 5. Résultats actuels marqués périmés, puis clic sur Rechercher. Une
+    // alert()/confirm() pendant le clic est interceptée (jamais bloquante).
     const submit = findSubmit(main);
     if (!submit) return { status: "no_submit" };
     markStale(findTable());
-    submit.click();
+    const alerts = [];
+    const oldAlert = window.alert, oldConfirm = window.confirm;
+    window.alert = (m) => { alerts.push(String(m ?? "")); };
+    window.confirm = (m) => { alerts.push(String(m ?? "")); return false; };
+    try { submit.click(); } finally { window.alert = oldAlert; window.confirm = oldConfirm; }
+    if (alerts.length) {
+      document.documentElement.removeAttribute("data-osa-im-doc");
+      return { status: "alert", detail: alerts.join(" / "), filled };
+    }
     return { status: "submitted", detail: describe(submit), filled };
   }
 
@@ -779,7 +854,7 @@ const imNewToken = () => "osa" + Date.now().toString(36) + (++imTokenSeq);
 async function imLocate(ad, p) {
   const tryOnce = async () => {
     let res = [];
-    try { res = await ad.execAll({ op: "probe", mode: p.mode, sel: p.sel }); } catch (_) { /* navigation */ }
+    try { res = await ad.execAll({ op: "probe", mode: p.mode, sel: p.sel, ids: p.ids }); } catch (_) { /* navigation */ }
     const hits = (res || []).filter((r) => r && r.result);
     if (hits.some((r) => r.result.login)) return { auth: true };
     const ok = hits.filter((r) => r.result.ok)
@@ -816,7 +891,7 @@ async function imLocate(ad, p) {
  * Accepte aussi bien un postback partiel (UpdatePanel) qu'un rechargement
  * complet de la page.
  */
-async function imWaitForSearchDone(ad, frameId, token, timeoutMs, kind = "results") {
+async function imWaitForSearchDone(ad, frameId, token, timeoutMs, kind = "results", ids) {
   const t0 = Date.now();
   const deadline = t0 + Math.max(2000, timeoutMs || 20000);
   let stable = 0, sawBusy = false, idleSince = null, last = null;
@@ -824,7 +899,7 @@ async function imWaitForSearchDone(ad, frameId, token, timeoutMs, kind = "result
     if (ad.stopped()) return { ok: false, error: "arrêté par l'utilisateur" };
     await ad.sleep(200);
     let r;
-    try { r = await ad.exec(frameId, { op: "poll", token }); }
+    try { r = await ad.exec(frameId, { op: "poll", token, ids }); }
     catch (_) { sawBusy = true; stable = 0; idleSince = null; continue; } // rechargement en cours
     if (!r) { stable = 0; continue; }
     last = r;
@@ -852,10 +927,10 @@ async function imWaitForSearchDone(ad, frameId, token, timeoutMs, kind = "result
 }
 
 // Lecture d'une page avec quelques reprises (DOM en cours de remplacement).
-async function imReadPage(ad, frameId, token) {
+async function imReadPage(ad, frameId, token, ids) {
   for (let k = 0; k < 6; k++) {
     try {
-      const r = await ad.exec(frameId, { op: "read", token });
+      const r = await ad.exec(frameId, { op: "read", token, ids });
       if (r && (r.found || r.zero || r.count === 0)) return r;
     } catch (_) { /* frame en transition */ }
     await ad.sleep(300);
@@ -865,8 +940,9 @@ async function imReadPage(ad, frameId, token) {
 
 /**
  * Lance UNE recherche et parcourt toutes les pages.
- * p = { mode: "nom"|"adresse", term, cp, siteEmpty, sel, url, timeoutMs, maxPages }
- * Renvoie { ok, rows, total, pages, warnings, error? }.
+ * p = { mode: "nom"|"adresse", term, cp, siteEmpty, siteValue, sel, ids, clearAll,
+ *       changeEvents, url, timeoutMs, maxPages }
+ * Renvoie { ok, rows, total, pages, warnings, error?, siteMissing? }.
  */
 async function imSearchAllPages(ad, p) {
   const warnings = [];
@@ -883,7 +959,8 @@ async function imSearchAllPages(ad, p) {
     token = imNewToken();
     let r;
     try {
-      r = await ad.exec(frameId, { op: "prepare", token, mode: p.mode, term: p.term, cp: p.cp || "", siteEmpty: p.siteEmpty !== false, siteValue: p.siteValue, sel: p.sel, noToggle });
+      r = await ad.exec(frameId, { op: "prepare", token, mode: p.mode, term: p.term, cp: p.cp || "", siteEmpty: p.siteEmpty !== false, siteValue: p.siteValue,
+        sel: p.sel, ids: p.ids, clearAll: !!p.clearAll, changeEvents: !!p.changeEvents, noToggle });
     } catch (e) {
       await ad.sleep(500);
       continue;
@@ -894,18 +971,21 @@ async function imSearchAllPages(ad, p) {
     if (r.status === "no_field") return { ok: false, error: `champ « ${r.detail === "nom" ? "Nom" : "Adresse"} » introuvable — désigne-le avec 🎯 (sélecteurs avancés)` };
     if (r.status === "no_submit") return { ok: false, error: "bouton « Rechercher » introuvable — désigne-le avec 🎯 (sélecteurs avancés)" };
     if (r.status === "no_site_empty") return { ok: false, error: `liste « Site » ${r.detail} : aucune option vide` };
-    if (r.status === "no_site_value") return { ok: false, error: `liste « Site » ${r.detail} : option « ${p.siteValue} » introuvable` };
+    if (r.status === "no_site_value") return { ok: false, siteMissing: true, error: `site « ${p.siteValue} » introuvable dans la liste « Site » (${r.detail})` };
+    if (r.status === "no_site_field") return { ok: false, siteMissing: true, error: `liste « Site » introuvable : impossible de choisir le site « ${p.siteValue} »` };
+    if (r.status === "would_alert") return { ok: false, error: "Adresse remplie sans code postal ni ville : SIGEO afficherait « Merci de préciser un code postal ou une ville » — recherche non lancée" };
+    if (r.status === "alert") return { ok: false, error: `SIGEO a affiché un message (intercepté, recherche annulée) : « ${r.detail} »` };
     if (r.status === "toggled") { noToggle = true; await ad.sleep(300); continue; } // bascule côté client
     if (r.status === "site_postback" || r.status === "toggle_postback") {
       if (r.status === "toggle_postback") noToggle = true;
-      const w = await imWaitForSearchDone(ad, frameId, token, p.timeoutMs, "settle");
+      const w = await imWaitForSearchDone(ad, frameId, token, p.timeoutMs, "settle", p.ids);
       if (!w.ok && w.auth) return { ok: false, error: w.error };
       continue;
     }
     return { ok: false, error: "préparation de la recherche : " + r.status };
   }
 
-  const w = await imWaitForSearchDone(ad, frameId, token, p.timeoutMs, "results");
+  const w = await imWaitForSearchDone(ad, frameId, token, p.timeoutMs, "results", p.ids);
   if (!w.ok) return { ok: false, error: w.error };
 
   // — Lecture de la page 1 puis des suivantes
@@ -915,7 +995,7 @@ async function imSearchAllPages(ad, p) {
     const k = r.im + "|" + r.nom + "|" + r.adresse;
     if (!keys.has(k)) { keys.add(k); rows.push(r); }
   });
-  let page = await imReadPage(ad, frameId, token);
+  let page = await imReadPage(ad, frameId, token, p.ids);
   if (!page) return { ok: false, error: "tableau de résultats illisible (colonnes « N° E.I. » / « Adresse » introuvables)" };
   const total = page.count;
   add(page.rows);
@@ -927,12 +1007,12 @@ async function imSearchAllPages(ad, p) {
     if (ad.stopped()) return { ok: false, error: "arrêté par l'utilisateur" };
     token = imNewToken();
     let r;
-    try { r = await ad.exec(frameId, { op: "next", token }); }
+    try { r = await ad.exec(frameId, { op: "next", token, ids: p.ids }); }
     catch (e) { return { ok: false, error: "clic « Page suivante » impossible : " + (e.message || e) }; }
     if (!r || r.status === "last") break;
-    const wn = await imWaitForSearchDone(ad, frameId, token, p.timeoutMs, "results");
+    const wn = await imWaitForSearchDone(ad, frameId, token, p.timeoutMs, "results", p.ids);
     if (!wn.ok) return { ok: false, error: `page ${pages + 1} : ${wn.error}` };
-    page = await imReadPage(ad, frameId, token);
+    page = await imReadPage(ad, frameId, token, p.ids);
     if (!page) return { ok: false, error: `page ${pages + 1} illisible` };
     if (sigs.has(page.sig)) { warnings.push(`page ${pages + 1} identique à une page déjà lue — arrêt de la pagination`); break; }
     sigs.add(page.sig);
@@ -1017,10 +1097,11 @@ async function imLookupAddress(ad, cfg) {
     for (const [m, term] of stage) {
       const r = await imCachedSearch(ad, {
         mode: m, term, cp: src.cp, siteEmpty: cfg.siteEmpty, siteValue: cfg.siteValue, sel: cfg.sel || {}, url: cfg.url,
+        ids: cfg.ids, clearAll: cfg.clearAll, changeEvents: cfg.changeEvents,
         timeoutMs: cfg.timeoutMs, maxPages: cfg.maxPages
       });
       if (!r.ok) {
-        return { status: "ERREUR", ims: [], closest: [], error: `recherche ${m === "nom" ? "Nom" : "par adresse"} « ${term} » : ${r.error}`, src, term, searches };
+        return { status: "ERREUR", ims: [], closest: [], error: `recherche ${m === "nom" ? "Nom" : "par adresse"} « ${term} » : ${r.error}`, siteMissing: !!r.siteMissing, src, term, searches };
       }
       const own = imResolve(src, r.rows, { name: raw });
       searches.push({
@@ -1038,8 +1119,124 @@ async function imLookupAddress(ad, cfg) {
   return { ...res, src, term: searches.length ? searches[searches.length - 1].term : voieTerm, searches, rowsRead: all.length };
 }
 
+/* ---------------------------------------------------------------- *
+ * 4. Recherche « par désignation + site » (DPE extraction, v2.22.0)  *
+ * ---------------------------------------------------------------- */
+
+// Id exacts de la recherche d'immeubles SIGEO
+// (http://sigeo.evoriel.net/page.aspx/fr/sig_imm/immeuble_browse/ger).
+// Absents de la page → détection par libellés (imPageOp).
+const IM_GER_IDS = {
+  nom: "body_x_txtLabel_x_Label",
+  siret: "body_x_txtSiret_x_txtSiret",
+  adresse: "body_x_txtAdresse_x_txtAdresse",
+  cp: "body_x_txtCP_x_CP",
+  ville: "body_x_txtVille_x_Ville",
+  site: "body_x_sites_x_ddlSite_x",
+  siteLabel: "body_x_sites_x_hdSiteLabel",
+  filtre: "body_x_ddlMetier_x",
+  type: "body_x_ddlTypeMan_x",
+  code: "body_x_txtCode_x_Code",
+  codeCopro: "body_x_txtCodeCopro_x_txtCodeCopro",
+  codeProg: "body_x_txtCodeProgrammeCommercial_x_txtCodeProgrammeCommercial",
+  submit: "body_x_searchRaz_x_cmdSearchBtn_x__btn",
+  table: "body_x_grid_x"
+};
+const IM_DEFAULT_SITE = "391"; // 391 - ORALIA SOGIMAT
+
+// Nom E.I. comparable : majuscules, sans accents, espaces réduits.
+const imStrictKey = (s) => imFold(s).replace(/\s+/g, " ").trim();
+// Ville d'une adresse SIGEO (mots après le dernier CP) / d'un texte libre.
+function imVilleKey(adr, isTarget) {
+  const tok = imTokens(adr);
+  if (!isTarget) return tok.join(" ");
+  let k = tok.length - 1;
+  while (k >= 0 && !/^\d{5}$/.test(tok[k])) k--;
+  return k >= 0 ? tok.slice(k + 1).filter((x) => x !== "CEDEX").join(" ") : "";
+}
+
+/**
+ * Choix d'un immeuble dans les résultats d'une recherche par désignation
+ * (le champ Nom est un « contient » : « LE BOURG » ramène aussi « LE BOURG
+ * NORD », et plusieurs immeubles peuvent s'appeler « LE BOURG »).
+ *   - exactement 1 Nom E.I. identique → retenu (CP différent → à vérifier) ;
+ *   - sinon (0 ou plusieurs) : départage par le CP, puis la ville, comparés
+ *     à la colonne Adresse — parmi les noms identiques s'il y en a, sinon
+ *     parmi tous les résultats (alors toujours « à vérifier ») ;
+ *   - sinon rien : JAMAIS la première ligne.
+ * opts = { cp, ville }. Renvoie { row|null, exact, by, check, candidates }.
+ */
+function imPickByName(rows, nom, opts = {}) {
+  const K = imStrictKey(nom);
+  const seen = new Set();
+  const uniq = (rows || []).filter((r) => (seen.has(r.im) ? false : (seen.add(r.im), true)));
+  const exact = uniq.filter((r) => imStrictKey(r.nom) === K);
+  const cp = String(opts.cp || "").trim();
+  const ville = imVilleKey(opts.ville || "", false);
+  const cpOf = (r) => imParseTarget(r.adresse).cp;
+  if (exact.length === 1) {
+    const r = exact[0];
+    const check = cp && cpOf(r) && cpOf(r) !== cp ? `CP de l'immeuble SIGEO ${cpOf(r)} ≠ CP Intralia ${cp}` : "";
+    return { row: r, exact: 1, by: "", check, candidates: exact };
+  }
+  const pool = exact.length ? exact : uniq;
+  let left = pool;
+  const by = [];
+  if (cp && pool.length) { left = left.filter((r) => cpOf(r) === cp); by.push("CP " + cp); }
+  if (ville && pool.length && (!cp || left.length > 1)) { left = left.filter((r) => imVilleKey(r.adresse, true) === ville); by.push("ville " + opts.ville); }
+  if (by.length && left.length === 1) {
+    const r = left[0];
+    return {
+      row: r, exact: exact.length, by: by.join(" + "), candidates: left,
+      check: exact.length ? "" : `Nom E.I. « ${r.nom} » ≠ « ${nom} » : immeuble retenu par ${by.join(" + ")} seulement`
+    };
+  }
+  return { row: null, exact: exact.length, by: by.join(" + "), check: "", candidates: by.length ? left : pool };
+}
+
+/**
+ * Recherche « par désignation + site » d'UN immeuble : Nom = nom de
+ * l'immeuble, Site = cfg.site (vide = tous les sites), tous les autres
+ * critères vidés ; puis imPickByName.
+ * cfg = { nom, site, cp, ville, ids, sel, url, timeoutMs, maxPages }
+ * Renvoie { status: OK | AMBIGU | INTROUVABLE | ERREUR, im, id, row, check,
+ *           nom, site, total, exact, by, candidates, error?, siteMissing?, auth? }.
+ */
+async function imFindByDesignation(ad, cfg) {
+  const nom = String(cfg.nom ?? "").replace(/[   ]/g, " ").replace(/\s+/g, " ").trim();
+  const site = String(cfg.site ?? "").trim();
+  if (!nom) return { status: "ERREUR", nom, site, error: "nom d'immeuble vide" };
+  const r = await imCachedSearch(ad, {
+    mode: "nom", term: nom, cp: "", siteValue: site || undefined, siteEmpty: !site,
+    ids: cfg.ids || IM_GER_IDS, clearAll: true, changeEvents: true,
+    sel: cfg.sel || {}, url: cfg.url, timeoutMs: cfg.timeoutMs, maxPages: cfg.maxPages
+  });
+  if (!r.ok) return { status: "ERREUR", nom, site, error: r.error, siteMissing: !!r.siteMissing, auth: /AUTH_REQUIRED/.test(r.error || "") };
+  const pick = imPickByName(r.rows, nom, { cp: cfg.cp, ville: cfg.ville });
+  const base = {
+    nom, site, total: r.total ?? r.rows.length, exact: pick.exact, by: pick.by, candidates: pick.candidates,
+    cached: !!r.cached, warnings: r.warnings || []
+  };
+  if (pick.row) return { ...base, status: "OK", im: pick.row.im, id: pick.row.id || "", row: pick.row, check: pick.check };
+  return { ...base, status: pick.candidates.length > 1 ? "AMBIGU" : "INTROUVABLE" };
+}
+
+// Résumé lisible d'un résultat imFindByDesignation (journal, colonne Méthode).
+function imDesignationText(r) {
+  if (r.status === "ERREUR") return `« ${r.nom} » : ${r.error}`;
+  const n = (k, one, many) => `${k} ${k > 1 ? many : one}`;
+  let t = `« ${r.nom} » : ${n(r.total || 0, "résultat", "résultats")}, ${n(r.exact || 0, "nom identique", "noms identiques")}`;
+  if (r.by) t += `, ${r.status === "OK" ? "retenu par" : "puis"} ${r.by}`;
+  if (r.status === "AMBIGU") {
+    t += ` → ${r.candidates.length} candidats : ` + r.candidates.slice(0, 5).map((c) => `${c.im} ${c.nom} (${c.adresse})`).join(" ; ") +
+      (r.candidates.length > 5 ? " ; …" : "");
+  }
+  return t;
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
+    IM_GER_IDS, IM_DEFAULT_SITE, imStrictKey, imPickByName, imFindByDesignation, imDesignationText,
     imFold, imTokens, imParseSource, imParseTarget, imPickSearchTerm, imMatchAddress,
     imResolve, imNameKey, imStatusText, imPageOp, imLocate, imWaitForSearchDone, imSearchAllPages,
     imCachedSearch, imClearCache, imLookupAddress, imSearchCache
