@@ -215,6 +215,14 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
     assert.deepStrictEqual(c.fields, ["libdpe1", "DPE1", "libges1", "GES1", "DATEDIAG"]);
     const d = intra.intraNormalizeConfig({ v: 2, mode: "download", folder: "", fields: ["REFERENCE", "inconnu"], soc: "100", base: "https://x.local/", delay: "0" });
     assert.deepStrictEqual([d.mode, d.folder, d.fields, d.soc, d.base, d.delay], ["download", "", ["REFERENCE"], "100", "https://x.local", 0]);
+    // IM / id interne sur la colonne immeuble / lots (réglage du 25/11) : retirés → auto.
+    const u = intra.intraNormalizeConfig({ v: 2, nomCol: "immeuble", lotCol: "lots", imCol: "immeuble", idCol: "lots" });
+    assert.deepStrictEqual([u.imCol, u.idCol], ["", ""]);
+    const k = intra.intraNormalizeConfig({ v: 2, nomCol: "immeuble", lotCol: "lots", imCol: "IM_format", idCol: "id_server" });
+    assert.deepStrictEqual([k.imCol, k.idCol], ["IM_format", "id_server"], "vraies colonnes IM / id gardées");
+    const sc = { imCol: "lots", idCol: "IM_format" };
+    assert.deepStrictEqual(intra.intraFixSigeoCols(sc, "immeuble", "lots"), [{ k: "im", col: "lots" }]);
+    assert.deepStrictEqual([intra.intraKnownId(" 38 "), intra.intraKnownId("38.0"), intra.intraKnownId("à voir"), intra.intraKnownId("")], ["38", "38", "", ""]);
   });
 
   // Adaptateur de intraProcessRow : onglet Intralia = jsdom ; FlowerDocs = fetch de Node.

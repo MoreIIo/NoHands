@@ -339,7 +339,7 @@ function intraNormalizeConfig(c = {}) {
   const fields = Array.isArray(c.fields)
     ? c.fields.filter((k) => INTRA_FIELDS.some((f) => f.k === k))
     : INTRA_FIELDS.filter((f) => f.def).map((f) => f.k);
-  return {
+  const o = {
     v: 2,
     nomCol: String(c.nomCol ?? ""),
     lotCol: String(c.lotCol ?? ""),
@@ -363,6 +363,28 @@ function intraNormalizeConfig(c = {}) {
     delay: num(c.delay, INTRA_DEFAULT_DELAY),
     maxAgeDays: num(c.maxAgeDays, INTRA_DEFAULT_MAX_AGE_DAYS)
   };
+  intraFixSigeoCols(o);
+  return o;
+}
+
+// « IM SIGEO » et « id interne » = colonnes où la valeur est DÉJÀ connue
+// (facultatives ; vide = recherche auto). Y mettre la colonne du nom
+// d'immeuble ou du n° de lot n'a pas de sens (« LE BOURG » n'est pas un IM,
+// « 4 » n'est pas un id interne, et l'id trouvé écraserait le n° de lot) :
+// ces choix sont retirés → IM par « Recherche IM SIGEO », id par « Recherche
+// d'id interne de lot ». Renvoie la liste de ce qui a été retiré.
+function intraFixSigeoCols(c, nomCol, lotCol) {
+  const src = [nomCol ?? c.nomCol, lotCol ?? c.lotCol].filter(Boolean);
+  const ignored = [];
+  if (c.imCol && src.includes(c.imCol)) { ignored.push({ k: "im", col: c.imCol }); c.imCol = ""; }
+  if (c.idCol && (src.includes(c.idCol) || c.idCol === c.imCol)) { ignored.push({ k: "id", col: c.idCol }); c.idCol = ""; }
+  return ignored;
+}
+
+// Id interne déjà connu dans une case : nombre seul (« 38 », « 38.0 »), sinon "".
+function intraKnownId(v) {
+  const s = String(v ?? "").trim().replace(/[.,]0+$/, "");
+  return /^\d+$/.test(s) ? s : "";
 }
 
 // Valeurs à écrire dans la ligne pour un résultat (colonnes → texte).
@@ -863,7 +885,7 @@ if (typeof module !== "undefined" && module.exports) {
     intraFicheUrl, intraTypeLocal, intraSplitAdr,
     intraNormName, intraNormLot, intraFold, intraIndexUrl, intraFormUrl, intraLotUrl, intraFlowerViewUrl, intraFlowerDownloadUrl,
     intraBuildIndex, intraSimilarity, intraCloseNames, intraLookup, intraCompileRegex, intraIsDpeName, intraSelectDpe,
-    intraSanitize, intraFolder, intraExtOf, intraFileName, intraClassifyFile, intraNormalizeConfig, intraRowValues, intraTemplateVars, intraSaisieValues, intraSaisieCols,
+    intraSanitize, intraFolder, intraExtOf, intraFileName, intraClassifyFile, intraNormalizeConfig, intraFixSigeoCols, intraKnownId, intraRowValues, intraTemplateVars, intraSaisieValues, intraSaisieCols,
     intraPageOp, intraGetFile, intraProcessRow
   };
 }

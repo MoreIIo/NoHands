@@ -451,18 +451,20 @@ function renderPreview() {
 function fillColumnSelect(sel, current, extra = []) {
   const cols = getColumns();
   sel.innerHTML = "";
+  const addExtra = (e) => {
+    const opt = document.createElement("option");
+    opt.value = e.value;
+    opt.textContent = e.label;
+    sel.appendChild(opt);
+  };
+  extra.filter((e) => e.top).forEach(addExtra);
   cols.forEach((c) => {
     const opt = document.createElement("option");
     opt.value = c.name;
     opt.textContent = c.name === c.letter ? c.letter : `${c.name} (${c.letter})`;
     sel.appendChild(opt);
   });
-  extra.forEach((e) => {
-    const opt = document.createElement("option");
-    opt.value = e.value;
-    opt.textContent = e.label;
-    sel.appendChild(opt);
-  });
+  extra.filter((e) => !e.top).forEach(addExtra);
   if (current) {
     const known = cols.some((c) => c.name === current) || extra.some((e) => e.value === current);
     if (!known) {
@@ -483,7 +485,9 @@ function colSelectExtras(kind) {
   if (kind === "target") return [other];
   if (kind === "targetopt") return [{ value: "", label: "— ne pas écrire —" }, other];
   if (kind === "optional") return [{ value: "", label: "— aucune —" }];
-  if (kind === "auto") return [{ value: "", label: "— auto (adresse Intralia) —" }];
+  // En tête de liste : le choix normal (recherche SIGEO).
+  if (kind === "auto") return [{ value: "", label: "auto — Recherche IM SIGEO (adresse Intralia)", top: true }];
+  if (kind === "autoid") return [{ value: "", label: "auto — Recherche d'id interne (IM + lot)", top: true }];
   return [];
 }
 
@@ -4099,8 +4103,11 @@ function applyIntraConfig(raw) {
   fillColumnSelect($("intraNomCol"), c.nomCol || g.nom);
   fillColumnSelect($("intraLotCol"), c.lotCol || g.lot);
   $("intraSigeo").checked = c.sigeo;
-  fillColumnSelect($("intraImCol"), c.imCol || g.im, colSelectExtras("auto"));
-  fillColumnSelect($("intraIdCol"), c.idCol || g.id, colSelectExtras("optional"));
+  // Réglage enregistré avec IM = colonne immeuble / id = colonne lots : remis sur « auto ».
+  const sc = { imCol: c.imCol || g.im, idCol: c.idCol || g.id };
+  intraFixSigeoCols(sc, $("intraNomCol").value, $("intraLotCol").value);
+  fillColumnSelect($("intraImCol"), sc.imCol, colSelectExtras("auto"));
+  fillColumnSelect($("intraIdCol"), sc.idCol, colSelectExtras("autoid"));
   $("intraFiche").value = c.fiche;
   intraRenderSoc(c.soc);
   $("intraRegex").value = c.regex;
@@ -4390,11 +4397,24 @@ function intraAnalysisText(res, v) {
 // ctx = { imIdx, knownIdx, fiche, lc (réglages « Recherche d'id interne de
 // lot »), ic (réglages « Recherche IM SIGEO »), run, tabId, ad, imAd, imUrl }.
 function intraSigeoCtx(cfg) {
+  const idx = (c) => (c ? colIndexByName(c) : -1);
+  const nomIdx = idx(cfg.nomCol), lotIdx = idx(cfg.lotCol);
+  let imIdx = idx(cfg.imCol), knownIdx = idx(cfg.idCol);
+  // Colonne du nom d'immeuble ou du n° de lot choisie pour l'IM / l'id interne
+  // (même écrite autrement, ex. lettre) : ignorée → recherches SIGEO.
+  const ignored = [];
+  const srcName = (i) => (i === nomIdx ? "du nom d'immeuble" : i === lotIdx ? "du n° de lot" : "");
+  if (imIdx >= 0 && srcName(imIdx)) {
+    ignored.push(`la colonne « ${cfg.imCol} » choisie pour l'IM est celle ${srcName(imIdx)} : ignorée, IM cherché comme « Recherche IM SIGEO »`);
+    imIdx = -1;
+  }
+  if (knownIdx >= 0 && (srcName(knownIdx) || knownIdx === imIdx)) {
+    ignored.push(`la colonne « ${cfg.idCol} » choisie pour l'id interne est celle ${srcName(knownIdx) || "de l'IM"} : ignorée, id cherché comme « Recherche d'id interne de lot »`);
+    knownIdx = -1;
+  }
   return {
     on: !!cfg.sigeo,
-    imIdx: cfg.imCol ? colIndexByName(cfg.imCol) : -1,
-    knownIdx: cfg.idCol ? colIndexByName(cfg.idCol) : -1,
-    nomIdx: cfg.nomCol ? colIndexByName(cfg.nomCol) : -1,
+    imIdx, knownIdx, nomIdx, ignored,
     fiche: cfg.fiche, lc: getLotConfig(), ic: getImxConfig(), run: {},
     tabId: null, ad: null, imAd: null, imUrl: ""
   };
@@ -4531,15 +4551,17 @@ async function intraImSearch(ctx, res, rowNom) {
 async function intraSigeoLookup(ctx, row, lot, res) {
   const lt = lotNormLt(lot) || String(lot);
   const pad = (n) => "IM" + String(n).padStart(7, "0");
-  let ims = [], imVia = "colonne";
-  // Colonne IM remplie → utilisée ; vide → IM cherché comme en mode auto.
+  let ims = [], imVia = "colonne", imNote = "";
+  // Colonne IM avec un IM → utilisé ; vide ou autre chose qu'un IM (ex. un
+  // nom d'immeuble) → IM cherché comme « Recherche IM SIGEO » (jamais d'arrêt).
   if (ctx.imIdx >= 0) {
     const imRaw = getCellByIndex(row, ctx.imIdx).trim();
     const im = lotNormIm(imRaw);
-    if (imRaw && !im) return { status: "IM_VIDE", text: `IM invalide « ${imRaw} »` };
     if (im) ims = [im.num];
+    else if (imRaw) imNote = `« ${imRaw} » (colonne IM) n'est pas un IM → `;
   }
-  const known = ctx.knownIdx >= 0 ? getCellByIndex(row, ctx.knownIdx).trim() : "";
+  // Id interne déjà connu : seulement un nombre (sinon cherché).
+  const known = ctx.knownIdx >= 0 ? intraKnownId(getCellByIndex(row, ctx.knownIdx)) : "";
   if (known && ims.length === 1) return { status: "OK", im: ims[0], id: known, known: true, url: intraFicheUrl(ctx.fiche, ims[0], known) };
   const st = await intraSigeoSetup(ctx, !ims.length);
   if (st.error) return { status: "ERREUR", text: st.error, setup: true };
@@ -4550,11 +4572,11 @@ async function intraSigeoLookup(ctx, row, lot, res) {
     const where = res && res.adr ? `adresse Intralia « ${res.adr} »` : "adresse Intralia vide";
     if (!r.ims.length) {
       const near = (r.closest || []).map((x) => `${x.adresse || x.nom} (${x.im})`).join(" ; ");
-      return { status: "INTROUVABLE", text: `IM introuvable (${where}) — recherches SIGEO : ${r.diag.join(" ; ") || "aucune"}` +
+      return { status: "INTROUVABLE", text: `${imNote}IM introuvable (${where}) — recherches SIGEO : ${r.diag.join(" ; ") || "aucune"}` +
         `${near ? " — proches : " + near : ""}. Ajoute une colonne « IM » au fichier pour le donner à la main` };
     }
     ims = r.ims.map((x) => (lotNormIm(x) || {}).num).filter(Boolean).slice(0, 6);
-    imVia = r.via;
+    imVia = imNote + r.via;
     if (known && ims.length === 1) return { status: "OK", im: ims[0], id: known, known: true, url: intraFicheUrl(ctx.fiche, ims[0], known), via: imVia };
   }
   // Id interne : le lot est cherché dans chaque IM candidat (départage).
@@ -4714,7 +4736,8 @@ async function runIntraExtraction() {
   if (sigeoOn) {
     lotClearCache();
     imClearCache();
-    logLine(`SIGEO : IM ${sig.imIdx >= 0 ? `de la colonne « ${cfg.imCol} »` : "cherché par l'adresse Intralia"} → id interne du lot${sig.knownIdx >= 0 ? ` (déjà connu dans « ${cfg.idCol} »)` : ""} → URL de la fiche DPE.`, "");
+    sig.ignored.forEach((t) => logLine(`SIGEO : ⚠ ${t}.`, "skip"));
+    logLine(`SIGEO : IM ${sig.imIdx >= 0 ? `de la colonne « ${cfg.imCol} » (case vide ou sans IM → recherche IM SIGEO)` : "cherché par l'adresse Intralia (Recherche IM SIGEO)"} → id interne du lot${sig.knownIdx >= 0 ? ` (déjà connu dans « ${cfg.idCol} », sinon Recherche d'id interne de lot)` : " (Recherche d'id interne de lot : IM + LT)"} → URL de la fiche DPE.`, "");
   }
   const idCols = sigeoOn ? (sig.imIdx < 0 ? [INTRA_IM_COL] : []).concat(sig.knownIdx < 0 ? [INTRA_ID_COL] : []) : [];
   // « fichier prêt » : uniquement les colonnes lues par « SIGEO : saisir un DPE ».
@@ -4850,7 +4873,22 @@ $("intraSoc").addEventListener("change", () => {
   updateExtractEstimate();
 });
 ["intraSigeo"].forEach((id) => $(id).addEventListener("change", updateExtractEstimate));
-["intraNomCol", "intraLotCol", "intraImCol", "intraIdCol"].forEach((id) => $(id).addEventListener("change", () => { intraColsTouched = true; updateExtractEstimate(); }));
+// IM / id interne = colonnes où la valeur est DÉJÀ connue : jamais celle du
+// nom d'immeuble ni du n° de lot (sinon remis sur « auto », avec un message).
+function intraCheckSigeoCols() {
+  const sc = { imCol: $("intraImCol").value, idCol: $("intraIdCol").value };
+  const ignored = intraFixSigeoCols(sc, $("intraNomCol").value, $("intraLotCol").value);
+  if (!ignored.length) return;
+  if (ignored.some((x) => x.k === "im")) $("intraImCol").value = "";
+  if (ignored.some((x) => x.k === "id")) $("intraIdCol").value = "";
+  showStatus(`SIGEO : ${ignored.map((x) => `« ${x.col} »`).join(" et ")} ne contient pas ${ignored.length > 1 ? "d'IM ni d'id interne" : ignored[0].k === "im" ? "d'IM" : "d'id interne"}` +
+    " → remis sur « auto » (Recherche IM SIGEO, puis Recherche d'id interne).", "error");
+}
+["intraNomCol", "intraLotCol", "intraImCol", "intraIdCol"].forEach((id) => $(id).addEventListener("change", () => {
+  intraColsTouched = true;
+  intraCheckSigeoCols();
+  updateExtractEstimate();
+}));
 ["intraDelay", "intraVerify", "intraMaxAge"].forEach((id) => $(id).addEventListener("change", updateExtractEstimate));
 $("intraAnalyze").addEventListener("change", () => { intraRenderSupCount(); updateExtractEstimate(); });
 ["intraBase", "intraMaxAge"].forEach((id) => $(id).addEventListener("change", () => intraShowIdxInfo()));
@@ -4868,7 +4906,8 @@ document.querySelectorAll('input[name="extractKind"]').forEach((r) => r.addEvent
     if (g.nom) fillColumnSelect($("intraNomCol"), g.nom);
     if (g.lot) fillColumnSelect($("intraLotCol"), g.lot);
     if (g.im && !$("intraImCol").value) fillColumnSelect($("intraImCol"), g.im, colSelectExtras("auto"));
-    if (g.id && !$("intraIdCol").value) fillColumnSelect($("intraIdCol"), g.id, colSelectExtras("optional"));
+    if (g.id && !$("intraIdCol").value) fillColumnSelect($("intraIdCol"), g.id, colSelectExtras("autoid"));
+    intraCheckSigeoCols();
   }
   intraShowIdxInfo();
   updateExtractEstimate();

@@ -482,6 +482,44 @@ const ROWS = [
   assert.strictEqual(dij[3].text, "IM introuvable (adresse Intralia « 95 RUE DE MAZY 21160 MARSANNAY LA COTE ») — recherches SIGEO : " +
     "Nom « 95 RUE DE MAZY » : 0 résultat(s) ; Nom « MAZY » : 0 résultat(s) ; par adresse « MAZY » + CP 21160 : 0 résultat(s). " +
     "Ajoute une colonne « IM » au fichier pour le donner à la main");
+  // Colonne IM qui contient autre chose qu'un IM (nom) + id « connu » non numérique :
+  // pas d'arrêt « IM invalide » → recherche IM SIGEO puis recherche d'id interne.
+  const notIm = await panel.evaluate(async () => {
+    const ctx = Object.assign(intraSigeoCtx(getIntraConfig()), { imIdx: 2, knownIdx: 3 });
+    ctx.stopped = () => false;
+    return intraSigeoLookup(ctx, ["9 RUE CHARLES BRIFAUT", "1", "BRIFAUT", "à voir"], "1", { adr: "21000 DIJON", nomIntralia: "" });
+  });
+  assert.deepStrictEqual([notIm.status, notIm.im, notIm.id, notIm.known, notIm.via],
+    ["OK", "393030", "3", undefined, "« BRIFAUT » (colonne IM) n'est pas un IM → IM par l'adresse « 9 RUE CHARLES BRIFAUT »"]);
+
+  // 7b. Réglage vu le 25/11 : « IM SIGEO » = colonne « immeuble », « id interne » =
+  // colonne « lots ». Avant : « fiche SIGEO introuvable : IM invalide « LE BOURG » »,
+  // ni IM, ni id, ni URL. Maintenant : choix ignorés → Recherche IM SIGEO puis
+  // Recherche d'id interne de lot ; le n° de lot n'est jamais écrasé.
+  await panel.evaluate(() => {
+    state.rows = [["immeuble", "lots"], ["PARC FLEURI LE CONCERTO 1", "732"], ["COUR SAINT-HUBERT", "130"]]; renderColumns();
+    applyIntraConfig(Object.assign(getIntraConfig(), { nomCol: "immeuble", lotCol: "lots", imCol: "immeuble", idCol: "lots" }));
+  });
+  assert.deepStrictEqual(await panel.evaluate(() => [$("intraImCol").value, $("intraIdCol").value, $("intraImCol").options[0].text, $("intraIdCol").options[0].text]),
+    ["", "", "auto — Recherche IM SIGEO (adresse Intralia)", "auto — Recherche d'id interne (IM + lot)"], "réglage enregistré remis sur auto");
+  await panel.selectOption("#intraImCol", "immeuble");
+  await panel.selectOption("#intraIdCol", "lots");
+  assert.deepStrictEqual(await panel.evaluate(() => [$("intraImCol").value, $("intraIdCol").value, getIntraConfig().imCol, getIntraConfig().idCol]),
+    ["", "", "", ""], "colonnes immeuble / lots refusées pour l'IM / l'id interne");
+  assert.ok(/remis sur « auto »/.test(await panel.evaluate(() => $("statusMessage").textContent)), "message à l'utilisatrice");
+  assert.deepStrictEqual(await panel.evaluate(() => {
+    const c = intraSigeoCtx(Object.assign(getIntraConfig(), { imCol: "immeuble", idCol: "B" }));
+    return [c.imIdx, c.knownIdx, c.ignored.length];
+  }), [-1, -1, 2], "même forcé (nom ou lettre), le contexte SIGEO les ignore");
+  out = await run();
+  const H7b = out.rows[0];
+  const g7b = (r, n) => out.rows[r - 1][H7b.indexOf(n)];
+  assert.deepStrictEqual(H7b.slice(0, 4), ["immeuble", "lots", "IM SIGEO", "ID interne SIGEO"], out.log);
+  assert.deepStrictEqual([g7b(2, "lots"), g7b(2, "IM SIGEO"), g7b(2, "ID interne SIGEO"), g7b(2, "URL fiche DPE")],
+    ["732", "IM0393001", "38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0"], out.log);
+  assert.deepStrictEqual([g7b(3, "lots"), g7b(3, "IM SIGEO"), g7b(3, "ID interne SIGEO"), g7b(3, "URL fiche DPE")],
+    ["130", "IM0393002", "12", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393002/12/0"], out.log);
+  assert.ok(!/IM invalide/.test(out.log), out.log);
 
   // 8. Mise en page réelle (capture du 24/11) : blocs Par désignation / Par
   // adresse / Par mandat dans un seul formulaire (critères combinés), Site

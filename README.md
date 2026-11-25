@@ -659,13 +659,20 @@ Windows → `_` ; extension = celle du fichier reçu). Pour les étapes
   par « Site à vide » de *Recherche IM SIGEO*). Le Site de la page est remis
   pour la ligne suivante.
   Une colonne IM peut aussi être donnée (`IM`, `IM SIGEO`, `IM_format`…,
-  devinée) : remplie → utilisée telle quelle ; vide → recherche auto (la
-  recherche d'immeubles est alors nécessaire, comme sans colonne), et l'IM
-  trouvé y est écrit. Pour les immeubles introuvables, il suffit d'ajouter
-  l'IM à la main dans cette colonne et de relancer.
+  devinée) : remplie avec un IM → utilisée telle quelle ; vide ou sans IM
+  (ex. un nom d'immeuble) → recherche auto (la recherche d'immeubles est
+  alors nécessaire, comme sans colonne), et l'IM trouvé est écrit dans une
+  case vide. Pour les immeubles introuvables, il suffit d'ajouter l'IM à la
+  main dans cette colonne et de relancer.
 - **Id interne du lot** : IM + n° de lot, avec les réglages et le cache de
   *Recherche d'id interne de lot* ; réutilisé s'il est déjà dans la colonne
-  « id interne » (ex. `id_server`).
+  « id interne » (ex. `id_server`) et que c'est un nombre.
+- (v2.21.1) Les listes « IM SIGEO déjà connu » et « id interne déjà connu »
+  sont sur **auto** par défaut (en tête de liste). Les colonnes du nom
+  d'immeuble et du n° de lot y sont refusées (remises sur auto, message),
+  y compris dans un réglage ou un profil enregistré : avant, « IM SIGEO =
+  immeuble » donnait « IM invalide « LE BOURG » » sans IM, id ni URL, et
+  « id interne = lots » aurait pris le n° de lot pour l'id.
 - **URL de la fiche DPE** :
   `http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/{IM}/{id interne}/0`
   (modèle modifiable dans « Réglages avancés »).
@@ -957,7 +964,8 @@ par le journal et par la colonne résultat ; depuis 2.17.1 : PDF visible
 seulement après un nouvel « Enregistrer », PDF jamais visible puis relances
 sans nouvel upload).
 
-**Version** : 2.17.7 — **Saisir un DPE** : N° ADEME « NC » (ou non communiqué / non trouvé / 99999…) → « NC » est saisi dans le champ N° ADEME (après le 1er enregistrement pour un DPE d'avant 07/2021) ; le PDF est retrouvé par son nom ; une création que SIGEO n'a pas faite (page revenue en création) ne bloque plus la relance par un faux « enregistrement lancé sans confirmation ».
+**Version** : 2.21.1 — **DPE extraction** : IM et id interne toujours cherchés (Recherche IM SIGEO puis Recherche d'id interne de lot) quand « IM SIGEO » / « id interne » pointent sur la colonne immeuble / lots ou sur une case sans IM ; listes renommées « … déjà connu », « auto » en tête.
+2.17.7 — **Saisir un DPE** : N° ADEME « NC » (ou non communiqué / non trouvé / 99999…) → « NC » est saisi dans le champ N° ADEME (après le 1er enregistrement pour un DPE d'avant 07/2021) ; le PDF est retrouvé par son nom ; une création que SIGEO n'a pas faite (page revenue en création) ne bloque plus la relance par un faux « enregistrement lancé sans confirmation ».
 2.17.6 — **Saisir un DPE** : fournisseur — préfixe « FU » et espaces retirés avant la saisie, validation par perte du focus (jamais Entrée) ; contrôle sans zéros de tête (SIGEO stocke 0448957 comme 448957 : info au journal, pas d'écart) ET libellé `#body:x:proxyFou:x:lbl:x:lbl` non vide, sinon écart « Fournisseur non reconnu par SIGEO » ; reprise d'une fiche existante aussi par un lien `…/diag_manage/{imm}/{n}/{id}` ou « diagnostic {id} » dans la colonne résultat (champs vérifiés, puis upload direct).
 2.17.5 — **Analyse DPE** : colonne `Prix indexés au` retirée (inutile à la saisie) ; dans l'étape de saisie, la date d'indexation des prix devient facultative.
 2.17.4 — **Saisir un DPE** : N° ADEME « NC » / non communiqué / non trouvé / 99999 accepté (rien de saisi, avertissement) ; option « confirmer avant de joindre le PDF » valable aussi sur la ligne active (décochée → PDF joint automatiquement). **Analyse DPE** : N° ADEME absent → « NC » (évaluation thermique / non émis ADEME) ou « non trouvé ».
