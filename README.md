@@ -716,11 +716,17 @@ DPE ») — `DPE analyse` (OK / À VÉRIFIER / Pas de PDF / ÉCHEC), `PDF analys
 `Énergie primaire (kWh/m²/an)`, `Classe énergie`, `GES (kg CO2/m²/an)`,
 `Classe GES`, `Coût min/max (€/an)`, `Remarques DPE`.
 - **Données du DPE = celles saisies dans Intralia** (`DATEDIAG`, kWh/m²,
-  lettres, kgCO2/m², coûts min/max pour un DPE ≥ 01/07/2021). « Valable
+  lettres, kgCO2/m², coûts min/max). « Valable
   jusqu'au » est calculé comme SIGEO (la `datefinval` d'Intralia n'est pas
   fiable). Coûts : les cases « Montant théorique des dépenses énergétiques :
-  Entre … et … » de la page du lot. Champ vide ou à 0 dans Intralia → valeur
-  lue dans le PDF, signalée (v2.18.3).
+  Entre … et … » de la page du lot, sinon le montant estimé unique (`MTDIAG`,
+  anciens DPE) → min = max. Champ vide ou à 0 dans Intralia → valeur
+  lue dans le PDF, signalée (v2.18.3) : fourchette « entre … et … », ou
+  (v2.23.0) montant unique du tableau « Frais annuels d'énergie » des anciens
+  DPE / DPE hors habitation (ligne « Consommation d'énergie pour les usages
+  recensés », abonnement inclus) → min = max. Coûts obligatoires pour un DPE
+  ≥ 01/07/2021 ; avant, écrits seulement s'ils sont trouvés (pas de remarque
+  sinon).
 - **Fournisseur (→ N° FU) et N° ADEME = lus dans le PDF** (case « analyser le
   PDF », cochée par défaut ; moteur de l'Analyse DPE, texte + OCR local
   réglable). Le n° FU vient de la liste « Fournisseurs → n° FU » de l'Analyse
@@ -783,7 +789,9 @@ OCR) ; surface ; **énergie primaire et GES par m² = plancher(total ÷ surface)
 (page 3 et « ce logement émet … kg de CO₂ »), recoupés avec l'étiquette lue
 par OCR quand elle l'est ; classes calculées (double seuil 2021, barème des
 petites surfaces < 40 m² pour les DPE établis depuis le 01/07/2024, ancien
-barème avant juillet 2021) ; fourchette de coûts ; société, diagnostiqueur,
+barème avant juillet 2021) ; fourchette de coûts, ou montant unique des
+« frais annuels d'énergie » (anciens DPE, DPE hors habitation : min = max,
+arrondi à l'euro) ; société, diagnostiqueur,
 n° de certification, adresse du bien. Anciens DPE (2006 → juin 2021) :
 « consommation conventionnelle », « estimation des émissions », validité
 légale rappelée (31/12/2022 ou 31/12/2024).
@@ -805,8 +813,9 @@ du DPE dans SIGEO** (v2.17.2) : `DPE analyse` (OK / À VÉRIFIER / ÉCHEC / Pas
 de PDF / PDF introuvable), `PDF analysé` (fichier à joindre), `N° FU`,
 `Établi le`, `Valable jusqu'au`, `N° ADEME`, `Énergie primaire (kWh/m²/an)`,
 `Classe énergie`, `GES (kg CO2/m²/an)`, `Classe GES`, `Coût min (€/an)` et
-`Coût max (€/an)` (ces deux-là seulement pour un DPE établi depuis le
-01/07/2021, SIGEO n'ayant pas d'estimation avant), et `Remarques DPE` (ce qui a fait passer la ligne
+`Coût max (€/an)` (obligatoires pour un DPE établi depuis le 01/07/2021 ;
+avant, remplis avec le montant unique des « frais annuels d'énergie » quand
+il est trouvé — min = max), et `Remarques DPE` (ce qui a fait passer la ligne
 « À VÉRIFIER » : valeur manquante, lue par OCR seule, écart étiquette /
 calcul, fournisseur rapproché ou absent de la liste — avec le nom lu…).
 Les totaux annuels, la surface, l'adresse, le diagnostiqueur et la
@@ -982,7 +991,8 @@ par le journal et par la colonne résultat ; depuis 2.17.1 : PDF visible
 seulement après un nouvel « Enregistrer », PDF jamais visible puis relances
 sans nouvel upload).
 
-**Version** : 2.22.0 — **DPE extraction** : IM SIGEO cherché **par désignation + site** (Site SIGEO réglable, 391 par défaut) au lieu de l'adresse sans site : tous les autres critères vidés, libellé caché du site écrit, aucune alert() bloquante ; 1 Nom E.I. identique → retenu, sinon CP / ville Intralia, sinon À VÉRIFIER ; repli par adresse facultatif (même site + CP) ; colonnes `ID immeuble SIGEO` et `Méthode IM SIGEO`.
+**Version** : 2.23.0 — **DPE extraction / Analyse DPE** : coûts lus aussi dans l'ancien tableau « Frais annuels d'énergie » (anciens DPE, DPE hors habitation après 07/2021) : montant TTC de la ligne « Consommation d'énergie pour les usages recensés » (abonnement inclus, montant de l'abonnement ignoré), arrondi à l'euro → Coût min = Coût max ; utilisé quand Intralia n'a ni fourchette ni montant estimé (`MTDIAG`, désormais repris lui aussi), y compris pour les DPE d'avant 07/2021 (date d'indexation des prix : Intralia, sinon le PDF).
+2.22.0 — **DPE extraction** : IM SIGEO cherché **par désignation + site** (Site SIGEO réglable, 391 par défaut) au lieu de l'adresse sans site : tous les autres critères vidés, libellé caché du site écrit, aucune alert() bloquante ; 1 Nom E.I. identique → retenu, sinon CP / ville Intralia, sinon À VÉRIFIER ; repli par adresse facultatif (même site + CP) ; colonnes `ID immeuble SIGEO` et `Méthode IM SIGEO`.
 2.21.1 — **DPE extraction** : IM et id interne toujours cherchés (Recherche IM SIGEO puis Recherche d'id interne de lot) quand « IM SIGEO » / « id interne » pointent sur la colonne immeuble / lots ou sur une case sans IM ; listes renommées « … déjà connu », « auto » en tête.
 2.17.7 — **Saisir un DPE** : N° ADEME « NC » (ou non communiqué / non trouvé / 99999…) → « NC » est saisi dans le champ N° ADEME (après le 1er enregistrement pour un DPE d'avant 07/2021) ; le PDF est retrouvé par son nom ; une création que SIGEO n'a pas faite (page revenue en création) ne bloque plus la relance par un faux « enregistrement lancé sans confirmation ».
 2.17.6 — **Saisir un DPE** : fournisseur — préfixe « FU » et espaces retirés avant la saisie, validation par perte du focus (jamais Entrée) ; contrôle sans zéros de tête (SIGEO stocke 0448957 comme 448957 : info au journal, pas d'écart) ET libellé `#body:x:proxyFou:x:lbl:x:lbl` non vide, sinon écart « Fournisseur non reconnu par SIGEO » ; reprise d'une fiche existante aussi par un lien `…/diag_manage/{imm}/{n}/{id}` ou « diagnostic {id} » dans la colonne résultat (champs vérifiés, puis upload direct).

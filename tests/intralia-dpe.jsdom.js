@@ -376,8 +376,10 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
     assert.ok(/analyse du PDF impossible \(PDF illisible\)/.test(v["Remarques DPE"]), v["Remarques DPE"]);
     // Intralia prioritaire : « 180.5 » saisi dans Intralia → 180,5 (le PDF dit 180).
     const m = anv(await intra.intraProcessRow(adapter(), params("RESIDENCE CHATEAUBRIAND", "278", { analyze: true })));
-    assert.deepStrictEqual([m["DPE analyse"], m["Énergie primaire (kWh/m²/an)"], m["N° FU"], m["Valable jusqu'au"], m["Remarques DPE"]], ["OK", "180,5", "0448957", "31/12/2022", ""],
+    assert.deepStrictEqual([m["DPE analyse"], m["Énergie primaire (kWh/m²/an)"], m["N° FU"], m["Valable jusqu'au"], m["Remarques DPE"]], ["À VÉRIFIER", "180,5", "0448957", "31/12/2022",
+      "coûts vides dans Intralia : frais annuels d'énergie du PDF (montant unique, abonnement inclus → min = max)"],
       "validité calculée comme SIGEO (DPE 2013-2017 → 31/12/2022)");
+    assert.deepStrictEqual([m["Coût min (€/an)"], m["Coût max (€/an)"]], ["574", "574"], "ancien DPE sans coût dans Intralia : frais annuels du PDF, min = max");
     // Champ vide dans Intralia → valeur du PDF, signalée.
     const e = anv(await intra.intraProcessRow(adapter(), params("COEUR DE VILLE", "5", { analyze: true })));
     assert.deepStrictEqual([e["DPE analyse"], e["Établi le"], e["Énergie primaire (kWh/m²/an)"], e["N° FU"]], ["À VÉRIFIER", "04/04/2019", "95", "0426828"]);
@@ -394,6 +396,24 @@ const runOp = async (dom, cfg) => JSON.parse(JSON.stringify(await dom.window.eva
     { DS_COLS: ds.DS_COLS, dsRecordValues: ds.dsRecordValues, validity: diag.diagExpectedValidity });
     assert.deepStrictEqual([n["Établi le"], n["Valable jusqu'au"], n["Coût min (€/an)"], n["Coût max (€/an)"], n["Date d'indexation des prix"], n["N° ADEME"], n["DPE analyse"], n["Remarques DPE"]],
       ["17/04/2023", "16/04/2033", "479", "649", "01/01/2021", "2321E1261645S", "À VÉRIFIER", "n° ADEME lu par OCR : à contrôler"]);
+    // Coûts : MTDIAG (montant unique d'Intralia) avant le PDF ; DPE hors habitation ≥ 07/2021
+    // sans coût dans Intralia → frais annuels du PDF ; ancien DPE sans coût nulle part → rien, sans remarque.
+    const cfg = { DS_COLS: ds.DS_COLS, dsRecordValues: ds.dsRecordValues, validity: diag.diagExpectedValidity };
+    const sup = { entry: { name: "ACADE", code: "448957" } };
+    const pdfOld = Object.assign(ds.dsNewRecord(), { etabli: { y: 2019, m: 2, d: 5 }, coutMin: 490, coutMax: 490, coutUnique: true, prixRef: { y: 2006, m: 8, d: 15 }, supplier: sup });
+    const row = (fields, analysis) => intra.intraSaisieValues({ status: "OK", chosen: { name: "x.pdf" }, lotType: "Appartement", fields, analysis }, cfg);
+    const old = { DATEDIAG: "05/02/2019", DPE1: "274", libdpe1: "E", GES1: "14", libges1: "C" };
+    const o1 = row(Object.assign({ MTDIAG: "574", ANNEREFDIAG: "2010" }, old), pdfOld);
+    assert.deepStrictEqual([o1["Coût min (€/an)"], o1["Coût max (€/an)"], o1["Date d'indexation des prix"], o1["DPE analyse"]], ["574", "574", "01/01/2010", "OK"]);
+    const o2 = row(old, pdfOld);
+    assert.deepStrictEqual([o2["Coût min (€/an)"], o2["Coût max (€/an)"], o2["Date d'indexation des prix"], o2["DPE analyse"], o2["Remarques DPE"]],
+      ["490", "490", "15/08/2006", "À VÉRIFIER", "coûts vides dans Intralia : frais annuels d'énergie du PDF (montant unique, abonnement inclus → min = max)"]);
+    const o3 = row(old, Object.assign({}, pdfOld, { coutMin: null, coutMax: null, coutUnique: false }));
+    assert.deepStrictEqual([o3["Coût min (€/an)"], o3["Date d'indexation des prix"], o3["DPE analyse"], o3["Remarques DPE"]], ["", "", "OK", ""]);
+    const o4 = row({ DATEDIAG: "05/09/2022", DPE1: "384", libdpe1: "F", GES1: "20", libges1: "D", ANNEREFDIAG: "2021" },
+      Object.assign({}, pdfOld, { etabli: { y: 2022, m: 9, d: 5 }, coutMin: 1007, coutMax: 1007, ademe: "2269E1234567A" }));
+    assert.deepStrictEqual([o4["Coût min (€/an)"], o4["Coût max (€/an)"], o4["Date d'indexation des prix"]], ["1007", "1007", "01/01/2021"]);
+    assert.ok(!/non renseigné/.test(o4["Remarques DPE"]) && /frais annuels/.test(o4["Remarques DPE"]), o4["Remarques DPE"]);
     // Sans DPE / erreurs.
     const none = anv(await intra.intraProcessRow(adapter(), params("OPERA", "9", { analyze: true })));
     assert.deepStrictEqual([none["DPE analyse"], none["Remarques DPE"]], ["Pas de PDF", "AUCUN_DPE_GED — 0 document(s) GED, aucun DPE"]);

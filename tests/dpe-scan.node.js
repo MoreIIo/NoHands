@@ -78,6 +78,19 @@ function unitTests() {
   assert.strictEqual(ds.dsParseNum("1.029"), 1029);
   const rec = ds.dsExtract({ dpeText: ds.dsNorm("ce logement emet 860 kg\npar anentre et1430 € 1980 €\nsurface habitable : 50 m²"), allText: "" });
   assert.deepStrictEqual([rec.coutMin, rec.coutMax], [1430, 1980]);
+  // Tableau « Frais annuels d'énergie » (anciens DPE, DPE hors habitation) : montant unique, abonnement exclu
+  const fa = (t) => ds.dsFraisAnnuels(ds.dsNorm(t));
+  assert.strictEqual(fa("Moyenne annuelle des consommations Consommations en énergies finales Consommations en énergie primaire Frais annuels d’énergie\n" +
+    "Chauffage et Eau chaude sanitaire Facture Electrique kWh: 7980 Electricité : 7 980 kWhEF 20 588 kWhEP 913 €\n" +
+    "CONSOMMATION D'ENERGIE POUR LES USAGES RECENSÉS Electricité : 7 980 kWhEF 20 588 kWhEP 1 007 € (abonnement de 94 € inclus)"), 1007);
+  assert.strictEqual(fa("consommations en energie frais annuels d'energie (€\nfinales primaire ttc)\nchauffage electricite : 2705 6979 245 €\n" +
+    "eau chaude sanitaire\nelectricite : 1537 3966 139 €\nclimatisation - 0 0 €\nconsommation\n490 €\nd'energie pour les   4242 10945\n" +
+    "(dont abonnement : 106 €)\nusages recenses\nconsommations energetiques"), 490);
+  assert.strictEqual(fa("frais annuels d'energie\nconsommation d'energie pour les usages recenses 9 500,00 16 588,00 1 120,50 €"), 1121);
+  assert.strictEqual(fa("frais annuels d’énergie (fourchette d’estimation*)\nénergie totale pour les usages recensés : 12 000 kWh\nentre 1230 € et 1700 € par an"), null);
+  assert.strictEqual(fa("consommation d'energie pour les usages recenses 1 007 €"), null, "sans le tableau « frais annuels » : rien");
+  const ro = ds.dsExtract({ dpeText: ds.dsNorm("Consommation conventionnelle : 274 kWh ep/m².an\nFrais annuels d'énergie\nCONSOMMATION D'ÉNERGIE POUR LES USAGES RECENSÉS 4242 10945 490 € (dont abonnement : 106 €)"), allText: "" });
+  assert.deepStrictEqual([ro.generation, ro.coutMin, ro.coutMax, ro.coutUnique], ["ancien", 490, 490, true]);
   // Étiquette lue par OCR
   const p = ds.dsLabelPairsFromText("208 |19*\nkkwh/m/an |kgco2/m°/an");
   assert.deepStrictEqual([p[0].ep, p[0].ges], [208, 19]);
@@ -152,9 +165,9 @@ function unitTests() {
   assert.deepStrictEqual([g(C, "Établi le"), g(C, "Valable jusqu'au"), g(C, "Énergie primaire (kWh/m²/an)"), g(C, "GES (kg CO2/m²/an)"),
     g(C, "Classe énergie"), g(C, "Classe GES"), g(C, "N° FU"), g(C, "N° ADEME")],
   ["12/05/2014", "11/05/2024", "318,99", "74,64", "E", "F", "0394076x", "1475V1001234X"]);
-  // DPE d'avant 07/2021 : pas d'estimation dans SIGEO → coûts et date des prix non écrits
-  assert.deepStrictEqual([g(C, "Coût min (€/an)"), g(C, "Coût max (€/an)")], ["", ""]);
-  assert.ok(!/coûts|montant annuel|indexation/.test(g(C, "Remarques DPE")), g(C, "Remarques DPE"));
+  // DPE d'avant 07/2021 : montant unique « frais annuels » (1 120,50 €) → min = max, arrondi à l'euro
+  assert.deepStrictEqual([g(C, "Coût min (€/an)"), g(C, "Coût max (€/an)")], ["1121", "1121"]);
+  assert.ok(/montant unique « frais annuels d'énergie »/.test(g(C, "Remarques DPE")), g(C, "Remarques DPE"));
   assert.ok(/validité légale jusqu'au 31\/12\/2022/.test(g(C, "Remarques DPE")));
   // Fournisseur inconnu
   const E = "IM0393667_5_DPE_2023-02-02.pdf";

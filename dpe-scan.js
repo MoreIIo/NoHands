@@ -584,7 +584,7 @@ function dsNewRecord() {
   return {
     generation: null, nonOfficiel: false, societe: "", diagnostiqueur: "", certification: "", adresse: "", zone: "",
     etabli: null, valable: null, epM2: null, epTotal: null, lettreEp: "", gesM2: null, gesTotal: null, lettreGes: "",
-    coutMin: null, coutMax: null, prixRef: null, ademe: "", surface: null, efM2: null, efTotal: null,
+    coutMin: null, coutMax: null, coutUnique: false, prixRef: null, ademe: "", surface: null, efM2: null, efTotal: null,
     remarques: [], notes: [], erreur: ""
   };
 }
@@ -592,6 +592,49 @@ function dsNewRecord() {
 // Fourchette de coûts plausible (le max d'un DPE vaut ~1,3 à 1,6 × le min) :
 // écarte les montants abîmés par l'OCR (« entre z 080 € et 1 470 € »).
 function dsCostOk(a, b) { return a !== null && b !== null && a >= 10 && a <= b && b <= a * 2.2 && b < 100000; }
+
+// Ancien tableau « Frais annuels d'énergie » (DPE 6.A d'avant 07/2021, DPE
+// tertiaires/hors habitation encore établis sur ce modèle) : un seul montant
+// TTC par an sur la ligne « Consommation d'énergie pour les usages recensés »
+// (abonnement inclus), pas de fourchette min/max.
+//   « …usages recensés  Electricité : 7 980 kWhEF  20 588 kWhEP  1 007 € (abonnement de 94 € inclus) »
+//   « consommation \n 490 € \n d'énergie pour les 4242 10945 \n (dont abonnement : 106 €) \n usages recensés »
+// Renvoie le montant arrondi à l'euro (SIGEO n'accepte pas de décimales), ou null.
+const DS_RE_FRAIS_ANCHOR = /d.?\s*energies?\s*pour\s*les(?:\s*usages)?/g;
+const DS_RE_FRAIS_AMOUNT = /(?<![\d.,])(\d{1,3}(?:[ .]\d{3})+|\d{1,6})(?:,(\d{1,2}))?\s*(?:€|¢|eur\b|euros?\b)/g;
+function dsFraisAnnuels(text) {
+  const t = String(text || "");
+  const head = t.search(/frais\s*annuels/);
+  if (head < 0) return null;
+  const re = DS_RE_FRAIS_ANCHOR;
+  re.lastIndex = head;
+  let m;
+  while ((m = re.exec(t))) {
+    // Début : le mot « consommation » qui précède (le montant peut être placé
+    // entre « consommation » et « d'énergie pour les » dans le flux PDF).
+    const before = t.slice(Math.max(0, m.index - 60), m.index);
+    const kc = before.lastIndexOf("consommation");
+    const start = kc >= 0 ? m.index - before.length + kc : m.index;
+    let win = t.slice(start, m.index + 260);
+    const stop = win.slice(m.index - start + m[0].length).search(/consommations?\s*(?:conventionnelle|energetiques)|emissions?\s*de\s*gaz|estimation\s*des\s*emissions|\n\s*\n\s*\n/);
+    if (stop >= 0) win = win.slice(0, m.index - start + m[0].length + stop);
+    if (/entre\s*\d/.test(win)) continue; // fourchette du DPE 2021 : traitée ailleurs
+    let best = null;
+    const ra = DS_RE_FRAIS_AMOUNT;
+    ra.lastIndex = 0;
+    let a;
+    while ((a = ra.exec(win))) {
+      if (/abonnement[^0-9]{0,20}$/.test(win.slice(Math.max(0, a.index - 30), a.index))) continue;
+      const v = dsParseNum(a[1] + (a[2] ? "," + a[2] : ""));
+      // Hors plage : souvent un nombre voisin collé au montant (« 10 945 490 € ») →
+      // on repart du chiffre suivant pour retrouver le montant seul.
+      if (v === null || v < 10 || v >= 100000) { ra.lastIndex = a.index + 1; continue; }
+      if (best === null || v > best) best = v; // le total est ≥ à chaque ligne
+    }
+    if (best !== null) return Math.round(best);
+  }
+  return null;
+}
 
 // src : { dpeText, dpeRaw, dpeOcrText, dpeOcrRaw, dpeOcrWords, dpeOcred, totalsText, allText, allRaw }
 function dsExtract(src, rec = dsNewRecord()) {
@@ -707,10 +750,21 @@ function dsExtract(src, rec = dsNewRecord()) {
       rec.efTotal = dsParseNum(m[1]);
       rec.epTotal = dsParseNum(m[2]);
       const cost = dsParseNum(m[3]);
-      rec.coutMin = cost; rec.coutMax = cost;
+      if (cost !== null) { rec.coutMin = Math.round(cost); rec.coutMax = rec.coutMin; rec.coutUnique = true; }
       break;
     }
   }
+  // Tableau « Frais annuels d'énergie » (montant unique) : anciens DPE dont les
+  // montants n'ont pas de décimales, DPE hors habitation établis après 07/2021.
+  if (rec.coutMin === null) {
+    for (const t of [src.dpeText, src.dpeOcrText, src.totalsText, all].filter(Boolean)) {
+      const v = dsFraisAnnuels(t);
+      if (v === null) continue;
+      rec.coutMin = v; rec.coutMax = v; rec.coutUnique = true;
+      break;
+    }
+  }
+  if (rec.coutUnique) rec.notes.push("coûts : montant unique « frais annuels d'énergie » (abonnement inclus) → min = max");
 
   // --- Énergie primaire & GES par m² ---
   const ocrText = src.dpeOcrText || "";
@@ -1139,8 +1193,9 @@ function dsStatus(rec) {
   return dsMissing(rec).length || rec.remarques.length ? "À VÉRIFIER" : "OK";
 }
 
-// Estimations (coûts + date d'indexation) saisissables dans SIGEO seulement
-// pour un DPE établi depuis le 01/07/2021.
+// Estimations (coûts + date d'indexation) obligatoires pour un DPE établi
+// depuis le 01/07/2021 (remarque si absentes). Avant, les coûts sont écrits
+// seulement s'ils ont été trouvés (montant unique des « frais annuels »).
 function dsCoutsUtiles(rec) {
   return !!rec.etabli && dsDateCmp(rec.etabli, { y: 2021, m: 7, d: 1 }) >= 0;
 }
@@ -1155,14 +1210,13 @@ function dsRecordValues(rec, fileName) {
   const miss = dsMissing(rec);
   const rem = [...(miss.length ? [`non trouvé : ${miss.join(", ")}`] : []), ...rec.remarques, ...rec.notes];
   const sup = rec.supplier;
-  const couts = dsCoutsUtiles(rec);
   return [
     dsStatus(rec), fileName || "", sup ? sup.entry.code : "",
     // Pas de N° : « NC » (évaluation thermique / non émis ADEME) ou « non
     // trouvé » — compris tous deux par l'étape de saisie (pas de N° saisi).
     dsDateFr(rec.etabli), dsDateFr(rec.valable), rec.ademe || (rec.nonOfficiel ? "NC" : "non trouvé"),
     dsFmtNum(rec.epM2), rec.lettreEp || "", dsFmtNum(rec.gesM2), rec.lettreGes || "",
-    couts ? dsFmtNum(rec.coutMin) : "", couts ? dsFmtNum(rec.coutMax) : "",
+    dsFmtNum(rec.coutMin), dsFmtNum(rec.coutMax),
     rem.join(" ; ")
   ];
 }
@@ -1171,7 +1225,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     DS_COLS, DS_TYPE_DIAG, DS_DEFAULT_SUPPLIERS, dsCoutsUtiles, DS_FILE_RE, dsClean, dsNorm, dsKey, dsParseNum, dsFmtNum, dsDate, dsDateFr,
     dsPlusYearsMinusOneDay, dsFindAdemeStrict, dsRepairAdeme, dsLetters, dsParseTsv, dsWordsText, dsRowText,
-    dsLabelPairsFromText, dsLabelPairsSpatial, dsPageScore, dsExtract, dsNewRecord, dsParseSuppliers, dsFindSupplier,
+    dsLabelPairsFromText, dsLabelPairsSpatial, dsPageScore, dsFraisAnnuels, dsExtract, dsNewRecord, dsParseSuppliers, dsFindSupplier,
     dsLevenshtein, dsBaseName, dsNormIm, dsNormLot, dsParseFileName, dsAssignFiles, dsPdfPageText, dsReadPdf,
     dsAnalyzeDoc, dsMissing, dsStatus, dsRecordValues
   };

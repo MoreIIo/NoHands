@@ -470,17 +470,39 @@ function intraSaisieValues(res, ds) {
   v["Classe GES"] = pick("Classe GES", f.libges1, "classe GES");
   const dm = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v["Établi le"]);
   const isNew = !!dm && (+dm[3] > 2021 || (+dm[3] === 2021 && +dm[2] >= 7));
-  if (isNew) {
-    v["Coût min (€/an)"] = pick("Coût min (€/an)", num(f.MTDIAGMIN), "coût min");
-    v["Coût max (€/an)"] = pick("Coût max (€/an)", num(f.MTDIAGMAX), "coût max");
+  // Coûts : fourchette d'Intralia (MTDIAGMIN/MAX), sinon montant unique
+  // d'Intralia (MTDIAG, anciens DPE), sinon le PDF — fourchette « entre … et … »
+  // ou montant unique du tableau « Frais annuels d'énergie » (min = max).
+  // Obligatoires pour un DPE ≥ 01/07/2021 ; avant, écrits seulement si trouvés.
+  const cMin = num(f.MTDIAGMIN), cMax = num(f.MTDIAGMAX), cOne = num(f.MTDIAG);
+  const pdfUnique = !!(a && !a.error && a.coutUnique);
+  let coutSrc = "";
+  if (cMin || cMax) {
+    coutSrc = "intralia";
+    v["Coût min (€/an)"] = cMin || cMax;
+    v["Coût max (€/an)"] = cMax || cMin;
+    if (!cMin || !cMax) rem.push(`${!cMin ? "coût min" : "coût max"} vide dans Intralia : ${!cMin ? "coût max" : "coût min"} repris`);
+  } else if (cOne) {
+    coutSrc = "intralia";
+    v["Coût min (€/an)"] = cOne; v["Coût max (€/an)"] = cOne;
+    if (isNew) rem.push("coût unique d'Intralia (MTDIAG) : min = max");
+  } else if (pdf["Coût min (€/an)"] || pdf["Coût max (€/an)"]) {
+    coutSrc = "pdf";
+    v["Coût min (€/an)"] = pdf["Coût min (€/an)"] || pdf["Coût max (€/an)"];
+    v["Coût max (€/an)"] = pdf["Coût max (€/an)"] || pdf["Coût min (€/an)"];
+    rem.push(pdfUnique
+      ? "coûts vides dans Intralia : frais annuels d'énergie du PDF (montant unique, abonnement inclus → min = max)"
+      : "coûts vides dans Intralia : valeurs du PDF");
+  } else if (isNew) rem.push("coût min non renseigné", "coût max non renseigné");
+  if (isNew || coutSrc) {
     // Date d'indexation des prix : année de référence d'Intralia, sinon le PDF.
     const yr = String(f.ANNEREFDIAG ?? "").trim();
     const pr = a && !a.error && a.prixRef;
     if (/^(19|20)\d{2}$/.test(yr)) v["Date d'indexation des prix"] = `01/01/${yr}`;
     else if (pr) {
       v["Date d'indexation des prix"] = `${String(pr.d).padStart(2, "0")}/${String(pr.m).padStart(2, "0")}/${pr.y}`;
-      rem.push("année de référence vide dans Intralia : date d'indexation du PDF");
-    } else rem.push("date d'indexation des prix non renseignée");
+      if (isNew) rem.push("année de référence vide dans Intralia : date d'indexation du PDF");
+    } else if (isNew) rem.push("date d'indexation des prix non renseignée");
   }
   // Type de local (type du lot dans l'index Intralia).
   const tl = intraTypeLocal(res.lotType);

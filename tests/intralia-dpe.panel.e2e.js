@@ -265,14 +265,18 @@ const ROWS = [
     ["38", "http://sigeo.evoriel.net/popup.aspx/fr/sig_imm/diag_manage/393001/38/0", "habitation", "IM de la colonne « IM_format »"]);
   assert.deepStrictEqual([gx(3, "ID interne SIGEO"), gx(4, "ID interne SIGEO"), gx(12, "ID interne SIGEO"), gx(6, "ID interne SIGEO")], ["12", "5", "38", ""]);
   assert.deepStrictEqual([gx(5, "DPE analyse"), gx(5, "URL fiche DPE")], ["À VÉRIFIER", ""]);
-  assert.strictEqual(gx(5, "Remarques DPE"), "fiche SIGEO introuvable : lot 278 introuvable dans SIGEO — IM0393004 : Introuvable");
+  assert.strictEqual(gx(5, "Remarques DPE"), "coûts vides dans Intralia : frais annuels d'énergie du PDF (montant unique, abonnement inclus → min = max) ; " +
+    "fiche SIGEO introuvable : lot 278 introuvable dans SIGEO — IM0393004 : Introuvable");
+  // Ancien DPE sans coût dans Intralia : montant unique « frais annuels d'énergie » du PDF → min = max
+  assert.deepStrictEqual([gx(5, "Coût min (€/an)"), gx(5, "Coût max (€/an)")], ["574", "574"]);
   assert.ok(/Ligne 2 : SIGEO IM0393001 lot id 38 .*IM de la colonne → http:\/\/sigeo\.evoriel\.net\/popup\.aspx\/fr\/sig_imm\/diag_manage\/393001\/38\/0/.test(out.log), out.log);
   assert.ok(/Ligne 12 : SIGEO IM0393001 lot id 38 .*\[cache\]/.test(out.log), out.log);
   assert.strictEqual(H2.indexOf("Fournisseur DPE"), H2.indexOf("N° FU") + 1);
   assert.deepStrictEqual(ga(2).slice(0, 11), ["OK", "PARC FLEURI LE CONCERTO 1_lot0732_2013-07-17.pdf", "0528825", "EXPERT IMMOBILIER", "1259V1000732X", "05/06/2012", "04/06/2022", "105", "C", "25", "D"]);
   assert.deepStrictEqual(ga(3).slice(0, 5), ["À VÉRIFIER", "Cour Saint-Hubert_lot130_2011-08-24.pdf", "0394076x", "DIAG 75", "1159V1000130B"]);
   assert.deepStrictEqual(ga(4).slice(0, 5), ["À VÉRIFIER", "RESIDENCE BEAUSEJOUR_lot543_2007-09-25.pdf", "", "DIAGNOSTICS DU NORD", "non trouvé"]);
-  assert.strictEqual(ga(4)[11], "fournisseur absent de la liste : « DIAGNOSTICS DU NORD »", "pas de remarque ADEME pour un DPE ancien");
+  assert.strictEqual(ga(4)[11], "coûts vides dans Intralia : frais annuels d'énergie du PDF (montant unique, abonnement inclus → min = max) ; " +
+    "fournisseur absent de la liste : « DIAGNOSTICS DU NORD »", "pas de remarque ADEME pour un DPE ancien");
   assert.strictEqual(ga(5)[7], "180,5", "énergie primaire d'Intralia (le PDF dit 180)");
   assert.strictEqual(ga(6)[11], "AUCUN_DPE_GED — 0 document(s) GED, aucun DPE");
   assert.deepStrictEqual(ga(5).slice(2, 5), ["0448957", "ACADE", "1559V1000278C"]);
@@ -326,7 +330,9 @@ const ROWS = [
   await panel.fill("#endRow", "13");
   out = await run();
   console.log("--- journal (vérification) ---\n" + out.log);
-  assert.deepStrictEqual(ga(13).slice(0, 5), ["OK", "LES TILLEULS_lot12_2016-02-02.pdf", "0048730", "SOCOTECH", "1659V1000012D"], "analyse du DPE vérifié");
+  // À VÉRIFIER : coûts absents d'Intralia, repris des frais annuels du PDF
+  assert.deepStrictEqual(ga(13).slice(0, 5), ["À VÉRIFIER", "LES TILLEULS_lot12_2016-02-02.pdf", "0048730", "SOCOTECH", "1659V1000012D"], "analyse du DPE vérifié");
+  assert.ok(/^coûts vides dans Intralia : frais annuels d'énergie du PDF/.test(ga(13)[11]), ga(13)[11]);
   assert.ok(/« DPE 2021\.pdf » \(2021-03-01\) écarté : « performance énergétique » absent de la page 1 \(texte du PDF\)/.test(out.log), out.log);
   assert.ok(/Ligne 13 : ✓ « dpe\.pdf » vérifié \(texte du PDF\)/.test(out.log), out.log);
   await panel.uncheck("#intraVerify");
